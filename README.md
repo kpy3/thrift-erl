@@ -162,7 +162,10 @@ sides run on the same ThriftTest payloads.
 | Insanity          | decode | 6.2 K/s  | 2.5 K/s | 2.4x |
 
 Run it yourself:
-`rebar3 ct --suite=apps/thrift_generator/test/thrift_perf_SUITE.erl`.
+`rebar3 ct --suite=apps/thrift_generator/test/thrift_perf_SUITE.erl --verbose`.
+Without `--verbose`, `rebar3 ct` swallows the Common Test console
+printouts; with it, every case prints its throughput ± stddev and
+speedup to the terminal.
 
 ## License
 
