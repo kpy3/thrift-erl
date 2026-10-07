@@ -127,6 +127,11 @@ types_forms(Mod, Ctx) ->
     header(TypesMod, types_doc(Mod)) ++
         Records ++
         [
+            %% The types module declares every record for consumers;
+            %% introspection forms reference them by name, not usage.
+            erl_syntax:attribute(erl_syntax:atom(compile), [
+                erl_syntax:abstract([nowarn_unused_record])
+            ]),
             export_form([
                 {struct_info, 1},
                 {enum_info, 1},
@@ -493,10 +498,81 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
             )
         ),
     %% Callback specs mention record types for struct-typed params, so
-    %% the handler declares the same records as the types module.
-    Records = [record_form(S) || S <- Mod#tg_module.structs, record_mode(S)],
+    %% the handler declares the records of every struct the service's
+    %% signatures can reach (transitively through struct fields) — and
+    %% only those, so generated handlers compile warning-free even when
+    %% the IDL declares many unused structs.
+    Needed = service_struct_names(Svc, Mod),
+    Records = [
+        record_form(S)
+     || S <- Mod#tg_module.structs,
+        record_mode(S),
+        lists:member(S#tg_struct.name, Needed)
+    ],
     Callbacks = lists:append([callback_form(F, Ctx) || F <- Svc#tg_service.functions]),
-    header(HandlerMod, Doc) ++ Records ++ Callbacks.
+    header(HandlerMod, Doc) ++
+        [
+            %% Records here appear only in -callback spec types, which
+            %% the compiler does not count as usage.
+            erl_syntax:attribute(erl_syntax:atom(compile), [
+                erl_syntax:abstract([nowarn_unused_record])
+            ])
+        ] ++
+        Records ++
+        Callbacks.
+
+%% Names of the module's struct-mode definitions reachable from the
+%% service's parameter, reply and throws types.
+-spec service_struct_names(#tg_service{}, #tg_module{}) -> [binary()].
+service_struct_names(Svc, Mod) ->
+    ByName = #{S#tg_struct.name => S || S <- Mod#tg_module.structs},
+    Seeds =
+        lists:usort([
+            Name
+         || F <- Svc#tg_service.functions,
+            T <- function_types(F),
+            Name <- ref_names(T),
+            is_map_key(Name, ByName)
+        ]),
+    expand_structs(Seeds, ByName, #{}).
+
+-spec function_types(#tg_function{}) -> [thrift_type()].
+function_types(F) ->
+    [T || P <- F#tg_function.params, T <- [P#tg_field.type]] ++
+        case F#tg_function.return_type of
+            void -> [];
+            T -> [T]
+        end ++
+        [P#tg_field.type || P <- F#tg_function.throws].
+
+-spec ref_names(thrift_type()) -> [binary()].
+ref_names({ref, Name, _}) ->
+    [Name];
+ref_names({list, T, _}) ->
+    ref_names(T);
+ref_names({set, T, _}) ->
+    ref_names(T);
+ref_names({map, K, V, _}) ->
+    ref_names(K) ++ ref_names(V);
+ref_names(_) ->
+    [].
+
+-spec expand_structs([binary()], #{binary() => #tg_struct{}}, #{binary() => true}) -> [binary()].
+expand_structs([], _ByName, Seen) ->
+    maps:keys(Seen);
+expand_structs([Name | Rest], ByName, Seen) ->
+    case is_map_key(Name, Seen) of
+        true ->
+            expand_structs(Rest, ByName, Seen);
+        false ->
+            FieldRefs = [
+                ref_names(F#tg_field.type)
+             || {_, S} <- maps:to_list(ByName),
+                S#tg_struct.name =:= Name,
+                F <- S#tg_struct.fields
+            ],
+            expand_structs(lists:append(FieldRefs) ++ Rest, ByName, Seen#{Name => true})
+    end.
 
 -spec callback_form(#tg_function{}, #ctx{}) -> erl_syntax:forms().
 callback_form(F, Ctx) ->

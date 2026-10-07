@@ -26,12 +26,47 @@ because include resolution needs the directory.
 """.
 
 -export([tokens/1, ast/1, parse_file/1, parse_string/1]).
+-export([generate/3]).
 
 -include("thrift_generator.hrl").
 
 -type token() :: {atom(), pos_integer()} | {atom(), pos_integer(), term()}.
 
 -export_type([token/0]).
+
+-export_type([generate_opts/0]).
+
+-type generate_opts() :: #{}.
+
+-doc """
+Full pipeline: load (with includes), semantic analysis, code emission,
+write to `OutDir`.
+
+Writes one `<module>.erl` per generated module (types, and
+client/server/handler per service). `Opts` is reserved for future
+tuning; pass `#{}`. Returns the generated modules with their paths.
+""".
+-spec generate(file:filename_all(), file:filename_all(), generate_opts()) ->
+    {ok, [#{module := module(), path := file:filename_all()}]} | {error, term()}.
+generate(ThriftFile, OutDir, _Opts) ->
+    maybe
+        {ok, Loaded} ?= thrift_generator_loader:load(ThriftFile),
+        {ok, Model} ?= thrift_generator_semantic:analyze(Loaded),
+        ok ?= filelib:ensure_dir(filename:join(OutDir, "x")),
+        write_all(thrift_generator_emitter:sources(Model), OutDir, [])
+    else
+        {error, Reason} -> {error, Reason};
+        Other -> {error, Other}
+    end.
+
+write_all([{Module, Source} | Rest], OutDir, Acc) ->
+    Path = filename:join(OutDir, atom_to_list(Module) ++ ".erl"),
+    case file:write_file(Path, Source) of
+        ok -> write_all(Rest, OutDir, [#{module => Module, path => Path} | Acc]);
+        {error, Reason} -> {error, {write_error, Path, Reason}}
+    end;
+write_all([], _OutDir, Acc) ->
+    {ok, lists:reverse(Acc)}.
 
 -doc """
 Reads and lexes an IDL file, appending a `__file__` marker with the
