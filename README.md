@@ -150,16 +150,19 @@ Thrift 0.25.0 Erlang runtime by `thrift_perf_SUITE`
 (erlperf, continuous mode, average of three 500 ms samples ± sample
 stddev, single process). Reference numbers include a fresh membuffer
 transport and protocol per operation, which its API requires; both
-sides run on the same ThriftTest payloads.
+sides run on the same ThriftTest payloads. Our codec compiles type
+descriptors once — referenced structs in a shared `persistent_term`
+cache, inline descriptors in a per-process memo — so nested schemas
+are never re-resolved per wire occurrence.
 
 | case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (42 B)     | encode | 2.80 M/s | 460 K/s | 6.1x |
-| Xtruct            | decode | 567 K/s  | 222 K/s | 2.5x |
-| Xtruct2 (51 B)    | encode | 1.29 M/s | 267 K/s | 4.8x |
-| Xtruct2           | decode | 360 K/s  | 115 K/s | 3.1x |
-| Insanity (3.2 KB) | encode | 16.1 K/s | 4.3 K/s | 3.7x |
-| Insanity          | decode | 6.2 K/s  | 2.5 K/s | 2.4x |
+| Xtruct (42 B)     | encode | 2.50 M/s | 479 K/s | 5.2x |
+| Xtruct            | decode | 1.05 M/s | 232 K/s | 4.5x |
+| Xtruct2 (51 B)    | encode | 1.53 M/s | 333 K/s | 4.6x |
+| Xtruct2           | decode | 666 K/s  | 125 K/s | 5.3x |
+| Insanity (3.2 KB) | encode | 18.9 K/s | 4.6 K/s | 4.1x |
+| Insanity          | decode | 9.3 K/s  | 2.7 K/s | 3.5x |
 
 Run it yourself:
 `rebar3 ct --suite=apps/thrift_generator/test/thrift_perf_SUITE.erl --verbose`.

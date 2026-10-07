@@ -29,6 +29,17 @@ Decoding distinguishes `more` (the binary is a truncated but otherwise
 valid encoding — read more bytes and retry) from `{error, _}` (the bytes
 cannot be a valid encoding). That is what lets the buffered transport
 parse incrementally off a socket.
+
+Before encoding or decoding, a descriptor is compiled: wire type bytes
+are precomputed, struct fields are indexed by id in a map, and the
+required fields are separated out. `{ref, Module, Name}` schemas are
+compiled once and cached in `persistent_term` under their names, so
+resolving a nested struct is a constant-time lookup. Inline
+`{Kind, Fields}` descriptors (such as the `function_info/2` params
+structs) are memoized per process under exact equality — generated
+descriptors are literals, so the memo hit is a pointer comparison. The
+caches assume generated types modules are never hot-swapped between
+incompatible versions.
 """.
 
 -export([
@@ -112,54 +123,55 @@ parse incrementally off a socket.
     | more
     | {error, term()}.
 
+%% Compiled descriptors: the same schema with wire type bytes
+%% precomputed. Every tag carries its wire byte in position 2; list,
+%% set and map additionally carry the element wire bytes so container
+%% headers need no type lookup.
+
+-type c_type() ::
+    {c_base, non_neg_integer(), base_type()}
+    | {c_enum, non_neg_integer(), enum_desc()}
+    | {c_list, non_neg_integer(), non_neg_integer(), c_type()}
+    | {c_set, non_neg_integer(), non_neg_integer(), c_type()}
+    | {c_map, non_neg_integer(), non_neg_integer(), non_neg_integer(), c_type(), c_type()}
+    | {c_struct, non_neg_integer(), c_struct()}
+    | {c_ref, non_neg_integer(), module(), binary()}.
+
+%% A compiled struct: fields in declaration order for encoding, an id
+%% index (with the wire byte folded in) for decoding, and the required
+%% subset for both checks.
+-type c_struct() :: #{
+    kind := struct | union | exception,
+    fields := [{Id :: integer(), Wire :: non_neg_integer(), Name :: binary(), c_type()}],
+    by_id := #{integer() => {Wire :: non_neg_integer(), c_type(), Name :: binary()}},
+    required := #{integer() => Name :: binary()},
+    required_names := [binary()]
+}.
+
 %%--------------------------------------------------------------------
 %% Values
 %%--------------------------------------------------------------------
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
 -spec encode(type_desc(), term()) -> {ok, iodata()} | {error, term()}.
-encode({base, bool}, true) ->
-    {ok, <<1>>};
-encode({base, bool}, false) ->
-    {ok, <<0>>};
-encode({base, i8}, V) when is_integer(V), V >= -128, V =< 127 ->
-    {ok, <<V:8/big-signed>>};
-encode({base, i16}, V) when is_integer(V), V >= -32768, V =< 32767 ->
-    {ok, <<V:16/big-signed>>};
-encode({base, i32}, V) when is_integer(V), V >= -2147483648, V =< 2147483647 ->
-    {ok, <<V:32/big-signed>>};
-encode({base, i64}, V) when is_integer(V), V >= -9223372036854775808, V =< 9223372036854775807 ->
-    {ok, <<V:64/big-signed>>};
-encode({base, double}, V) when is_number(V) ->
-    {ok, <<(float(V)):64/big-float>>};
-encode({base, uuid}, V) when is_binary(V), byte_size(V) =:= 16 ->
-    {ok, V};
-encode({base, string}, V) when is_binary(V) ->
-    {ok, [int32(byte_size(V)), V]};
-encode({base, binary}, V) when is_binary(V) ->
-    {ok, [int32(byte_size(V)), V]};
-encode({enum, Desc}, V) ->
-    case enum_to_int(Desc, V) of
-        {ok, Int} -> encode({base, i32}, Int);
-        error -> {error, {encode, {unknown_enum_value, V}}}
-    end;
-encode({list, Elem}, Values) when is_list(Values) ->
-    encode_sequence(Elem, Values);
-encode({set, Elem}, Values) when is_list(Values) ->
-    encode_sequence(Elem, Values);
-encode({map, Key, Val}, Value) when is_map(Value) ->
-    encode_map(Key, Val, Value);
 encode({struct, {ref, Module, Name}} = Ref, Value) when is_map(Value) ->
-    case Module:struct_info(Name) of
-        {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
-            encode({struct, {Kind, Fields}}, Value);
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            encode_struct_c(Compiled, Value);
         error ->
             {error, {encode, {unknown_struct, Ref}}}
     end;
-encode({struct, Desc}, Value) when is_map(Value) ->
-    encode_struct(Desc, Value);
-encode(_Type, Value) ->
-    {error, {encode, {value_does_not_match_type, Value}}}.
+encode({struct, {Kind, Fields}} = Desc, Value) when is_atom(Kind), is_list(Fields), is_map(Value) ->
+    encode_struct_c(memo_compiled(Desc, Kind, Fields), Value);
+encode({struct, _}, Value) ->
+    {error, {encode, {value_does_not_match_type, Value}}};
+encode(TypeDesc, Value) ->
+    case compile_type(TypeDesc) of
+        error ->
+            {error, {encode, {value_does_not_match_type, Value}}};
+        CType ->
+            encode_c(CType, Value)
+    end.
 
 -doc """
 Decodes a value of `Type` from the front of `Binary`.
@@ -168,26 +180,85 @@ Returns `{ok, Value, Rest}`, `more` when `Binary` is a truncated valid
 encoding, or a tagged error.
 """.
 -spec decode(type_desc(), binary()) -> decode_result(term()).
-decode({base, bool}, <<1, Rest/binary>>) ->
+decode({struct, {ref, Module, Name}}, Bin) when is_binary(Bin) ->
+    decode_ref_struct(Module, Name, Bin);
+decode({struct, {Kind, Fields}} = Desc, Bin) when is_atom(Kind), is_list(Fields), is_binary(Bin) ->
+    decode_struct_c(memo_compiled(Desc, Kind, Fields), Bin);
+decode(TypeDesc, Bin) when is_binary(Bin) ->
+    case compile_type(TypeDesc) of
+        error ->
+            {error, {decode, bad_value}};
+        CType ->
+            decode_c(CType, Bin)
+    end.
+
+-spec encode_c(c_type(), term()) -> {ok, iodata()} | {error, term()}.
+encode_c({c_base, _W, bool}, true) ->
+    {ok, <<1>>};
+encode_c({c_base, _W, bool}, false) ->
+    {ok, <<0>>};
+encode_c({c_base, _W, i8}, V) when is_integer(V), V >= -128, V =< 127 ->
+    {ok, <<V:8/big-signed>>};
+encode_c({c_base, _W, i16}, V) when is_integer(V), V >= -32768, V =< 32767 ->
+    {ok, <<V:16/big-signed>>};
+encode_c({c_base, _W, i32}, V) when is_integer(V), V >= -2147483648, V =< 2147483647 ->
+    {ok, <<V:32/big-signed>>};
+encode_c({c_base, _W, i64}, V) when
+    is_integer(V), V >= -9223372036854775808, V =< 9223372036854775807
+->
+    {ok, <<V:64/big-signed>>};
+encode_c({c_base, _W, double}, V) when is_number(V) ->
+    {ok, <<(float(V)):64/big-float>>};
+encode_c({c_base, _W, uuid}, V) when is_binary(V), byte_size(V) =:= 16 ->
+    {ok, V};
+encode_c({c_base, _W, string}, V) when is_binary(V) ->
+    {ok, [int32(byte_size(V)), V]};
+encode_c({c_base, _W, binary}, V) when is_binary(V) ->
+    {ok, [int32(byte_size(V)), V]};
+encode_c({c_enum, _W, Desc}, V) ->
+    case enum_to_int(Desc, V) of
+        {ok, Int} -> {ok, int32(Int)};
+        error -> {error, {encode, {unknown_enum_value, V}}}
+    end;
+encode_c({c_list, _W, ElemW, CElem}, Values) when is_list(Values) ->
+    encode_sequence_c(ElemW, CElem, Values);
+encode_c({c_set, _W, ElemW, CElem}, Values) when is_list(Values) ->
+    encode_sequence_c(ElemW, CElem, Values);
+encode_c({c_map, _W, KeyW, ValW, CKey, CVal}, Value) when is_map(Value) ->
+    encode_map_c(KeyW, ValW, CKey, CVal, Value);
+encode_c({c_struct, _W, Compiled}, Value) when is_map(Value) ->
+    encode_struct_c(Compiled, Value);
+encode_c({c_ref, _W, Module, Name} = CRef, Value) when is_map(Value) ->
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            encode_struct_c(Compiled, Value);
+        error ->
+            {error, {encode, {unknown_struct, c_ref_to_desc(CRef)}}}
+    end;
+encode_c(_Type, Value) ->
+    {error, {encode, {value_does_not_match_type, Value}}}.
+
+-spec decode_c(c_type(), binary()) -> decode_result(term()).
+decode_c({c_base, _W, bool}, <<1, Rest/binary>>) ->
     {ok, true, Rest};
-decode({base, bool}, <<0, Rest/binary>>) ->
+decode_c({c_base, _W, bool}, <<0, Rest/binary>>) ->
     {ok, false, Rest};
-decode({base, i8}, <<V:8/big-signed, Rest/binary>>) ->
+decode_c({c_base, _W, i8}, <<V:8/big-signed, Rest/binary>>) ->
     {ok, V, Rest};
-decode({base, i16}, <<V:16/big-signed, Rest/binary>>) ->
+decode_c({c_base, _W, i16}, <<V:16/big-signed, Rest/binary>>) ->
     {ok, V, Rest};
-decode({base, i32}, <<V:32/big-signed, Rest/binary>>) ->
+decode_c({c_base, _W, i32}, <<V:32/big-signed, Rest/binary>>) ->
     {ok, V, Rest};
-decode({base, i64}, <<V:64/big-signed, Rest/binary>>) ->
+decode_c({c_base, _W, i64}, <<V:64/big-signed, Rest/binary>>) ->
     {ok, V, Rest};
-decode({base, double}, <<V:64/big-float, Rest/binary>>) ->
+decode_c({c_base, _W, double}, <<V:64/big-float, Rest/binary>>) ->
     {ok, V, Rest};
-decode({base, uuid}, <<V:16/binary, Rest/binary>>) ->
+decode_c({c_base, _W, uuid}, <<V:16/binary, Rest/binary>>) ->
     {ok, V, Rest};
-decode({base, S}, Bin) when S =:= string; S =:= binary ->
+decode_c({c_base, _W, S}, Bin) when S =:= string; S =:= binary ->
     decode_string(Bin);
-decode({enum, Desc}, Bin) ->
-    case decode({base, i32}, Bin) of
+decode_c({c_enum, _W, Desc}, Bin) ->
+    case decode_i32(Bin) of
         {ok, Int, Rest} ->
             case enum_from_int(Desc, Int) of
                 {ok, Atom} -> {ok, Atom, Rest};
@@ -196,29 +267,24 @@ decode({enum, Desc}, Bin) ->
         Other ->
             Other
     end;
-decode({list, Elem}, Bin) ->
-    decode_sequence(Elem, Bin);
-decode({set, Elem}, Bin) ->
-    decode_sequence(Elem, Bin);
-decode({map, Key, Val}, Bin) ->
-    decode_map(Key, Val, Bin);
-decode({struct, {ref, Module, Name}}, Bin) ->
-    case Module:struct_info(Name) of
-        {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
-            decode({struct, {Kind, Fields}}, Bin);
-        error ->
-            {error, {decode, {unknown_struct, {Module, Name}}}}
-    end;
-decode({struct, Desc}, Bin) ->
-    decode_struct(Desc, Bin);
+decode_c({c_list, _W, ElemW, CElem}, Bin) ->
+    decode_sequence_c(ElemW, CElem, Bin);
+decode_c({c_set, _W, ElemW, CElem}, Bin) ->
+    decode_sequence_c(ElemW, CElem, Bin);
+decode_c({c_map, _W, KeyW, ValW, CKey, CVal}, Bin) ->
+    decode_map_c(KeyW, ValW, CKey, CVal, Bin);
+decode_c({c_struct, _W, Compiled}, Bin) ->
+    decode_struct_c(Compiled, Bin);
+decode_c({c_ref, _W, Module, Name}, Bin) ->
+    decode_ref_struct(Module, Name, Bin);
 %% Short fixed-size inputs ask for more bytes; anything else that fell
 %% through is a value the declared type cannot produce.
-decode({base, B}, Bin) when is_binary(Bin) ->
+decode_c({c_base, _W, B}, Bin) when is_binary(Bin) ->
     case byte_size(Bin) >= base_size(B) of
         true -> {error, {decode, {bad_value_for_base_type, B}}};
         false -> more
     end;
-decode(_Type, Bin) when is_binary(Bin) ->
+decode_c(_Type, Bin) when is_binary(Bin) ->
     {error, {decode, bad_value}}.
 
 %%--------------------------------------------------------------------
@@ -336,196 +402,345 @@ decode_application_exception(Bin) ->
     end.
 
 %%--------------------------------------------------------------------
+%% Descriptor compilation
+%%--------------------------------------------------------------------
+
+-spec compile_type(type_desc()) -> c_type() | error.
+compile_type({base, B}) ->
+    case base_wire(B) of
+        error -> error;
+        W -> {c_base, W, B}
+    end;
+compile_type({enum, Desc}) ->
+    {c_enum, ?I32, Desc};
+compile_type({list, T}) ->
+    case compile_type(T) of
+        error -> error;
+        CT -> {c_list, ?LIST, c_wire(CT), CT}
+    end;
+compile_type({set, T}) ->
+    case compile_type(T) of
+        error -> error;
+        CT -> {c_set, ?SET, c_wire(CT), CT}
+    end;
+compile_type({map, K, V}) ->
+    case {compile_type(K), compile_type(V)} of
+        {error, _} -> error;
+        {_, error} -> error;
+        {CK, CV} -> {c_map, ?MAP, c_wire(CK), c_wire(CV), CK, CV}
+    end;
+compile_type({struct, {ref, Module, Name}}) ->
+    {c_ref, ?STRUCT, Module, Name};
+compile_type({struct, {Kind, Fields}}) when is_atom(Kind), is_list(Fields) ->
+    {c_struct, ?STRUCT, compile_struct(Kind, Fields)};
+compile_type(_) ->
+    error.
+
+-spec c_wire(c_type() | error) -> non_neg_integer().
+%% The `error` wire byte is unreachable on encode: a field whose type
+%% failed to compile errors in `encode_c/2` before any header is built,
+%% and on decode it only ever mismatches the observed wire byte.
+c_wire(error) -> 0;
+c_wire({c_base, W, _B}) -> W;
+c_wire({c_enum, W, _D}) -> W;
+c_wire({c_list, W, _EW, _E}) -> W;
+c_wire({c_set, W, _EW, _E}) -> W;
+c_wire({c_map, W, _KW, _VW, _K, _V}) -> W;
+c_wire({c_struct, W, _C}) -> W;
+c_wire({c_ref, W, _M, _N}) -> W.
+
+-spec compile_struct(struct | union | exception, [field_desc()]) -> c_struct().
+compile_struct(Kind, Fields) ->
+    Compiled = [{Id, compile_type(T), Name} || {Id, _R, T, Name, _D} <- Fields],
+    #{
+        kind => Kind,
+        fields => [{Id, c_wire(CT), Name, CT} || {Id, CT, Name} <- Compiled],
+        by_id => #{Id => {c_wire(CT), CT, Name} || {Id, CT, Name} <- Compiled},
+        required => #{Id => Name || {Id, required, _T, Name, _D} <- Fields},
+        %% Declaration order, so `missing_required_fields` lists names
+        %% the way the descriptor reads.
+        required_names => [Name || {_Id, required, _T, Name, _D} <- Fields]
+    }.
+
+%% Resolves a `{ref, Module, Name}` schema, compiling it on first use.
+%% The persistent_term cache is written once per schema; racing writers
+%% put equal values. Generated types modules are static per load, so no
+%% invalidation is needed — hot-swapping between incompatible versions
+%% is not a supported scenario (see the moduledoc).
+-spec resolve_struct(module(), binary()) -> {ok, c_struct()} | error.
+resolve_struct(Module, Name) ->
+    Key = {?MODULE, schema, Module, Name},
+    case persistent_term:get(Key, error) of
+        error ->
+            case Module:struct_info(Name) of
+                {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
+                    Compiled = compile_struct(Kind, Fields),
+                    persistent_term:put(Key, Compiled),
+                    {ok, Compiled};
+                error ->
+                    error
+            end;
+        Compiled ->
+            {ok, Compiled}
+    end.
+
+-spec decode_ref_struct(module(), binary(), binary()) -> decode_result(struct_value()).
+decode_ref_struct(Module, Name, Bin) ->
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            decode_struct_c(Compiled, Bin);
+        error ->
+            {error, {decode, {unknown_struct, {Module, Name}}}}
+    end.
+
+%% Compiles an inline `{Kind, Fields}` descriptor (like the params
+%% structs of `function_info/2`), memoized per process. Generated
+%% `service_info/0` descriptors are literals — the same object on every
+%% call — so the exact-equality scan short-circuits on pointer equality
+%% and a hit costs nanoseconds; a miss compiles and inserts at the head
+%% of a capped list, so pathological callers cannot grow the memo.
+-define(MEMO_KEY, {?MODULE, compiled_structs}).
+-define(MEMO_LIMIT, 8).
+
+-spec memo_compiled(type_desc(), struct | union | exception, [field_desc()]) -> c_struct().
+memo_compiled(Desc, Kind, Fields) ->
+    case erlang:get(?MEMO_KEY) of
+        undefined ->
+            Compiled = compile_struct(Kind, Fields),
+            erlang:put(?MEMO_KEY, [{Desc, Compiled}]),
+            Compiled;
+        Entries when is_list(Entries) ->
+            case lists:keyfind(Desc, 1, Entries) of
+                {_Desc, Compiled} ->
+                    Compiled;
+                false ->
+                    Compiled = compile_struct(Kind, Fields),
+                    erlang:put(?MEMO_KEY, lists:sublist([{Desc, Compiled} | Entries], ?MEMO_LIMIT)),
+                    Compiled
+            end;
+        _ ->
+            Compiled = compile_struct(Kind, Fields),
+            erlang:put(?MEMO_KEY, [{Desc, Compiled}]),
+            Compiled
+    end.
+
+-spec c_ref_to_desc(c_type()) -> type_desc().
+c_ref_to_desc({c_ref, _W, Module, Name}) ->
+    {struct, {ref, Module, Name}}.
+
+%%--------------------------------------------------------------------
 %% Structs
 %%--------------------------------------------------------------------
 
--spec encode_struct(struct_desc(), struct_value()) -> {ok, iodata()} | {error, term()}.
-encode_struct({Kind, Fields}, Map) ->
-    case check_present_fields(Kind, Fields, Map) of
+-spec encode_struct_c(c_struct(), struct_value()) -> {ok, iodata()} | {error, term()}.
+encode_struct_c(#{kind := Kind, fields := Fields, required_names := ReqNames}, Map) ->
+    case check_present_fields(Kind, ReqNames, Fields, Map) of
         ok ->
-            encode_fields(Fields, Map, []);
+            encode_fields_c(Fields, Map);
         {error, _} = Error ->
             Error
     end.
 
--spec encode_fields([field_desc()], struct_value(), [iodata()]) -> {ok, iodata()} | {error, term()}.
-encode_fields([], _Map, Acc) ->
-    {ok, [lists:reverse(Acc), ?STOP]};
-encode_fields([{Id, _Required, Type, Name, _Default} | Rest], Map, Acc) ->
+%% Builds the field chunks forward (no reversal): the recursion returns
+%% the tail iodata and each field conses its `[header, value]` chunk in
+%% front of it.
+-spec encode_fields_c(
+    [{integer(), non_neg_integer(), binary(), c_type()}], struct_value()
+) -> {ok, iodata()} | {error, term()}.
+encode_fields_c([], _Map) ->
+    {ok, [?STOP]};
+encode_fields_c([{Id, W, Name, CType} | Rest], Map) ->
     case Map of
         #{Name := Value} ->
-            case encode(Type, Value) of
+            case encode_c(CType, Value) of
                 {ok, Encoded} ->
-                    Header = <<(type_id(Type)):8/big-unsigned, Id:16/big-signed>>,
-                    encode_fields(Rest, Map, [Encoded, Header | Acc]);
-                Error ->
+                    case encode_fields_c(Rest, Map) of
+                        {ok, RestIo} ->
+                            {ok, [[<<W:8/big-unsigned, Id:16/big-signed>>, Encoded] | RestIo]};
+                        {error, _} = Error ->
+                            Error
+                    end;
+                {error, _} = Error ->
                     Error
             end;
         _ ->
-            encode_fields(Rest, Map, Acc)
+            encode_fields_c(Rest, Map)
     end.
 
--spec check_present_fields(struct | union | exception, [field_desc()], struct_value()) ->
+-spec check_present_fields(struct | union | exception, [binary()], [tuple()], struct_value()) ->
     ok | {error, term()}.
-check_present_fields(union, Fields, Map) ->
-    Present = [Name || {_, _, _, Name, _} <- Fields, maps:is_key(Name, Map)],
+check_present_fields(union, _ReqNames, Fields, Map) ->
+    Present = [Name || {_, _, Name, _CT} <- Fields, maps:is_key(Name, Map)],
     case length(Present) of
         1 -> ok;
         0 -> {error, {encode, union_empty}};
         _ -> {error, {encode, union_multiple}}
     end;
-check_present_fields(_Kind, Fields, Map) ->
-    Missing = [Name || {_, required, _, Name, _} <- Fields, not maps:is_key(Name, Map)],
-    case Missing of
-        [] -> ok;
-        _ -> {error, {encode, {missing_required_fields, Missing}}}
+check_present_fields(_Kind, ReqNames, _Fields, Map) ->
+    %% Fast path walks the (usually empty) required list with early
+    %% exit; the full missing list is only built on the error path.
+    case all_present(ReqNames, Map) of
+        true ->
+            ok;
+        false ->
+            Missing = [Name || Name <- ReqNames, not maps:is_key(Name, Map)],
+            {error, {encode, {missing_required_fields, Missing}}}
     end.
 
--spec decode_struct(struct_desc(), binary()) -> decode_result(struct_value()).
-decode_struct(Desc, Bin) ->
-    decode_struct_fields(Desc, Bin, required_fields(Desc), #{}).
+-spec all_present([binary()], struct_value()) -> boolean().
+all_present([], _Map) ->
+    true;
+all_present([Name | Rest], Map) ->
+    case Map of
+        #{Name := _} -> all_present(Rest, Map);
+        #{} -> false
+    end.
 
--type required_map() :: #{integer() => {binary(), type_desc()}}.
+-spec decode_struct_c(c_struct(), binary()) -> decode_result(struct_value()).
+decode_struct_c(#{by_id := ById, required := Required}, Bin) ->
+    decode_struct_fields_c(ById, Required, Bin, #{}).
 
--spec decode_struct_fields(struct_desc(), binary(), required_map(), struct_value()) ->
+-spec decode_struct_fields_c(
+    #{integer() => {non_neg_integer(), c_type(), binary()}}, #{integer() => binary()}, binary(), struct_value()
+) ->
     decode_result(struct_value()).
-decode_struct_fields(_Desc, <<?STOP, Rest/binary>>, Required, Acc) ->
-    Missing = [Name || {Name, _} <- maps:values(Required)],
-    case Missing of
+decode_struct_fields_c(_ById, Required, <<?STOP, Rest/binary>>, Acc) ->
+    case maps:values(Required) of
         [] -> {ok, Acc, Rest};
-        _ -> {error, {decode, {missing_required_fields, Missing}}}
+        Missing -> {error, {decode, {missing_required_fields, Missing}}}
     end;
-decode_struct_fields(Desc, <<TypeByte:8/big-unsigned, Id:16/big-signed, Rest/binary>>, Required, Acc) ->
-    case field_desc_for(Desc, Id) of
-        {ok, {_, _, Type, Name, _Default}} ->
-            case wire_type_id(Type) of
-                TypeByte ->
-                    case decode(Type, Rest) of
-                        {ok, Value, Rest1} ->
-                            decode_struct_fields(Desc, Rest1, maps:remove(Id, Required), Acc#{Name => Value});
-                        more ->
-                            more;
-                        {error, _} = Error ->
-                            Error
-                    end;
-                _ ->
-                    {error, {decode, {field_type_mismatch, Id}}}
+decode_struct_fields_c(ById, Required, <<TypeByte:8/big-unsigned, Id:16/big-signed, Rest/binary>>, Acc) ->
+    case ById of
+        %% The stored wire byte unifies against TypeByte, so one map
+        %% lookup settles both the id and the type check.
+        #{Id := {TypeByte, CType, Name}} ->
+            case decode_c(CType, Rest) of
+                {ok, Value, Rest1} ->
+                    Required1 =
+                        case Required of
+                            #{Id := _} -> maps:remove(Id, Required);
+                            #{} -> Required
+                        end,
+                    decode_struct_fields_c(ById, Required1, Rest1, Acc#{Name => Value});
+                more ->
+                    more;
+                {error, _} = Error ->
+                    Error
             end;
-        error ->
+        #{Id := _OtherWire} ->
+            {error, {decode, {field_type_mismatch, Id}}};
+        #{} ->
             case skip_by_wire(TypeByte, Rest) of
-                {ok, Rest1} -> decode_struct_fields(Desc, Rest1, Required, Acc);
+                {ok, Rest1} -> decode_struct_fields_c(ById, Required, Rest1, Acc);
                 more -> more;
                 {error, _} = Error -> Error
             end
     end;
-decode_struct_fields(_Desc, Bin, _Required, _Acc) when byte_size(Bin) < 3 ->
+decode_struct_fields_c(_ById, _Required, Bin, _Acc) when byte_size(Bin) < 3 ->
     more.
-
--spec required_fields(struct_desc()) -> required_map().
-required_fields({_, Fields}) ->
-    #{Id => {Name, Type} || {Id, required, Type, Name, _} <- Fields}.
-
--spec field_desc_for(struct_desc(), integer()) -> {ok, field_desc()} | error.
-field_desc_for({_, Fields}, Id) ->
-    case lists:keyfind(Id, 1, Fields) of
-        false -> error;
-        Field -> {ok, Field}
-    end.
 
 %%--------------------------------------------------------------------
 %% Containers
 %%--------------------------------------------------------------------
 
--spec encode_sequence(type_desc(), [term()]) -> {ok, iodata()} | {error, term()}.
-encode_sequence(Elem, Values) ->
-    case encode_elements(Elem, Values, []) of
+-spec encode_sequence_c(non_neg_integer(), c_type(), [term()]) -> {ok, iodata()} | {error, term()}.
+encode_sequence_c(ElemW, CElem, Values) ->
+    case encode_elements_c(CElem, Values) of
         {ok, Encoded} ->
-            {ok, [[<<(type_id(Elem)):8/big-unsigned>>, int32(length(Values))], Encoded]};
+            {ok, [[<<ElemW:8/big-unsigned>>, int32(length(Values))], Encoded]};
         Error ->
             Error
     end.
 
--spec encode_elements(type_desc(), [term()], [iodata()]) -> {ok, iodata()} | {error, term()}.
-encode_elements(_Elem, [], Acc) ->
-    {ok, lists:reverse(Acc)};
-encode_elements(Elem, [V | Rest], Acc) ->
-    case encode(Elem, V) of
-        {ok, Encoded} -> encode_elements(Elem, Rest, [Encoded | Acc]);
-        Error -> Error
+-spec encode_elements_c(c_type(), [term()]) -> {ok, iodata()} | {error, term()}.
+encode_elements_c(_CElem, []) ->
+    {ok, []};
+encode_elements_c(CElem, [V | Rest]) ->
+    case encode_c(CElem, V) of
+        {ok, Encoded} ->
+            case encode_elements_c(CElem, Rest) of
+                {ok, RestIo} -> {ok, [Encoded | RestIo]};
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
     end.
 
--spec encode_map(type_desc(), type_desc(), map()) -> {ok, iodata()} | {error, term()}.
-encode_map(Key, Val, Value) ->
-    case encoded_pairs(Key, Val, maps:to_list(Value), []) of
+-spec encode_map_c(non_neg_integer(), non_neg_integer(), c_type(), c_type(), map()) ->
+    {ok, iodata()} | {error, term()}.
+encode_map_c(KeyW, ValW, CKey, CVal, Value) ->
+    case encoded_pairs_c(CKey, CVal, maps:to_list(Value)) of
         {ok, Pairs} ->
             Sorted = lists:sort(fun({KE, _}, {KE1, _}) -> KE =< KE1 end, Pairs),
             {ok, [
-                [<<(type_id(Key)):8/big-unsigned, (type_id(Val)):8/big-unsigned>>, int32(length(Sorted))],
+                [<<KeyW:8/big-unsigned, ValW:8/big-unsigned>>, int32(length(Sorted))],
                 [[KE, VE] || {KE, VE} <- Sorted]
             ]};
         Error ->
             Error
     end.
 
--spec encoded_pairs(
-    type_desc(), type_desc(), [{term(), term()}], [{iodata(), iodata()}]
-) -> {ok, [{iodata(), iodata()}]} | {error, term()}.
-encoded_pairs(_Key, _Val, [], Acc) ->
-    {ok, lists:reverse(Acc)};
-encoded_pairs(Key, Val, [{K, V} | Rest], Acc) ->
+-spec encoded_pairs_c(c_type(), c_type(), [{term(), term()}]) ->
+    {ok, [{iodata(), iodata()}]} | {error, term()}.
+encoded_pairs_c(_CKey, _CVal, []) ->
+    {ok, []};
+encoded_pairs_c(CKey, CVal, [{K, V} | Rest]) ->
     maybe
-        {ok, KE} ?= encode(Key, K),
-        {ok, VE} ?= encode(Val, V),
-        encoded_pairs(Key, Val, Rest, [{KE, VE} | Acc])
+        {ok, KE} ?= encode_c(CKey, K),
+        {ok, VE} ?= encode_c(CVal, V),
+        case encoded_pairs_c(CKey, CVal, Rest) of
+            {ok, RestPairs} -> {ok, [{KE, VE} | RestPairs]};
+            {error, _} = Error -> Error
+        end
     else
         {error, Reason} ->
             {error, Reason}
     end.
 
--spec decode_sequence(type_desc(), binary()) -> decode_result([term()]).
-decode_sequence(Elem, <<TypeByte:8/big-unsigned, Size:32/big-signed, Rest/binary>>) when Size >= 0 ->
-    case wire_type_id(Elem) of
-        TypeByte ->
-            decode_elements(Elem, Size, Rest, []);
-        _ ->
-            {error, {decode, {element_type_mismatch, TypeByte}}}
-    end;
-decode_sequence(_Elem, <<_, _:32/big-signed, _/binary>>) ->
+-spec decode_sequence_c(non_neg_integer(), c_type(), binary()) -> decode_result([term()]).
+decode_sequence_c(_ElemW, _CElem, <<_, Size:32/big-signed, _/binary>>) when Size < 0 ->
     {error, {decode, bad_sequence_size}};
-decode_sequence(_Elem, Bin) when byte_size(Bin) < 5 ->
+decode_sequence_c(ElemW, CElem, <<ElemW:8/big-unsigned, Size:32/big-signed, Rest/binary>>) when Size >= 0 ->
+    decode_elements_c(CElem, Size, Rest, []);
+decode_sequence_c(_ElemW, _CElem, <<TypeByte:8/big-unsigned, _:32/big-signed, _/binary>>) ->
+    {error, {decode, {element_type_mismatch, TypeByte}}};
+decode_sequence_c(_ElemW, _CElem, Bin) when byte_size(Bin) < 5 ->
     more.
--spec decode_elements(type_desc(), non_neg_integer(), binary(), [term()]) -> decode_result([term()]).
-decode_elements(_Elem, 0, Rest, Acc) ->
+
+-spec decode_elements_c(c_type(), non_neg_integer(), binary(), [term()]) ->
+    decode_result([term()]).
+decode_elements_c(_CElem, 0, Rest, Acc) ->
     {ok, lists:reverse(Acc), Rest};
-decode_elements(Elem, N, Bin, Acc) ->
-    case decode(Elem, Bin) of
-        {ok, Value, Rest} -> decode_elements(Elem, N - 1, Rest, [Value | Acc]);
+decode_elements_c(CElem, N, Bin, Acc) ->
+    case decode_c(CElem, Bin) of
+        {ok, Value, Rest} -> decode_elements_c(CElem, N - 1, Rest, [Value | Acc]);
         Other -> Other
     end.
 
--spec decode_map(type_desc(), type_desc(), binary()) -> decode_result(map()).
-decode_map(Key, Val, <<KeyTypeByte:8/big-unsigned, ValTypeByte:8/big-unsigned, Size:32/big-signed, Rest/binary>>) when
-    Size >= 0
-->
-    case {wire_type_id(Key), wire_type_id(Val)} of
-        {KeyTypeByte, ValTypeByte} ->
-            decode_pairs(Key, Val, Size, Rest, #{});
-        _ ->
-            {error, {decode, map_type_mismatch}}
-    end;
-decode_map(_Key, _Val, <<_, _, _:32/big-signed, _/binary>>) ->
+-spec decode_map_c(non_neg_integer(), non_neg_integer(), c_type(), c_type(), binary()) ->
+    decode_result(map()).
+decode_map_c(
+    _KeyW, _ValW, _CKey, _CVal, <<_, _, Size:32/big-signed, _/binary>>
+) when Size < 0 ->
     {error, {decode, bad_map_size}};
-decode_map(_Key, _Val, Bin) when byte_size(Bin) < 6 ->
+decode_map_c(
+    KeyW, ValW, CKey, CVal, <<KeyW:8/big-unsigned, ValW:8/big-unsigned, Size:32/big-signed, Rest/binary>>
+) when Size >= 0 ->
+    decode_pairs_c(CKey, CVal, Size, Rest, #{});
+decode_map_c(_KeyW, _ValW, _CKey, _CVal, <<_, _, _:32/big-signed, _/binary>>) ->
+    {error, {decode, map_type_mismatch}};
+decode_map_c(_KeyW, _ValW, _CKey, _CVal, Bin) when byte_size(Bin) < 6 ->
     more.
 
--spec decode_pairs(type_desc(), type_desc(), non_neg_integer(), binary(), map()) -> decode_result(map()).
-decode_pairs(_Key, _Val, 0, Rest, Acc) ->
+-spec decode_pairs_c(c_type(), c_type(), non_neg_integer(), binary(), map()) ->
+    decode_result(map()).
+decode_pairs_c(_CKey, _CVal, 0, Rest, Acc) ->
     {ok, Acc, Rest};
-decode_pairs(Key, Val, N, Bin, Acc) ->
-    case decode(Key, Bin) of
+decode_pairs_c(CKey, CVal, N, Bin, Acc) ->
+    case decode_c(CKey, Bin) of
         {ok, K, Rest} ->
-            case decode(Val, Rest) of
-                {ok, V, Rest1} -> decode_pairs(Key, Val, N - 1, Rest1, Acc#{K => V});
+            case decode_c(CVal, Rest) of
+                {ok, V, Rest1} -> decode_pairs_c(CKey, CVal, N - 1, Rest1, Acc#{K => V});
                 Other -> Other
             end;
         Other ->
@@ -656,6 +871,21 @@ base_size(uuid) -> 16;
 base_size(string) -> 0;
 base_size(binary) -> 0.
 
+%% Total counterpart of `type_id/1` for compilation: an unknown base
+%% name yields `error` so the codec reports it as a value/type mismatch
+%% instead of crashing.
+-spec base_wire(base_type() | term()) -> non_neg_integer() | error.
+base_wire(bool) -> ?BOOL;
+base_wire(i8) -> ?I8;
+base_wire(i16) -> ?I16;
+base_wire(i32) -> ?I32;
+base_wire(i64) -> ?I64;
+base_wire(double) -> ?DOUBLE;
+base_wire(uuid) -> ?UUID;
+base_wire(string) -> ?STRING;
+base_wire(binary) -> ?STRING;
+base_wire(_) -> error.
+
 -spec type_id(type_desc()) -> non_neg_integer().
 type_id({base, bool}) -> ?BOOL;
 type_id({base, i8}) -> ?I8;
@@ -682,10 +912,6 @@ struct_fields({struct, {ref, Module, Name}}) ->
     Fields;
 struct_fields({struct, {_Kind, Fields}}) ->
     Fields.
-
--spec wire_type_id(type_desc()) -> non_neg_integer().
-wire_type_id(Type) ->
-    type_id(Type).
 
 -spec message_type_id(message_type()) -> non_neg_integer().
 message_type_id(call) -> 1;
