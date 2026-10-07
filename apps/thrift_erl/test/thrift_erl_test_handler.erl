@@ -50,7 +50,7 @@ ping() ->
 
 -spec boom() -> {error, {exception, binary(), map()}}.
 boom() ->
-    {error, {exception, <<"b">>, #{<<"message">> => <<"as declared">>}}}.
+    {error, {exception, <<"boom">>, #{<<"message">> => <<"as declared">>}}}.
 
 -spec boomInternal() -> no_return().
 boomInternal() ->

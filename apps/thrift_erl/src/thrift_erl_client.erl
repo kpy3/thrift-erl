@@ -300,16 +300,23 @@ result_desc(#{} = Info) ->
 exception_fields(Info) ->
     maps:get(exceptions, Info, []).
 
+%% Exceptions are identified by their struct name (the IDL-level
+%% identity); the throw-field name is the fallback for descriptors
+%% without a struct ref.
 -spec exception_field(map(), [thrift_erl_binary:field_desc()]) ->
     {ok, binary(), thrift_erl_binary:struct_value()} | none.
 exception_field(Values, Exceptions) ->
     Found = [
-        {Name, Value}
-     || {_, _, {struct, _}, Name, _} <- Exceptions,
-        Value <- [maps:get(Name, Values, none)],
+        {exception_name(FieldDesc), Value}
+     || FieldDesc = {_, _, {struct, _}, _, _} <- Exceptions,
+        Value <- [maps:get(element(4, FieldDesc), Values, none)],
         Value =/= none
     ],
     case Found of
         [{Name, Value} | _] -> {ok, Name, Value};
         [] -> none
     end.
+
+-spec exception_name(thrift_erl_binary:field_desc()) -> binary().
+exception_name({_, _, {struct, {ref, _, StructName}}, _, _}) -> StructName;
+exception_name({_, _, _, FieldName, _}) -> FieldName.

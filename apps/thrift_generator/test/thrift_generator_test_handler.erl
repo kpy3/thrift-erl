@@ -35,7 +35,7 @@ area(W, H) ->
 
 -spec fetch(integer()) -> {ok, #inner{}} | {error, {exception, binary(), #failed{}}}.
 fetch(Id) when Id < 0 ->
-    {error, {exception, <<"f">>, #failed{reason = <<"negative id">>}}};
+    {error, {exception, <<"Failed">>, #failed{reason = <<"negative id">>}}};
 fetch(Id) ->
     {ok, #inner{name = integer_to_binary(Id)}}.
 

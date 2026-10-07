@@ -346,8 +346,19 @@ encode_reply(Name, SeqId, _Reply, #{}, #state{} = State) ->
 ) -> #state{}.
 encode_exception_reply(Name, SeqId, ExceptionName, ExceptionValue, Info, #state{} = State) ->
     Exceptions = maps:get(exceptions, Info, []),
-    case lists:keyfind(ExceptionName, 4, Exceptions) of
-        {Id, _, {struct, Desc}, _, _} ->
+    %% Handlers name exceptions by their struct name (the IDL-level
+    %% identity); the throw-field name is only a wire detail, accepted
+    %% as a fallback for descriptors without a struct ref.
+    Pred = fun
+        ({_, _, {struct, {ref, _, StructName}}, _, _}) ->
+            StructName =:= ExceptionName;
+        ({_, _, {struct, {struct, _}}, FieldName, _}) ->
+            FieldName =:= ExceptionName;
+        (_) ->
+            false
+    end,
+    case lists:search(Pred, Exceptions) of
+        {value, {Id, _, {struct, Desc}, _, _}} ->
             case thrift_erl_binary:encode({struct, Desc}, ExceptionValue) of
                 {ok, EncodedValue} ->
                     Payload = [

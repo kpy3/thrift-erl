@@ -263,7 +263,7 @@ generated_loopback(Config, Transport) ->
                 'MainService_client':fetch(Client, 5)
             ),
             ?assertEqual(
-                {error, {exception, <<"f">>, {failed, <<"negative id">>}}},
+                {error, {exception, <<"Failed">>, {failed, <<"negative id">>}}},
                 'MainService_client':fetch(Client, -1)
             ),
             check_oneway(Client)

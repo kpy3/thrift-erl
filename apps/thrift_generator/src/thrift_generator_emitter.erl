@@ -464,7 +464,7 @@ service_sources(Svc, Mod, Ctx) ->
     ServerMod = service_module(Svc#tg_service.name, server),
     ClientMod = service_module(Svc#tg_service.name, client),
     [
-        {HandlerMod, handler_forms(Svc, HandlerMod, Ctx)},
+        {HandlerMod, handler_forms(Svc, Mod, HandlerMod, Ctx)},
         {ServerMod, server_forms(Svc, TypesMod, ServerMod)},
         {ClientMod, client_forms(Svc, TypesMod, ServerMod, ClientMod)}
     ].
@@ -481,8 +481,8 @@ kind_suffix(server) ->
 kind_suffix(client) ->
     <<"_client">>.
 
--spec handler_forms(#tg_service{}, module(), #ctx{}) -> erl_syntax:forms().
-handler_forms(Svc, HandlerMod, Ctx) ->
+-spec handler_forms(#tg_service{}, #tg_module{}, module(), #ctx{}) -> erl_syntax:forms().
+handler_forms(Svc, Mod, HandlerMod, Ctx) ->
     Doc =
         unicode:characters_to_binary(
             io_lib:format(
@@ -492,8 +492,11 @@ handler_forms(Svc, HandlerMod, Ctx) ->
                 [Svc#tg_service.name]
             )
         ),
+    %% Callback specs mention record types for struct-typed params, so
+    %% the handler declares the same records as the types module.
+    Records = [record_form(S) || S <- Mod#tg_module.structs, record_mode(S)],
     Callbacks = lists:append([callback_form(F, Ctx) || F <- Svc#tg_service.functions]),
-    header(HandlerMod, Doc) ++ Callbacks.
+    header(HandlerMod, Doc) ++ Records ++ Callbacks.
 
 -spec callback_form(#tg_function{}, #ctx{}) -> erl_syntax:forms().
 callback_form(F, Ctx) ->

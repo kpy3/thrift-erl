@@ -70,7 +70,7 @@ buffered_calls(_Config) ->
 declared_exception(_Config) ->
     with_server(#{}, fun(Client) ->
         ?assertEqual(
-            {error, {exception, <<"b">>, #{<<"message">> => <<"as declared">>}}},
+            {error, {exception, <<"boom">>, #{<<"message">> => <<"as declared">>}}},
             call(Client, <<"boom">>, [])
         ),
         %% The connection stays usable after an exception reply.

@@ -104,10 +104,17 @@ call_result_from_wire(_ReplyType, Exceptions, {error, {exception, Name, Value}})
 call_result_from_wire(_ReplyType, _Exceptions, Result) ->
     Result.
 
+%% Exceptions are identified by their struct name (the IDL-level
+%% identity); the throw-field name is the fallback for descriptors
+%% without a struct ref.
 -spec exception_type(binary(), [exception_field()]) -> {ok, type_desc()} | error.
 exception_type(Name, Exceptions) ->
-    case lists:keyfind(Name, 4, Exceptions) of
-        {_, _, Type, _, _} -> {ok, Type};
+    Pred = fun
+        ({_, _, {struct, {ref, _, StructName}}, _, _}) -> StructName =:= Name;
+        ({_, _, _, FieldName, _}) -> FieldName =:= Name
+    end,
+    case lists:search(Pred, Exceptions) of
+        {value, {_, _, Type, _, _}} -> {ok, Type};
         false -> error
     end.
 
