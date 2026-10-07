@@ -21,13 +21,18 @@
 
 -include_lib("stdlib/include/assert.hrl").
 -include_lib("thrift_generator/include/thrift_generator.hrl").
+-include_lib("thrift_generator/include/thrift_generator_model.hrl").
 
 -export([all/0]).
 -export([
     parse_thrift_test_idl/1,
     parse_erlang_thrift_test_idl/1,
     reject_reserved_keyword/1,
-    reject_syntax_error/1
+    reject_syntax_error/1,
+    semantic_pipeline/1,
+    loader_cycle/1,
+    loader_duplicate_module/1,
+    loader_missing_include/1
 ]).
 
 all() ->
@@ -35,7 +40,11 @@ all() ->
         parse_thrift_test_idl,
         parse_erlang_thrift_test_idl,
         reject_reserved_keyword,
-        reject_syntax_error
+        reject_syntax_error,
+        semantic_pipeline,
+        loader_cycle,
+        loader_duplicate_module,
+        loader_missing_include
     ].
 
 parse_thrift_test_idl(Config) ->
@@ -136,12 +145,101 @@ reject_syntax_error(Config) ->
     BadFile = write_snippet(Config, "broken.thrift", <<"struct">>),
     ?assertMatch({error, _}, thrift_generator:parse_file(BadFile)).
 
+%% The full pipeline over a real include graph: loading, module naming
+%% from `namespace erl`, cross-module references (types, constants, enum
+%% members, inherited service functions) and default values taken from
+%% constants.
+
+semantic_pipeline(Config) ->
+    MainPath = data_file(Config, "semantic/main.thrift"),
+    SharedPath = data_file(Config, "semantic/shared/shared.thrift"),
+
+    {ok, Loaded} = thrift_generator_loader:load(MainPath),
+    ?assertEqual([<<"main">>, <<"shared">>], [E#tg_loaded.name || E <- Loaded]),
+    [MainEntry, SharedEntry] = Loaded,
+    ?assertEqual([SharedPath], MainEntry#tg_loaded.includes),
+    ?assertEqual([], SharedEntry#tg_loaded.includes),
+
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    ?assertEqual(<<"main">>, Model#tg_model.root),
+    [MainMod, SharedMod] = Model#tg_model.modules,
+
+    ?assertEqual(<<"main">>, MainMod#tg_module.name),
+    ?assertEqual([SharedPath], MainMod#tg_module.includes),
+
+    Consts = MainMod#tg_module.consts,
+    ?assertEqual([<<"KIND">>, <<"BASE">>], [C#tg_const.name || C <- Consts]),
+    KindValue = hd([C#tg_const.value || C <- Consts, C#tg_const.name =:= <<"KIND">>]),
+    ?assertEqual(<<"ONE">>, KindValue),
+    BaseValue = hd([C#tg_const.value || C <- Consts, C#tg_const.name =:= <<"BASE">>]),
+    ?assertEqual(10, BaseValue),
+
+    [Color] = MainMod#tg_module.enums,
+    ?assertEqual([{1, <<"RED">>}, {2, <<"GREEN">>}, {10, <<"BLUE">>}], Color#tg_enum.values),
+
+    [Outer, Failed] = MainMod#tg_module.structs,
+    ?assertEqual(struct, Outer#tg_struct.kind),
+    ?assertEqual([{<<"inner">>, undefined}, {<<"count">>, 10}], [
+        {F#tg_field.name, F#tg_field.default}
+     || F <- Outer#tg_struct.fields
+    ]),
+    ?assertEqual(exception, Failed#tg_struct.kind),
+
+    [MainService] = MainMod#tg_module.services,
+    ?assertEqual(<<"shared.BaseService">>, MainService#tg_service.extends),
+    ?assertEqual(
+        [<<"ping">>, <<"area">>, <<"fetch">>],
+        [F#tg_function.name || F <- MainService#tg_service.functions]
+    ),
+
+    [Fetch] = [F || F <- MainService#tg_service.functions, F#tg_function.name =:= <<"fetch">>],
+    [#tg_field{type = {ref, <<"Failed">>, #{}}}] = Fetch#tg_function.throws,
+
+    %% The included module is analyzed on its own terms.
+    ?assertEqual(<<"shared">>, SharedMod#tg_module.name),
+    SharedEnums = SharedMod#tg_module.enums,
+    [NumberzShared] = SharedEnums,
+    ?assertEqual([{1, <<"ONE">>}, {2, <<"TWO">>}], NumberzShared#tg_enum.values),
+    ?assertEqual(
+        [<<"Inner">>, <<"Boom">>],
+        [S#tg_struct.name || S <- SharedMod#tg_module.structs]
+    ),
+    [BaseService] = SharedMod#tg_module.services,
+    ?assertEqual([<<"ping">>, <<"area">>], [F#tg_function.name || F <- BaseService#tg_service.functions]),
+
+    ok.
+
+loader_cycle(Config) ->
+    CycleA = data_file(Config, "semantic/cycle_a.thrift"),
+    ?assertMatch({error, {cycle, CycleA}}, thrift_generator_loader:load(CycleA)).
+
+loader_duplicate_module(Config) ->
+    One = data_file(Config, "semantic/dup_one.thrift"),
+    Two = data_file(Config, "semantic/dup_two.thrift"),
+    ?assertMatch(
+        {error, {duplicate_module, <<"duplicated">>, One, Two}},
+        thrift_generator_loader:load(One)
+    ).
+
+loader_missing_include(Config) ->
+    Missing = data_file(Config, "semantic/does_not_exist.thrift"),
+    ?assertMatch(
+        {error, {parse, Missing, _}},
+        thrift_generator_loader:load(data_file(Config, "semantic/missing_include.thrift"))
+    ).
+
 %% Helpers
 
 parse_data_file(Config, Name) ->
     File = filename:join(proplists:get_value(data_dir, Config), Name),
     {ok, Doc} = thrift_generator:parse_file(File),
     Doc.
+
+data_file(Config, Relative) ->
+    %% The loader deals in absolute binary paths.
+    unicode:characters_to_binary(
+        filename:join(proplists:get_value(data_dir, Config), Relative)
+    ).
 
 write_snippet(Config, Name, Content) ->
     Path = filename:join(proplists:get_value(priv_dir, Config), Name),
