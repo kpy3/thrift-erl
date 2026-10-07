@@ -26,7 +26,7 @@ Requires Erlang/OTP 28+.
 ```
 rebar3 compile
 rebar3 eunit        # unit tests + 5 PropEr codec properties
-rebar3 ct           # loopback scenarios + golden interop
+rebar3 ct           # loopback scenarios + golden interop + codec benchmarks
 rebar3 dialyzer
 rebar3 xref
 rebar3 fmt
@@ -142,6 +142,27 @@ ok = 'Ping_server':stop(Server).
 Introspection in the spirit of the official generator: `struct_info/1`,
 `enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`
 in `<mod>_types.erl`.
+
+## Performance
+
+The codec hot path is benchmarked against the vendored official Apache
+Thrift 0.25.0 Erlang runtime by `thrift_perf_SUITE`
+(erlperf, continuous mode, average of three 500 ms samples ± sample
+stddev, single process). Reference numbers include a fresh membuffer
+transport and protocol per operation, which its API requires; both
+sides run on the same ThriftTest payloads.
+
+| case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
+|------|-----------|-----------:|---------------------:|--------:|
+| Xtruct (42 B)     | encode | 2.80 M/s | 460 K/s | 6.1x |
+| Xtruct            | decode | 567 K/s  | 222 K/s | 2.5x |
+| Xtruct2 (51 B)    | encode | 1.29 M/s | 267 K/s | 4.8x |
+| Xtruct2           | decode | 360 K/s  | 115 K/s | 3.1x |
+| Insanity (3.2 KB) | encode | 16.1 K/s | 4.3 K/s | 3.7x |
+| Insanity          | decode | 6.2 K/s  | 2.5 K/s | 2.4x |
+
+Run it yourself:
+`rebar3 ct --suite=apps/thrift_generator/test/thrift_perf_SUITE.erl`.
 
 ## License
 

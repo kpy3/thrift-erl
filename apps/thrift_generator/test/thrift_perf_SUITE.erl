@@ -16,8 +16,8 @@
 
 -moduledoc """
 Codec-level performance comparison of the two protocol implementations
-in the repository, driven from the same ThriftTest fixture as the
-golden interop suite:
+in the repository, measured with erlperf and driven from the same
+ThriftTest fixture as the golden interop suite:
 
 - **ours** — `thrift_erl_binary` over the introspection descriptors of
   the in-memory generated `goldentest_types` module;
@@ -27,16 +27,17 @@ golden interop suite:
 
 Each case first proves the codecs agree: our bytes must decode back
 through the official reader into the expected record (byte-level
-exchange in the opposite direction is covered end-to-end by the golden
-suite's socket scenarios). Only then are encode and decode timed
-separately; the reported number is the best of `?REPS` runs of N
-operations, in microseconds per operation.
+exchange in the opposite direction is covered by the golden suite's
+socket scenarios). Only then are encode and decode benchmarked
+separately, in erlperf continuous mode: one discarded warmup sample
+followed by three 500 ms samples, concurrency 1; the reported number is
+erlperf's average iterations per second with the sample stddev.
 
-Timings are reported into the log and never asserted, so the suite
-stays green on any hardware. Reference numbers include a fresh
-membuffer transport and protocol per operation — that API has no way
-to decode a bare binary, so the construction is part of its codec
-cost.
+Throughput numbers are reported into the log and never asserted, so
+the suite stays green on any hardware (it simply runs for about half a
+minute). Reference numbers include a fresh membuffer transport and
+protocol per operation — that API has no way to decode a bare binary,
+so the construction is part of its codec cost.
 """.
 
 -include("thrift_generator.hrl").
@@ -53,18 +54,16 @@ cost.
     insanity/1
 ]).
 
--define(REPS, 3).
--define(SMALL_OPS, 30000).
--define(HEAVY_OPS, 1000).
-
 -type case_spec() :: #{
     name := binary(),
     official_name := atom(),
-    ops := pos_integer(),
     our_value := thrift_erl_binary:struct_value(),
     official_value := tuple(),
     official_check := fun((tuple()) -> ok)
 }.
+%% The throughput report erlperf returns in `full' mode, narrowed to
+%% the fields this suite consumes.
+-type throughput() :: #{average := float(), stddev := float()}.
 
 all() ->
     [xtruct, xtruct2, insanity].
@@ -75,6 +74,7 @@ init_per_suite(Config) ->
     %% memory from the same fixture (which lives in the golden suite's
     %% data dir — one fixture, one source of truth) under the renamed
     %% `goldentest` module prefix so both can coexist in the test VM.
+    {ok, _} = application:ensure_all_started(erlperf),
     AppDir = code:lib_dir(thrift_generator),
     GenDir = filename:join(AppDir, "priv/golden/gen-erl"),
     ok = compile_official_generated(GenDir),
@@ -96,7 +96,6 @@ xtruct(_Config) ->
     run_case(#{
         name => <<"Xtruct">>,
         official_name => 'thrift.test.Xtruct',
-        ops => ?SMALL_OPS,
         our_value => Our,
         official_value => Official,
         official_check => fun(Decoded) -> ?assertEqual(Official, Decoded) end
@@ -116,7 +115,6 @@ xtruct2(_Config) ->
     run_case(#{
         name => <<"Xtruct2">>,
         official_name => 'thrift.test.Xtruct2',
-        ops => ?SMALL_OPS,
         our_value => Our,
         official_value => Official,
         official_check => fun(Decoded) -> ?assertEqual(Official, Decoded) end
@@ -129,7 +127,6 @@ insanity(_Config) ->
     run_case(#{
         name => <<"Insanity">>,
         official_name => 'thrift.test.Insanity',
-        ops => ?HEAVY_OPS,
         our_value => our_insanity(),
         official_value => official_insanity(),
         official_check => fun insanity_check/1
@@ -140,7 +137,7 @@ insanity(_Config) ->
 %%--------------------------------------------------------------------
 
 -spec run_case(case_spec()) -> ok.
-run_case(#{name := Name, official_name := OfficialName, ops := Ops} = Spec) ->
+run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     #{our_value := OurValue, official_value := OfficialValue, official_check := Check} = Spec,
     Desc = {struct, goldentest_types:struct_info(Name)},
     {ok, Encoded} = thrift_erl_binary:encode(Desc, OurValue),
@@ -153,10 +150,10 @@ run_case(#{name := Name, official_name := OfficialName, ops := Ops} = Spec) ->
     {_, {ok, OfficialDecoded}} = official_decode(Wire, OfficialName),
     Check(OfficialDecoded),
 
-    OursEncode = bench(fun() -> {ok, _} = thrift_erl_binary:encode(Desc, OurValue) end, Ops),
-    OursDecode = bench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(Desc, Wire) end, Ops),
-    ReferenceEncode = bench(fun() -> official_encode(OfficialValue, OfficialName) end, Ops),
-    ReferenceDecode = bench(fun() -> {_, {ok, _}} = official_decode(Wire, OfficialName) end, Ops),
+    OursEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(Desc, OurValue) end),
+    OursDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(Desc, Wire) end),
+    ReferenceEncode = erlbench(fun() -> official_encode(OfficialValue, OfficialName) end),
+    ReferenceDecode = erlbench(fun() -> {_, {ok, _}} = official_decode(Wire, OfficialName) end),
 
     Rows = [
         {encode, OursEncode, ReferenceEncode},
@@ -164,7 +161,8 @@ run_case(#{name := Name, official_name := OfficialName, ops := Ops} = Spec) ->
     ],
     ct:pal("~ts", [format_report(Name, byte_size(Wire), Rows)]),
     ct:comment("speedup vs reference: encode ~.2fx, decode ~.2fx", [
-        ReferenceEncode / OursEncode, ReferenceDecode / OursDecode
+        speedup(ReferenceEncode, OursEncode),
+        speedup(ReferenceDecode, OursDecode)
     ]),
     ok.
 
@@ -238,38 +236,56 @@ official_decode(Wire, Name) ->
     thrift_protocol:read(Protocol, {struct, {thrift_test_types, Name}}).
 
 %%--------------------------------------------------------------------
-%% Measurement
+%% Measurement (erlperf, continuous mode)
 %%--------------------------------------------------------------------
 
--spec bench(fun(() -> term()), pos_integer()) -> float().
-bench(Fun, Ops) ->
-    Times = [
-        begin
-            {Micros, _} = timer:tc(fun() -> repeat(Fun, Ops, ok) end),
-            Micros
-        end
-     || _ <- lists:seq(1, ?REPS)
-    ],
-    %% Best of three: the minimum is the least-noise estimate of the
-    %% per-operation cost.
-    lists:min(Times) / Ops.
+-define(BENCH_OPTIONS, #{
+    warmup => 1,
+    sample_duration => 500,
+    samples => 3,
+    report => full
+}).
 
--spec repeat(fun(() -> term()), non_neg_integer(), term()) -> term().
-repeat(_Fun, 0, Last) ->
-    Last;
-repeat(Fun, N, _Last) ->
-    repeat(Fun, N - 1, Fun()).
+-spec erlbench(fun(() -> term())) -> throughput().
+erlbench(Fun) ->
+    #{result := #{average := Average, stddev := StdDev}} = erlperf:run(Fun, ?BENCH_OPTIONS),
+    #{average => Average, stddev => StdDev}.
 
--spec format_report(binary(), non_neg_integer(), [{atom(), float(), float()}]) -> string().
+%% Throughput ratio: how many times more operations per second ours
+%% completes than the reference.
+-spec speedup(throughput(), throughput()) -> float().
+speedup(#{average := Ours}, #{average := Reference}) ->
+    Ours / Reference.
+
+-spec format_report(binary(), non_neg_integer(), [{atom(), throughput(), throughput()}]) -> string().
 format_report(Name, WireBytes, Rows) ->
     Header = io_lib:format("thrift_perf[~ts: ~p bytes on the wire]", [Name, WireBytes]),
     Lines = [
-        io_lib:format("  ~-6ts ours ~9.3f us/op   reference ~9.3f us/op   speedup ~5.2fx", [
-            Mode, Ours, Reference, Reference / Ours
-        ])
-     || {Mode, Ours, Reference} <- Rows
+        io_lib:format(
+            "  ~-6ts ours ~-11ts ±~.1f%%   reference ~-11ts ±~.1f%%   speedup ~5.2fx",
+            [
+                Mode,
+                format_qps(OursAverage),
+                100 * OursStdDev / OursAverage,
+                format_qps(ReferenceAverage),
+                100 * ReferenceStdDev / ReferenceAverage,
+                OursAverage / ReferenceAverage
+            ]
+        )
+     || {Mode, #{average := OursAverage, stddev := OursStdDev}, #{
+            average := ReferenceAverage, stddev := ReferenceStdDev
+        }} <-
+            Rows
     ],
     lists:flatten([Header, $\n, lists:join($\n, Lines)]).
+
+-spec format_qps(float()) -> string().
+format_qps(Qps) when Qps >= 1000000 ->
+    io_lib:format("~.2f M/s", [Qps / 1000000]);
+format_qps(Qps) when Qps >= 1000 ->
+    io_lib:format("~.1f K/s", [Qps / 1000]);
+format_qps(Qps) ->
+    io_lib:format("~b /s", [round(Qps)]).
 
 %%--------------------------------------------------------------------
 %% Setup helpers (shared shape with thrift_golden_SUITE)
@@ -295,7 +311,7 @@ compile_official_generated(GenDir) ->
     ok.
 
 %% Generates and loads OUR modules for the fixture the official gen-erl
-%% was compiled from, under the renamed `goldentest` prefix.
+%% was compiled from, under the renamed `goldentest' prefix.
 -spec load_our_thrift_test_modules(file:filename_all()) -> ok.
 load_our_thrift_test_modules(DataDir) ->
     ThriftFile = filename:join(DataDir, "ThriftTest.thrift"),
