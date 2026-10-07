@@ -18,3 +18,7 @@ logs
 *.iml
 rebar3.crashdump
 *~
+# leex/yecc outputs are generated at build time
+apps/*/src/thrift_lexer.erl
+apps/*/src/thrift_parser.erl
+.zcode/

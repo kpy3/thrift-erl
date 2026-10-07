@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["28", "29"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: "3.27"
+      - name: Compile
+        run: rebar3 compile
+      - name: Xref
+        run: rebar3 xref
+      - name: Dialyzer
+        run: rebar3 dialyzer
+      - name: EUnit
+        run: rebar3 eunit
+      - name: Common Test
+        run: rebar3 ct

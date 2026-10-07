@@ -1,5 +1,5 @@
-{application, thrift_generator, [
-    {description, "An OTP library"},
+{application, thrift_erl, [
+    {description, "Apache Thrift runtime for generated Erlang clients and servers"},
     {vsn, "0.1.0"},
     {registered, []},
     {applications, [
@@ -10,4 +10,4 @@
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, []}
- ]}.
+]}.

@@ -1,4 +1,5 @@
 %% Copyright 2017 Pinterest, Inc.
+%% Copyright 2025 Sergei Yelin
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -15,6 +16,8 @@
 Definitions.
 
 WHITESPACE      = [\s\t\r\n]+
+DOCLINE         = ///[^\n]*
+DOCCOMMENT      = /\*\*([^*]|\*+[^*/])*\*+/
 COMMENT         = //[^\n]*
 CCOMMENT        = /\*/*([^*/]|[^*]/|\*[^/])*\**\*/
 COMMENTS        = {COMMENT}|{CCOMMENT}
@@ -31,7 +34,7 @@ IDENTIFIER      = [a-zA-Z_](\.[a-zA-Z_0-9]|[a-zA-Z_0-9])*
 
 KEYWORDS1       = namespace|include|cpp_include
 KEYWORDS2       = typedef|enum|union|struct|exception
-KEYWORDS3       = void|bool|byte|i8|i16|i32|i64|double|string|binary|list|map|set
+KEYWORDS3       = void|bool|byte|i8|i16|i32|i64|double|string|binary|uuid|list|map|set
 KEYWORDS4       = const|oneway|extends|throws|service|required|optional
 KEYWORD         = {KEYWORDS1}|{KEYWORDS2}|{KEYWORDS3}|{KEYWORDS4}
 
@@ -53,6 +56,8 @@ RESERVED        = {RESERVED11}|{RESERVED12}|{RESERVED13}
 Rules.
 
 {WHITESPACE}    : skip_token.
+{DOCLINE}       : {token, {doc, TokenLine, doc_line(TokenChars)}}.
+{DOCCOMMENT}    : {token, {doc, TokenLine, doc_block(TokenChars)}}.
 {COMMENTS}      : skip_token.
 
 __file__        : {token, {file, TokenLine}}.
@@ -63,12 +68,12 @@ __file__        : {token, {file, TokenLine}}.
 {HEX}           : {token, {int, TokenLine, hex_to_integer(TokenChars)}}.
 {DOUBLE}        : {token, {double, TokenLine, list_to_float(TokenChars)}}.
 {BADDOUBLE}     : {token, {double, TokenLine, bad_list_to_float(TokenChars)}}.
-{STRING}        : {token, {string, TokenLine, process_string(TokenChars, TokenLen)}}.
+{STRING}        : {token, {string, TokenLine, unicode:characters_to_binary(process_string(TokenChars, TokenLen))}}.
 {BOOLEAN}       : {token, {list_to_atom(TokenChars), TokenLine}}.
 
 {RESERVED}      : reserved_keyword_error(TokenChars, TokenLine).
 
-{IDENTIFIER}    : {token, {ident, TokenLine, TokenChars}}.
+{IDENTIFIER}    : {token, {ident, TokenLine, unicode:characters_to_binary(TokenChars)}}.
 
 Erlang code.
 
@@ -98,6 +103,31 @@ process_chars([$\\,$t|Chars])   -> [$\t|process_chars(Chars)];
 process_chars([$\\,C|Chars])    -> [C|process_chars(Chars)];
 process_chars([C|Chars])        -> [C|process_chars(Chars)];
 process_chars([])               -> [].
+
+% Doc comments are kept as tokens so the parser can attach them to the
+% following definition, field or enum value; ordinary comments are skipped.
+
+doc_line("///" ++ Line) ->
+    unicode:characters_to_binary(string:trim(Line)).
+
+doc_block("/**" ++ Block) ->
+    Body = lists:sublist(Block, max(length(Block) - 2, 0)),
+    Lines = [strip_doc_margin(Line) || Line <- string:split(Body, "\n", all)],
+    unicode:characters_to_binary(string:trim(lists:join("\n", trim_edges(Lines)))).
+
+strip_doc_margin(Line) ->
+    Stripped = string:trim(Line, leading),
+    case Stripped of
+        [$*, $\s | Rest] -> string:trim(Rest, trailing);
+        [$* | Rest] -> string:trim(Rest, trailing);
+        _ -> string:trim(Line, trailing)
+    end.
+
+trim_edges(Lines) ->
+    lists:reverse(drop_empty_prefix(lists:reverse(drop_empty_prefix(Lines)))).
+
+drop_empty_prefix([[] | Rest]) -> drop_empty_prefix(Rest);
+drop_empty_prefix(Lines) -> Lines.
 
 reserved_keyword_error(Keyword, _Line) ->
     Message = io_lib:format(

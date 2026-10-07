@@ -1,0 +1,13 @@
+{application, thrift_generator, [
+    {description, "Alternative Apache Thrift IDL parser and Erlang code generator"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+]}.
