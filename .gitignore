@@ -22,3 +22,4 @@ rebar3.crashdump
 apps/*/src/thrift_lexer.erl
 apps/*/src/thrift_parser.erl
 .zcode/
+vendor/apache-thrift-erl/rebar.lock
