@@ -1,32 +1,32 @@
 # thrift-generator
 
-Альтернативный генератор Apache Thrift и runtime-библиотека для Erlang.
-Принимает Thrift IDL, генерирует Erlang-код типов, клиента и сервера,
-совместимый по бинарному протоколу со штатной реализацией Apache Thrift
-(проверяется golden-тестами интеропа в обе стороны против официального
-runtime 0.25.0 на buffered и framed транспорте).
+An alternative Apache Thrift generator and runtime library for Erlang.
+It takes Thrift IDL and generates Erlang code for types, clients and
+servers that is binary-protocol compatible with the stock Apache Thrift
+implementation (verified both ways by golden interop tests against the
+official 0.25.0 runtime over buffered and framed transports).
 
-## Структура
+## Layout
 
 ```
-apps/thrift_generator/   IDL-парсер (leex/yecc), семантика, эмиттер, CLI
-apps/thrift_erl/         runtime: бинарный протокол, транспорты, сервер, клиент
-apps/rebar3_thrift/      rebar3-плагин (провайдер thrift)
-vendor/apache-thrift-erl официальный Apache Thrift Erlang runtime (0.25.0),
-                         только test-профиль — golden-фикстура интеропа
+apps/thrift_generator/   IDL parser (leex/yecc), semantics, emitter, CLI
+apps/thrift_erl/         runtime: binary protocol, transports, server, client
+apps/rebar3_thrift/      rebar3 plugin (the thrift provider)
+vendor/apache-thrift-erl official Apache Thrift Erlang runtime (0.25.0),
+                         test profile only — the golden interop fixture
 ```
 
-Сгенерированный код зависит только от `thrift_erl` (kernel + stdlib).
-Генератор никогда не является runtime-зависимостью.
+Generated code depends only on `thrift_erl` (kernel + stdlib).
+The generator is never a runtime dependency.
 
-## Сборка и тесты
+## Build and tests
 
-Требуется Erlang/OTP 28+.
+Requires Erlang/OTP 28+.
 
 ```
 rebar3 compile
-rebar3 eunit        # юниты + 5 PropEr-свойств кодека
-rebar3 ct           # loopback-сценарии + golden interop
+rebar3 eunit        # unit tests + 5 PropEr codec properties
+rebar3 ct           # loopback scenarios + golden interop
 rebar3 dialyzer
 rebar3 xref
 rebar3 fmt
@@ -39,12 +39,12 @@ rebar3 as prod escriptize
 _build/prod/bin/thrift_generator generate my_api.thrift -o src
 ```
 
-Генерирует `<mod>_types.erl` (один на IDL-файл) и по три модуля на
-сервис: `<Svc>_client.erl`, `<Svc>_server.erl`, `<Svc>_handler.erl`.
+This generates `<mod>_types.erl` (one per IDL file) and three modules
+per service: `<Svc>_client.erl`, `<Svc>_server.erl`, `<Svc>_handler.erl`.
 
-## Плагин rebar3
+## rebar3 plugin
 
-В `rebar.config` проекта-потребителя:
+In the consumer project's `rebar.config`:
 
 ```erlang
 {plugins, [rebar3_thrift]},
@@ -54,11 +54,11 @@ _build/prod/bin/thrift_generator generate my_api.thrift -o src
     {out_dir, "src"}
 ]},
 
-%% регенерировать перед каждой компиляцией:
+%% regenerate before every compilation:
 {provider_hooks, [{pre, [{compile, {default, thrift}}]}]}
 ```
 
-Для локальной разработки плагин подключается через `_checkouts/`:
+For local development the plugin is attached via `_checkouts/`:
 
 ```
 mkdir -p _checkouts
@@ -66,7 +66,7 @@ ln -s /path/to/thrift-generator/apps/rebar3_thrift _checkouts/rebar3_thrift
 ln -s /path/to/thrift-generator/apps/thrift_generator _checkouts/thrift_generator
 ```
 
-## Пример
+## Example
 
 IDL (`src/ping.thrift`):
 
@@ -92,8 +92,8 @@ service Ping {
 }
 ```
 
-Обработчик (records объявлены в `<mod>_types.erl`, имена — из имён
-структур в нижнем регистре):
+Handler (records are declared in `<mod>_types.erl`; names are the
+struct names lowercased):
 
 ```erlang
 -module(ping_handler).
@@ -109,42 +109,43 @@ ping(#pingrequest{message = Msg}) ->
 poke(_Req) -> {ok, undefined}.
 ```
 
-Сервер и клиент:
+Server and client:
 
 ```erlang
 {ok, Server} = 'Ping_server':start_link(#{port => 9090, handler => ping_handler}),
 {ok, Client} = 'Ping_client':start_link(#{host => "127.0.0.1", port => 9090}),
 {ok, #pingreply{message = <<"pong: hi">>}} =
     'Ping_client':ping(Client, #pingrequest{message = <<"hi">>}),
-%% объявленное исключение — типизированное:
+%% a declared exception comes back typed:
 {error, {exception, <<"NoSuchMessage">>, #nosuchmessage{}}} =
     'Ping_client':ping(Client, #pingrequest{message = <<"bad">>}),
 ok = 'Ping_client':stop(Client),
 ok = 'Ping_server':stop(Server).
 ```
 
-Опции `start_link` (map при создании, не app env):
+`start_link` options (a map at creation time, not app env):
 
-- `transport` — `framed` (по умолчанию) или `buffered`;
-- сервер: `port`, `handler`, `max_frame_size`, `max_connections`,
+- `transport` — `framed` (the default) or `buffered`;
+- server: `port`, `handler`, `max_frame_size`, `max_connections`,
   `timeout`, `backlog`;
-- клиент: `host`, `port`, `recv_timeout`.
+- client: `host`, `port`, `recv_timeout`.
 
-## Аннотации кодогенерации
+## Codegen annotations
 
-- `erl.struct_type = "map"` — структура эмитится как map
-  (+ `erl.struct_type.map.key_type = "atom"` для атомарных ключей);
-  по умолчанию — records;
-- `erl.type = "nominal"` у typedef — `-nominal` вместо alias;
-- `erl.*`-аннотации фильтруются при парсинге, прочие сохраняются.
+- `erl.struct_type = "map"` — emit the struct as a map
+  (plus `erl.struct_type.map.key_type = "atom"` for atom keys);
+  the default is records;
+- `erl.type = "nominal"` on a typedef — `-nominal` instead of an alias;
+- `erl.*` annotations are filtered out at parse time, all others are
+  preserved.
 
-Интроспекция в духе официального генератора: `struct_info/1`,
+Introspection in the spirit of the official generator: `struct_info/1`,
 `enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`
-в `<mod>_types.erl`.
+in `<mod>_types.erl`.
 
-## Лицензия
+## License
 
-Apache License 2.0. Лексер/парсер унаследованы из Apache Thrift
-(Pinterest, 2017) с сохранением атрибуции; vendored-фикстура
-`vendor/apache-thrift-erl` — Apache Thrift 0.25.0 (см.
+Apache License 2.0. The lexer/parser are derived from Apache Thrift
+(Pinterest, 2017) with attribution preserved; the vendored fixture
+`vendor/apache-thrift-erl` is Apache Thrift 0.25.0 (see
 `vendor/apache-thrift-erl/README-VENDORED.md`).
