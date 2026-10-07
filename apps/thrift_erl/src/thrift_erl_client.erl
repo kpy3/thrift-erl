@@ -45,8 +45,6 @@ matching the classic Thrift client model.
 
 -export_type([options/0, call_result/0]).
 
--include_lib("kernel/include/logger.hrl").
-
 -type options() :: #{
     host := inet:socket_address() | inet:hostname(),
     port := inet:port_number(),
@@ -156,13 +154,13 @@ handle_call({call, Function, Args, Timeout}, _From, #state{} = State) ->
             end
     end;
 handle_call({oneway, Function, Args, _Timeout}, _From, #state{} = State) ->
-    case maps:find(Function, State#state.service_info) of
-        error ->
-            {reply, {error, unknown_function}, State};
-        {ok, Info} ->
+    case State#state.service_info of
+        #{Function := Info} ->
             SeqId = State#state.seqid + 1,
             Result = send_call(oneway, Function, SeqId, Info, Args, State),
-            {reply, Result, State#state{seqid = SeqId}}
+            {reply, Result, State#state{seqid = SeqId}};
+        _ ->
+            {reply, {error, unknown_function}, State}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported}, State}.

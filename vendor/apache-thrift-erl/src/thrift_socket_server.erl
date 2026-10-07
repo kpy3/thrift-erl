@@ -262,7 +262,16 @@ acceptor_loop(
     is_pid(Server), is_list(SocketOpts)
 ->
     % infinite timeout
-    case catch gen_tcp:accept(Listen) of
+    % OTP 29 deprecates old-style catch; this preserves its exact
+    % semantics (throw passes through, error/exit become {'EXIT', _}).
+    AcceptResult =
+        try gen_tcp:accept(Listen)
+        catch
+            throw:Throw -> Throw;
+            exit:ExitReason -> {'EXIT', ExitReason};
+            error:ErrorReason:ErrorStack -> {'EXIT', {ErrorReason, ErrorStack}}
+        end,
+    case AcceptResult of
         {ok, Socket} ->
             gen_server:cast(Server, {accepted, self()}),
             ProtoGen = fun() ->

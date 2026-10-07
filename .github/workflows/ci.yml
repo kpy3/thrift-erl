@@ -12,6 +12,15 @@ jobs:
       fail-fast: false
       matrix:
         otp: ["28", "29"]
+        include:
+          # elp ships per-OTP binaries; the release is pinned to the
+          # same build as the local toolchain (no version drift).
+          - otp: "28"
+            elp_asset: elp-linux-x86_64-unknown-linux-gnu-otp-28.5.tar.gz
+          - otp: "29"
+            elp_asset: elp-linux-x86_64-unknown-linux-gnu-otp-29.0.tar.gz
+    env:
+      ELP_RELEASE: "2026-10-05"
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -20,6 +29,10 @@ jobs:
           rebar3-version: "3.27"
       - name: Compile
         run: rebar3 compile
+      - name: Elvis lint
+        run: rebar3 lint
+      - name: Hank
+        run: rebar3 hank
       - name: Xref
         run: rebar3 xref
       - name: Dialyzer
@@ -28,3 +41,11 @@ jobs:
         run: rebar3 eunit
       - name: Common Test
         run: rebar3 ct
+      - name: Install elp
+        run: |
+          curl -fsSL -o /tmp/elp.tar.gz \
+            "https://github.com/whatsapp/erlang-language-platform/releases/download/${ELP_RELEASE}/${{ matrix.elp_asset }}"
+          tar -xzf /tmp/elp.tar.gz -C /usr/local/bin
+          elp version
+      - name: ELP lint
+        run: elp lint --rebar --as test --no-connect --ignore-app thrift

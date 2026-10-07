@@ -135,7 +135,7 @@ check_duplicate_modules(Entries) ->
         #{},
         Entries
     ),
-    case [Name || {Name, Count} <- maps:to_list(Counts), Count > 1] of
+    case [Name || Name := Count <- Counts, Count > 1] of
         [] ->
             {ok, Entries};
         [Name | _] ->

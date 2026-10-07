@@ -1,0 +1,31 @@
+# elp lint configuration (https://whatsapp.github.io/erlang-language-platform).
+# The vendored Apache Thrift runtime is skipped on the command line via
+# `--ignore-app thrift`; the settings below cover the rest.
+#
+# Deliberate deviations, mirroring the elvis configuration in
+# rebar.config:
+# - W0083 avoid_type_defs_in_header: the AST vocabulary and the golden
+#   fixtures define their types in headers by design.
+# - W0054 no_nowarn_suppressions / W0048 no_dialyzer_attribute: the
+#   leex/yecc outputs (generated at build time) and the vendored runtime
+#   suppress compiler warnings / use -dialyzer; generated and upstream
+#   code is not ours to restyle.
+# - W0023 atoms_exhaustion: the generator mints atoms from IDL names it
+#   controls (see AGENTS.md); the vendored app is excluded on the CLI.
+# - W0017 undefined_function: the rebar3 plugin calls the rebar3 API,
+#   which is not a project dependency (xref ignores it the same way).
+
+[linters.W0083]
+enabled = false
+
+[linters.W0054]
+enabled = false
+
+[linters.W0048]
+enabled = false
+
+[linters.W0023]
+exclude_apps = ["thrift_generator"]
+
+[linters.W0017]
+exclude_apps = ["rebar3_thrift"]

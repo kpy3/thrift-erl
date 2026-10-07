@@ -138,7 +138,15 @@ handle_call(
     State = #state{client = Client}
 ) ->
     Timer = timer_fun(),
-    Result = (catch thrift_client:call(Client, Op, Args)),
+    %% OTP 29 deprecates old-style catch; this preserves its exact
+    %% semantics (throw passes through, error/exit become {'EXIT', _}).
+    Result =
+        try thrift_client:call(Client, Op, Args)
+        catch
+            throw:Throw -> Throw;
+            exit:ExitReason -> {'EXIT', ExitReason};
+            error:ErrorReason:ErrorStack -> {'EXIT', {ErrorReason, ErrorStack}}
+        end,
     Time = Timer(),
 
     case Result of
@@ -217,10 +225,24 @@ try_connect(
 ) ->
     case OldClient of
         nil -> ok;
-        _ -> (catch thrift_client:close(OldClient))
+        _ ->
+            %% Best effort: a dead client must not abort the reconnect.
+            try thrift_client:close(OldClient)
+            catch
+                _:_:_ -> ok
+            end
     end,
 
-    case catch thrift_client_util:new(Host, Port, TSvc, TOpts) of
+    %% OTP 29 deprecates old-style catch; this preserves its exact
+    %% semantics (throw passes through, error/exit become {'EXIT', _}).
+    ConnectResult =
+        try thrift_client_util:new(Host, Port, TSvc, TOpts)
+        catch
+            throw:Throw -> Throw;
+            exit:ExitReason -> {'EXIT', ExitReason};
+            error:ErrorReason:ErrorStack -> {'EXIT', {ErrorReason, ErrorStack}}
+        end,
+    case ConnectResult of
         {ok, Client} ->
             State#state{client = Client, reconn_time = 0};
         {E, Msg} when E == error; E == exception ->

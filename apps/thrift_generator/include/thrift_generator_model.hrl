@@ -12,8 +12,8 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
--ifndef(__thrift_generator_model__).
--define(__thrift_generator_model__, true).
+-ifndef(THRIFT_GENERATOR_MODEL_HRL).
+-define(THRIFT_GENERATOR_MODEL_HRL, true).
 
 -include("thrift_generator.hrl").
 

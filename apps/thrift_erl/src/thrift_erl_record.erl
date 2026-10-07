@@ -38,7 +38,13 @@ the generated boundary code and the codec.
     from_wire/2
 ]).
 
--export_type([field_desc/0]).
+-export_type([
+    type_desc/0,
+    field_desc/0,
+    struct_desc/0,
+    call_result/0,
+    exception_field/0
+]).
 
 -type type_desc() :: thrift_erl_binary:type_desc().
 -type field_desc() :: thrift_erl_binary:field_desc().
@@ -189,10 +195,10 @@ from_wire(_Type, Value) ->
 -spec struct_to_wire([field_desc()], tuple()) -> map().
 struct_to_wire(Fields, Record) ->
     Values = tl(tuple_to_list(Record)),
-    maps:from_list([
-        {Name, to_wire(Type, V)}
+    #{
+        Name => to_wire(Type, V)
      || {V, {_, _, Type, Name, _}} <- lists:zip(Values, Fields), V =/= undefined
-    ]).
+    }.
 
 -spec struct_from_wire(atom(), [field_desc()], map()) -> tuple().
 struct_from_wire(Tag, Fields, Map) ->

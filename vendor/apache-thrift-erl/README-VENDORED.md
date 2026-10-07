@@ -27,17 +27,19 @@ versions must move together.
 ## Local modifications (kept minimal, documented here)
 
 - OTP 29 compatibility patches: old-style `catch Expr` is deprecated and
-  scheduled for removal, so the uses on the connect paths are rewritten
-  to `try ... catch Class:Reason -> {Class, Reason}` (normal
-  `{ok, _}`/`{error, _}` returns behave identically):
+  scheduled for removal, so every use is rewritten to an equivalent
+  `try ... catch` (throw passes through, error/exit become `{'EXIT', _}`,
+  normal returns behave identically):
   - `src/thrift_socket_transport.erl`: the factory's
     `catch gen_tcp:connect(...)`.
   - `src/thrift_sslsocket_transport.erl`: `catch ssl:handshake(...)`,
     `catch gen_tcp:connect(...)` and `catch ssl:connect(...)` in the
     factory, plus `catch gen_tcp:close(...)`.
-- `src/thrift_reconnecting_client.erl` keeps its old-style catches
-  (deprecated but still functional on OTP 28/29); left untouched to keep
-  the diff minimal. Revisit when OTP removes the construct.
+  - `src/thrift_reconnecting_client.erl`: `catch thrift_client:call/3`
+    in `handle_call`, the best-effort `catch thrift_client:close/1` and
+    `catch thrift_client_util:new/4` in `try_connect/1`.
+  - `src/thrift_socket_server.erl`: `catch gen_tcp:accept/1` in
+    `acceptor_loop/1`.
 
 Everything else — including `src/thrift.app.src` — is shipped as-is
 (0.25.0 already removed `erlang:get_stacktrace/0`, `ssl:ssl_accept/2` and

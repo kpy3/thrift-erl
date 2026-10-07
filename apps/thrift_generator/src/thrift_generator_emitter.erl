@@ -91,11 +91,12 @@ compile_sources(Model) ->
 -spec module_forms(#tg_model{}) -> [{module(), erl_syntax:forms()}].
 module_forms(Model) ->
     Ctx0 = #ctx{
-        modules = maps:from_list([{M#tg_module.name, M} || M <- Model#tg_model.modules]),
-        type_modules = maps:from_list([
-            {M#tg_module.name, types_module_atom(M#tg_module.name)}
-         || M <- Model#tg_model.modules
-        ]),
+        modules = #{M#tg_module.name => M || M <- Model#tg_model.modules},
+        type_modules =
+            #{
+                M#tg_module.name => types_module_atom(M#tg_module.name)
+             || M <- Model#tg_model.modules
+            },
         current = undefined
     },
     lists:append([
@@ -186,7 +187,7 @@ struct_info_forms(Mod, Ctx) ->
         fn_clause([abstract(S#tg_struct.name)], abstract(struct_desc(S, Ctx)))
      || S <- Mod#tg_module.structs
     ],
-    fn_form(struct_info, Clauses ++ [fn_clause([wildcard()], abstract(error))]).
+    total_form(struct_info, Clauses).
 
 -spec struct_desc(#tg_struct{}, #ctx{}) -> desc().
 struct_desc(S, Ctx) ->
@@ -205,7 +206,13 @@ enum_info_forms(Mod) ->
         )
      || E <- Mod#tg_module.enums
     ],
-    fn_form(enum_info, Clauses ++ [fn_clause([wildcard()], abstract(error))]).
+    total_form(enum_info, Clauses).
+
+%% Every introspection lookup ends in the same catch-all clause: an
+%% unknown key answers `error`, mirroring the official generator.
+-spec total_form(atom(), [erl_syntax:syntaxTree()]) -> erl_syntax:forms().
+total_form(Name, Clauses) ->
+    fn_form(Name, Clauses ++ [fn_clause([wildcard()], abstract(error))]).
 
 -spec function_info_forms(#tg_module{}, #ctx{}) -> erl_syntax:forms().
 function_info_forms(Mod, Ctx) ->
@@ -688,33 +695,13 @@ client_fn(F, TypesMod) ->
                 erl_syntax:list(param_vars(NParams))
             ]
         ),
+    WireName = abstract(F#tg_function.name),
     LongBody =
         case F#tg_function.oneway of
             true ->
-                [
-                    erl_syntax:application(
-                        erl_syntax:atom(thrift_erl_client),
-                        erl_syntax:atom(oneway),
-                        [
-                            erl_syntax:variable("Client"),
-                            abstract(F#tg_function.name),
-                            WireArgs,
-                            erl_syntax:variable("Timeout")
-                        ]
-                    )
-                ];
+                [client_bridge_call(oneway, WireName, WireArgs)];
             false ->
-                RawCall =
-                    erl_syntax:application(
-                        erl_syntax:atom(thrift_erl_client),
-                        erl_syntax:atom(call),
-                        [
-                            erl_syntax:variable("Client"),
-                            abstract(F#tg_function.name),
-                            WireArgs,
-                            erl_syntax:variable("Timeout")
-                        ]
-                    ),
+                RawCall = client_bridge_call(call, WireName, WireArgs),
                 [
                     erl_syntax:application(
                         erl_syntax:atom(thrift_erl_record),
@@ -740,6 +727,22 @@ client_fn(F, TypesMod) ->
             spec_form(F, NParams + 1, oneway_ret(F)) ++
             spec_form(F, NParams + 2, call_ret()),
     {Exports, Forms}.
+
+%% The long-form wrapper delegates to `thrift_erl_client` either the
+%% oneway or the request/response call; both take the same shape.
+-spec client_bridge_call(oneway | call, erl_syntax:syntaxTree(), erl_syntax:syntaxTree()) ->
+    erl_syntax:syntaxTree().
+client_bridge_call(Method, FunName, WireArgs) ->
+    erl_syntax:application(
+        erl_syntax:atom(thrift_erl_client),
+        erl_syntax:atom(Method),
+        [
+            erl_syntax:variable("Client"),
+            FunName,
+            WireArgs,
+            erl_syntax:variable("Timeout")
+        ]
+    ).
 
 -spec param_vars(pos_integer()) -> [erl_syntax:syntaxTree()].
 param_vars(N) ->
@@ -824,9 +827,9 @@ erlang_type({base, double, _}, _) ->
     raw_type(float);
 erlang_type({base, S, _}, _) when S =:= string; S =:= binary; S =:= uuid ->
     raw_type(binary);
-erlang_type({list, T, _}, Ctx) ->
-    {type, erl_anno:new(0), list, [erlang_type(T, Ctx)]};
-erlang_type({set, T, _}, Ctx) ->
+erlang_type({Kind, T, _}, Ctx) when Kind =:= list; Kind =:= set ->
+    %% sets travel as lists on the wire (element type + count), exactly
+    %% like the official generator emits them
     {type, erl_anno:new(0), list, [erlang_type(T, Ctx)]};
 erlang_type({map, K, V, _}, Ctx) ->
     Anno = erl_anno:new(0),
@@ -835,14 +838,14 @@ erlang_type({ref, Name, _}, Ctx) ->
     case binary:split(Name, <<".">>) of
         [ModKey, Local] ->
             Module = maps:get(ModKey, Ctx#ctx.modules, undefined),
-            ref_type(Local, find_struct(Module, Local));
+            ref_type(find_struct(Module, Local));
         [Local] ->
             Module = maps:get(Ctx#ctx.current, Ctx#ctx.modules),
-            ref_type(Local, find_struct(Module, Local))
+            ref_type(find_struct(Module, Local))
     end.
 
--spec ref_type(binary(), {ok, #tg_struct{}} | error) -> erl_syntax:syntaxTree().
-ref_type(_Name, {ok, S}) ->
+-spec ref_type({ok, #tg_struct{}} | error) -> erl_syntax:syntaxTree().
+ref_type({ok, S}) ->
     case record_mode(S) of
         true ->
             Tag = record_tag(S#tg_struct.name),
@@ -850,7 +853,7 @@ ref_type(_Name, {ok, S}) ->
         false ->
             raw_type(map)
     end;
-ref_type(_, error) ->
+ref_type(error) ->
     %% Enums and typedefs surface as their scalar element types.
     raw_type(term).
 
@@ -880,7 +883,7 @@ function_atom(Name) ->
 
 -spec var_fun() -> fun((string()) -> erl_syntax:syntaxTree()).
 var_fun() ->
-    fun(Name) -> erl_syntax:variable(Name) end.
+    fun erl_syntax:variable/1.
 
 -spec header(module(), binary()) -> erl_syntax:forms().
 header(ModuleName, DocBinary) ->
@@ -961,7 +964,7 @@ abstract(Term) when is_list(Term) ->
 abstract(Term) when is_map(Term) ->
     erl_syntax:map_expr([
         erl_syntax:map_field_assoc(abstract(Key), abstract(Value))
-     || {Key, Value} <- maps:to_list(Term)
+     || Key := Value <- Term
     ]);
 abstract(Term) ->
     erl_syntax:abstract(Term).

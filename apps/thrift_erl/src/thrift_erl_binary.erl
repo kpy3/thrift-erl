@@ -50,7 +50,8 @@ parse incrementally off a socket.
     enum_desc/0,
     struct_value/0,
     message_type/0,
-    application_exception/0
+    application_exception/0,
+    decode_result/1
 ]).
 
 %% Wire type ids (TType) and message envelope constants of the binary
@@ -422,10 +423,7 @@ decode_struct_fields(_Desc, Bin, _Required, _Acc) when byte_size(Bin) < 3 ->
 
 -spec required_fields(struct_desc()) -> required_map().
 required_fields({_, Fields}) ->
-    maps:from_list([
-        {Id, {Name, Type}}
-     || {Id, required, Type, Name, _} <- Fields
-    ]).
+    #{Id => {Name, Type} || {Id, required, Type, Name, _} <- Fields}.
 
 -spec field_desc_for(struct_desc(), integer()) -> {ok, field_desc()} | error.
 field_desc_for({_, Fields}, Id) ->

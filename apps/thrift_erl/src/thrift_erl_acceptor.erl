@@ -147,7 +147,7 @@ handle_info(_Info, State) ->
 -spec terminate(term(), #state{}) -> term().
 terminate(_Reason, #state{listen_socket = ListenSocket, connections = Connections}) ->
     gen_tcp:close(ListenSocket),
-    lists:foreach(fun(Pid) -> thrift_erl_connection:stop(Pid) end, maps:values(Connections)),
+    lists:foreach(fun thrift_erl_connection:stop/1, maps:values(Connections)),
     ok.
 
 %%--------------------------------------------------------------------

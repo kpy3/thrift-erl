@@ -184,13 +184,13 @@ process_message(Message, #state{} = State) ->
 
 -spec handle_call_message(binary(), non_neg_integer(), binary(), #state{}) -> #state{}.
 handle_call_message(Name, SeqId, Tail, #state{} = State) ->
-    case maps:find(Name, State#state.service_info) of
-        error ->
+    case State#state.service_info of
+        #{Name := Info} ->
+            dispatch(Name, SeqId, Tail, Info, State);
+        _ ->
             reply_application_exception(
                 Name, SeqId, <<"unknown function">>, 1, State
-            );
-        {ok, Info} ->
-            dispatch(Name, SeqId, Tail, Info, State)
+            )
     end.
 
 -spec dispatch(binary(), non_neg_integer(), binary(), thrift_erl_service:function_info(), #state{}) ->
@@ -241,11 +241,8 @@ dispatch(Name, SeqId, Tail, Info, #state{} = State) ->
 
 -spec handle_oneway_message(binary(), binary(), #state{}) -> #state{}.
 handle_oneway_message(Name, Tail, #state{} = State) ->
-    case maps:find(Name, State#state.service_info) of
-        error ->
-            ?LOG_WARNING(#{domain => [thrift], msg => "unknown oneway function", name => Name}),
-            State;
-        {ok, Info} ->
+    case State#state.service_info of
+        #{Name := Info} ->
             case decode_params(Tail, Info) of
                 {ok, Args} ->
                     Args1 = args_for_handler(Args, Info, State),
@@ -272,7 +269,10 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
                         reason => Reason
                     }),
                     State
-            end
+            end;
+        _ ->
+            ?LOG_WARNING(#{domain => [thrift], msg => "unknown oneway function", name => Name}),
+            State
     end.
 
 -spec decode_params(binary(), thrift_erl_service:function_info()) ->
@@ -417,5 +417,9 @@ send_message(Type, Name, SeqId, Payload, #state{} = State) ->
     end.
 
 -spec function_name(binary()) -> atom().
+%% Handler modules are compiled and loaded before traffic arrives, so
+%% every real function name already exists as an atom; refusing to mint
+%% new ones keeps hostile message names from growing the atom table.
+%% The badarg for unknown names is caught by the dispatch try/catch.
 function_name(Name) ->
-    binary_to_atom(Name, utf8).
+    binary_to_existing_atom(Name, utf8).

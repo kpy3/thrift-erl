@@ -29,6 +29,8 @@ triples before failing.
 
 -export([analyze/1]).
 
+-export_type([sem_error/0]).
+
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
 
@@ -98,10 +100,7 @@ analyze([Root | _] = Loaded) ->
 
 -spec index_defs([#tg_loaded{}], fun((ast_node()) -> V | skip)) -> #{binary() => #{binary() => V}}.
 index_defs(Loaded, Extract) ->
-    maps:from_list([
-        {L#tg_loaded.name, local_defs(L, Extract)}
-     || L <- Loaded
-    ]).
+    #{L#tg_loaded.name => local_defs(L, Extract) || L <- Loaded}.
 
 -spec local_defs(#tg_loaded{}, fun((ast_node()) -> V | skip)) -> #{binary() => V}.
 local_defs(Loaded, Extract) ->
@@ -395,7 +394,7 @@ analyze_typedef(Node, {Acc, Ctx}) ->
 
 -spec check_typedef_cycles([#tg_typedef{}], #ctx{}) -> #ctx{}.
 check_typedef_cycles(Typedefs, Ctx) ->
-    LocalTypedefs = maps:from_list([{T#tg_typedef.name, T} || T <- Typedefs]),
+    LocalTypedefs = #{T#tg_typedef.name => T || T <- Typedefs},
     lists:foldl(
         fun(T, C) -> visit_typedef(T#tg_typedef.name, T#tg_typedef.line, LocalTypedefs, #{}, C) end,
         Ctx,
@@ -410,8 +409,8 @@ visit_typedef(Name, Line, LocalTypedefs, Visiting, Ctx) ->
         #{Name := true} ->
             err(Line, "typedef cycle through ~ts", [Name], Ctx);
         _ ->
-            case maps:find(Name, LocalTypedefs) of
-                {ok, #tg_typedef{type = {ref, Target, _}}} ->
+            case LocalTypedefs of
+                #{Name := #tg_typedef{type = {ref, Target, _}}} ->
                     case is_local_name(Target) andalso maps:is_key(Target, LocalTypedefs) of
                         true ->
                             visit_typedef(Target, Line, LocalTypedefs, Visiting#{Name => true}, Ctx);
@@ -550,7 +549,7 @@ local_typedef_target(Ref, Ctx) ->
 -spec analyze_services([ast_node()], #ctx{}) -> {[#tg_service{}], #ctx{}}.
 analyze_services(Defs, Ctx) ->
     RawServices = [N || N <- Defs, N#thrift_generator_node.type_module =:= thrift_generator_service],
-    ByName = maps:from_list([{service_name(N), N} || N <- RawServices]),
+    ByName = #{service_name(N) => N || N <- RawServices},
     lists:foldl(
         fun(Node, {Acc, C0}) ->
             {Service, C1} = analyze_service(Node, ByName, #{}, C0),
@@ -607,12 +606,12 @@ parent_functions(ParentName, Line, ByName, InProgress, Ctx0) when is_binary(Pare
     Ctx = validate_type({ref, ParentName, #{}}, Line, Ctx0),
     case resolve_type_ref(ParentName, Ctx) of
         {ok, {Module, _, service}} when Module =:= Ctx#ctx.module ->
-            case maps:find(ParentName, ByName) of
-                {ok, ParentNode} ->
+            case ByName of
+                #{ParentName := ParentNode} ->
                     {#tg_service{functions = Fns}, C1} =
                         analyze_service(ParentNode, ByName, InProgress, Ctx),
                     {Fns, C1};
-                error ->
+                _ ->
                     {[], err(Line, "unknown service ~ts", [ParentName], Ctx)}
             end;
         {ok, {Module, LocalName, service}} ->
@@ -762,27 +761,26 @@ validate_type(_Base, _Line, Ctx) ->
 resolve_type_ref(Name, Ctx) ->
     case is_local_name(Name) of
         true ->
-            case maps:find(Name, maps:get(Ctx#ctx.module, Ctx#ctx.all_defs, #{})) of
-                {ok, Kind} ->
-                    {ok, {Ctx#ctx.module, Name, Kind}};
-                error ->
-                    error
+            case maps:get(Ctx#ctx.module, Ctx#ctx.all_defs, #{}) of
+                #{Name := Kind} -> {ok, {Ctx#ctx.module, Name, Kind}};
+                _ -> error
             end;
         false ->
-            find_first(
-                fun(Module) ->
-                    case strip_prefix(Name, Module) of
-                        error ->
-                            error;
-                        Rest ->
-                            case maps:find(Rest, maps:get(Module, Ctx#ctx.all_defs, #{})) of
-                                {ok, Kind} -> {ok, {Module, Rest, Kind}};
-                                error -> error
-                            end
-                    end
-                end,
-                maps:keys(Ctx#ctx.all_defs)
-            )
+            find_first(fun(Module) -> dotted_ref(Name, Module, Ctx) end, maps:keys(Ctx#ctx.all_defs))
+    end.
+
+%% Resolves `Name` as `Module.Name`: the part after the prefix must be
+%% a definition of the module.
+-spec dotted_ref(binary(), binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+dotted_ref(Name, Module, Ctx) ->
+    case strip_prefix(Name, Module) of
+        error ->
+            error;
+        Rest ->
+            case maps:get(Module, Ctx#ctx.all_defs, #{}) of
+                #{Rest := Kind} -> {ok, {Module, Rest, Kind}};
+                _ -> error
+            end
     end.
 
 -spec enum_members(binary(), #ctx{}) -> {ok, [binary()]} | error.
@@ -874,25 +872,33 @@ resolve_value_ref(Ref, Ctx) ->
     {ok, {const, const_value()}} | {ok, {enum_member, binary()}} | error.
 try_const_and_enum(Name, Module, Ctx) ->
     Consts = maps:get(Module, Ctx#ctx.all_const_values, #{}),
-    Enums = maps:get(Module, Ctx#ctx.all_enum_members, #{}),
     case Consts of
         #{Name := Value} ->
             {ok, {const, Value}};
         _ ->
-            case split_member(Name) of
-                {EnumName, Member} ->
-                    case Enums of
-                        #{EnumName := Members} ->
-                            case lists:member(Member, Members) of
-                                true -> {ok, {enum_member, Member}};
-                                false -> error
-                            end;
-                        _ ->
-                            error
-                    end;
-                error ->
-                    error
-            end
+            try_enum_member(Name, maps:get(Module, Ctx#ctx.all_enum_members, #{}))
+    end.
+
+%% `EnumName.Member` in an included module resolves to the member atom
+%% when the enum declares it.
+-spec try_enum_member(binary(), #{binary() := [binary()]}) ->
+    {ok, {enum_member, binary()}} | error.
+try_enum_member(Name, Enums) ->
+    case split_member(Name) of
+        {EnumName, Member} ->
+            case Enums of
+                #{EnumName := Members} -> member_if_declared(Member, Members);
+                _ -> error
+            end;
+        error ->
+            error
+    end.
+
+-spec member_if_declared(binary(), [binary()]) -> {ok, {enum_member, binary()}} | error.
+member_if_declared(Member, Members) ->
+    case lists:member(Member, Members) of
+        true -> {ok, {enum_member, Member}};
+        false -> error
     end.
 
 %%--------------------------------------------------------------------

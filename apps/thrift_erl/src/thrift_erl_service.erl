@@ -32,8 +32,6 @@ arguments in declaration order. They answer:
   `TApplicationException` (INTERNAL_ERROR).
 """.
 
--export([behaviour_info/1]).
-
 -export_type([function_info/0, service_info/0, handler_result/0]).
 
 -type function_info() :: #{
@@ -54,7 +52,7 @@ arguments in declaration order. They answer:
     {ok, term()}
     | {error, {exception, Name :: binary(), thrift_erl_binary:struct_value()}}.
 
--doc false.
--spec behaviour_info(callbacks) -> [{service_info, 0}].
-behaviour_info(callbacks) ->
-    [{service_info, 0}].
+-doc """
+The single callback of the behaviour: returns the service descriptor.
+""".
+-callback service_info() -> service_info().

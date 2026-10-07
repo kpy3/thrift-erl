@@ -23,3 +23,5 @@ apps/*/src/thrift_lexer.erl
 apps/*/src/thrift_parser.erl
 .zcode/
 vendor/apache-thrift-erl/rebar.lock
+# project-local agent instructions: kept in the working tree, not in git
+AGENTS.md

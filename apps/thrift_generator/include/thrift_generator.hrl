@@ -12,8 +12,37 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
--ifndef(__thrift_generator__).
--define(__thrift_generator__, true).
+-ifndef(THRIFT_GENERATOR_HRL).
+-define(THRIFT_GENERATOR_HRL, true).
+
+%% Every module including this header re-exports the shared vocabulary
+%% so elvis's export_used_types sees one definition point.
+-export_type([
+    erl_annotations/0,
+    annotations/0,
+    doc/0,
+    base_type/0,
+    type_ref/0,
+    thrift_type/0,
+    const_value/0,
+    enum_value/0,
+    requiredness/0,
+    ast_node/0,
+    document/0,
+    include_/0,
+    cpp_include/0,
+    namespace_/0,
+    constant/0,
+    typedef/0,
+    enum_/0,
+    struct_/0,
+    union_def/0,
+    exception_/0,
+    service/0,
+    function_/0,
+    field_/0,
+    node_payload/0
+]).
 
 %% --------------------------------------------------------------------
 %% Shared vocabulary: annotations, doc comments, Thrift types, constant

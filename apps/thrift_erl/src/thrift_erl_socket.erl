@@ -37,7 +37,7 @@ and a per-call timeout.
     accept/1
 ]).
 
--export_type([transport/0]).
+-export_type([transport/0, socket/0]).
 
 -type transport() :: buffered | framed.
 -type socket() :: gen_tcp:socket().
