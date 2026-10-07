@@ -38,7 +38,8 @@ parse incrementally off a socket.
     decode_message/1,
     encode_application_exception/2,
     decode_application_exception/1,
-    type_id/1
+    type_id/1,
+    struct_fields/1
 ]).
 
 -export_type([
@@ -74,7 +75,10 @@ parse incrementally off a socket.
 -type base_type() :: bool | i8 | i16 | i32 | i64 | double | string | binary | uuid.
 -type requiredness() :: required | optional | default.
 -type enum_desc() :: [{integer(), atom()}].
--type struct_desc() :: {struct | union | exception, [field_desc()]}.
+%% A struct descriptor is either the full `{Kind, Fields}` tuple or a
+%% `{ref, Module, Name}` resolved through `Module:struct_info/1` — the
+%% indirection keeps recursive descriptors finite.
+-type struct_desc() :: {struct | union | exception, [field_desc()]} | {ref, module(), binary()}.
 -type field_desc() :: {
     Id :: integer(),
     requiredness(),
@@ -144,6 +148,13 @@ encode({set, Elem}, Values) when is_list(Values) ->
     encode_sequence(Elem, Values);
 encode({map, Key, Val}, Value) when is_map(Value) ->
     encode_map(Key, Val, Value);
+encode({struct, {ref, Module, Name}} = Ref, Value) when is_map(Value) ->
+    case Module:struct_info(Name) of
+        {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
+            encode({struct, {Kind, Fields}}, Value);
+        error ->
+            {error, {encode, {unknown_struct, Ref}}}
+    end;
 encode({struct, Desc}, Value) when is_map(Value) ->
     encode_struct(Desc, Value);
 encode(_Type, Value) ->
@@ -190,6 +201,13 @@ decode({set, Elem}, Bin) ->
     decode_sequence(Elem, Bin);
 decode({map, Key, Val}, Bin) ->
     decode_map(Key, Val, Bin);
+decode({struct, {ref, Module, Name}}, Bin) ->
+    case Module:struct_info(Name) of
+        {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
+            decode({struct, {Kind, Fields}}, Bin);
+        error ->
+            {error, {decode, {unknown_struct, {Module, Name}}}}
+    end;
 decode({struct, Desc}, Bin) ->
     decode_struct(Desc, Bin);
 %% Short fixed-size inputs ask for more bytes; anything else that fell
@@ -654,6 +672,18 @@ type_id({list, _}) -> ?LIST;
 type_id({set, _}) -> ?SET;
 type_id({map, _, _}) -> ?MAP;
 type_id({struct, _}) -> ?STRUCT.
+
+-doc """
+Returns the field descriptors of a struct type descriptor
+(`{struct, {Kind, Fields}}`), resolving `{struct, {ref, M, N}}`
+through `M:struct_info/1`.
+""".
+-spec struct_fields(type_desc()) -> [field_desc()].
+struct_fields({struct, {ref, Module, Name}}) ->
+    {_, Fields} = Module:struct_info(Name),
+    Fields;
+struct_fields({struct, {_Kind, Fields}}) ->
+    Fields.
 
 -spec wire_type_id(type_desc()) -> non_neg_integer().
 wire_type_id(Type) ->

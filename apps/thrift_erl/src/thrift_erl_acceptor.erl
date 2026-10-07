@@ -41,6 +41,9 @@ mechanism.
     max_frame_size => pos_integer(),
     max_connections => pos_integer(),
     timeout => pos_integer(),
+    %% record representation bridge for handlers (see thrift_erl_record)
+    record_api => boolean(),
+    types => module(),
     backlog => pos_integer(),
     %% 0 binds an ephemeral port; read it back with port/1.
     port := inet:port_number(),
@@ -83,7 +86,9 @@ port(Pid) ->
 init(Opts) ->
     case thrift_erl_socket:listen(Opts) of
         {ok, ListenSocket} ->
-            ConnectionOpts = maps:with([handler, service, transport, max_frame_size, timeout], Opts),
+            ConnectionOpts = maps:with(
+                [handler, service, transport, max_frame_size, timeout, record_api, types], Opts
+            ),
             State =
                 #state{
                     listen_socket = ListenSocket,

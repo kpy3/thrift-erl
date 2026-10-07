@@ -15,5 +15,6 @@ enum Color { RED = 1, GREEN, BLUE = 10 }
 exception Failed { 1: string reason }
 
 service MainService extends shared.BaseService {
-  shared.Inner fetch(1: i64 id) throws (1: Failed f)
+  shared.Inner fetch(1: i64 id) throws (1: Failed f),
+  oneway void fire(1: i32 code)
 }

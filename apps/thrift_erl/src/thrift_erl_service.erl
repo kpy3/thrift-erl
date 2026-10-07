@@ -40,10 +40,10 @@ arguments in declaration order. They answer:
     %% function name as written in the IDL
     name := binary(),
     oneway := boolean(),
-    %% params as a struct descriptor (ids are the argument ids)
-    params := thrift_erl_binary:struct_desc(),
+    %% params as a full struct type descriptor (ids are the argument ids)
+    params := thrift_erl_binary:type_desc(),
     %% reply type descriptor, `void` maps to `undefined`
-    reply => thrift_erl_binary:type_desc(),
+    reply => thrift_erl_binary:type_desc() | undefined,
     %% declared exceptions as throw-field descriptors
     exceptions => [thrift_erl_binary:field_desc()]
 }.

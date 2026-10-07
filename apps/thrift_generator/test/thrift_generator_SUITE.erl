@@ -32,7 +32,9 @@
     semantic_pipeline/1,
     loader_cycle/1,
     loader_duplicate_module/1,
-    loader_missing_include/1
+    loader_missing_include/1,
+    generated_loopback_buffered/1,
+    generated_loopback_framed/1
 ]).
 
 all() ->
@@ -44,7 +46,9 @@ all() ->
         semantic_pipeline,
         loader_cycle,
         loader_duplicate_module,
-        loader_missing_include
+        loader_missing_include,
+        generated_loopback_buffered,
+        generated_loopback_framed
     ].
 
 parse_thrift_test_idl(Config) ->
@@ -188,7 +192,7 @@ semantic_pipeline(Config) ->
     [MainService] = MainMod#tg_module.services,
     ?assertEqual(<<"shared.BaseService">>, MainService#tg_service.extends),
     ?assertEqual(
-        [<<"ping">>, <<"area">>, <<"fetch">>],
+        [<<"ping">>, <<"area">>, <<"fetch">>, <<"fire">>],
         [F#tg_function.name || F <- MainService#tg_service.functions]
     ),
 
@@ -227,6 +231,83 @@ loader_missing_include(Config) ->
         {error, {parse, Missing, _}},
         thrift_generator_loader:load(data_file(Config, "semantic/missing_include.thrift"))
     ).
+
+%% End-to-end through the generated stack: main.thrift → compiled
+%% modules → server + typed client. Struct arguments and results cross
+%% the wire as records; the declared exception comes back typed.
+
+generated_loopback_buffered(Config) ->
+    generated_loopback(Config, buffered).
+
+generated_loopback_framed(Config) ->
+    generated_loopback(Config, framed).
+
+-spec generated_loopback(ct:config(), buffered | framed) -> ok.
+generated_loopback(Config, Transport) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {ok, Server} = 'MainService_server':start_link(#{
+        port => 0,
+        handler => thrift_generator_test_handler,
+        transport => Transport
+    }),
+    try
+        {ok, Port} = 'MainService_server':port(Server),
+        {ok, Client} = 'MainService_client':start_link(#{
+            host => "127.0.0.1", port => Port, transport => Transport
+        }),
+        try
+            ?assertEqual({ok, undefined}, 'MainService_client':ping(Client)),
+            ?assertEqual({ok, 12}, 'MainService_client':area(Client, 3, 4)),
+            ?assertEqual(
+                {ok, {inner, <<"5">>}},
+                'MainService_client':fetch(Client, 5)
+            ),
+            ?assertEqual(
+                {error, {exception, <<"f">>, {failed, <<"negative id">>}}},
+                'MainService_client':fetch(Client, -1)
+            ),
+            check_oneway(Client)
+        after
+            'MainService_client':stop(Client)
+        end
+    after
+        'MainService_server':stop(Server)
+    end.
+
+-spec check_oneway(pid()) -> ok.
+check_oneway(Client) ->
+    Sink = self(),
+    true = register(thrift_generator_test_sink, Sink),
+    try
+        ok = 'MainService_client':fire(Client, 42),
+        receive
+            {fired, 42} -> ok
+        after 5000 -> exit(oneway_not_delivered)
+        end
+    after
+        case whereis(thrift_generator_test_sink) of
+            Sink -> unregister(thrift_generator_test_sink);
+            _ -> ok
+        end
+    end.
+
+%% Generates and loads the modules for the semantic fixture. Safe to
+%% call repeatedly: `code:load_binary` replaces prior versions.
+
+-spec generate_modules(binary()) -> ok.
+generate_modules(MainPath) ->
+    {ok, Loaded} = thrift_generator_loader:load(MainPath),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) ->
+                {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam);
+            ({error, {Name, Errors}}) ->
+                erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+    ok.
 
 %% Helpers
 

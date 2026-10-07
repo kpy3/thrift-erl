@@ -13,13 +13,14 @@
 %% limitations under the License.
 
 %% Hand-written stand-in for a generated service description module,
-%% used by the loopback Common Test suite.
+%% used by the loopback Common Test suite. Descriptor shapes are the
+%% canonical ones from `thrift_erl_binary`.
 
 -module(thrift_erl_test_service).
 
 -behaviour(thrift_erl_service).
 
--export([service_info/0]).
+-export([service_info/0, struct_info/1]).
 
 -spec service_info() -> thrift_erl_service:service_info().
 service_info() ->
@@ -28,69 +29,82 @@ service_info() ->
             name => <<"add">>,
             oneway => false,
             params =>
-                {struct, [
-                    {1, default, {base, i32}, <<"a">>, undefined},
-                    {2, default, {base, i32}, <<"b">>, undefined}
-                ]},
+                {struct,
+                    {struct, [
+                        {1, default, {base, i32}, <<"a">>, undefined},
+                        {2, default, {base, i32}, <<"b">>, undefined}
+                    ]}},
             reply => {base, i32}
         },
         <<"echo">> => #{
             name => <<"echo">>,
             oneway => false,
             params =>
-                {struct, [
-                    {1, default, {base, string}, <<"m">>, undefined}
-                ]},
+                {struct,
+                    {struct, [
+                        {1, default, {base, string}, <<"m">>, undefined}
+                    ]}},
             reply => {base, string}
         },
         <<"size">> => #{
             name => <<"size">>,
             oneway => false,
             params =>
-                {struct, [
-                    {1, default, {list, {base, string}}, <<"items">>, undefined}
-                ]},
+                {struct,
+                    {struct, [
+                        {1, default, {list, {base, string}}, <<"items">>, undefined}
+                    ]}},
             reply => {base, i32}
         },
         <<"deep">> => #{
             name => <<"deep">>,
             oneway => false,
             params =>
-                {struct, [
-                    {1, default, {struct, point_desc()}, <<"p">>, undefined}
-                ]},
-            reply => {struct, point_desc()}
+                {struct,
+                    {struct, [
+                        {1, default, {struct, {ref, ?MODULE, <<"point">>}}, <<"p">>, undefined}
+                    ]}},
+            reply => {struct, {ref, ?MODULE, <<"point">>}}
         },
         <<"ping">> => #{
             name => <<"ping">>,
             oneway => false,
-            params => {struct, []}
+            params => {struct, {struct, []}}
             %% void: no reply descriptor
         },
         <<"boom">> => #{
             name => <<"boom">>,
             oneway => false,
-            params => {struct, []},
+            params => {struct, {struct, []}},
             reply => {base, string},
             exceptions => [
-                {1, default, {struct, boom_desc()}, <<"b">>, undefined}
+                {1, default, {struct, {ref, ?MODULE, <<"boom">>}}, <<"b">>, undefined}
             ]
         },
         <<"boomInternal">> => #{
             name => <<"boomInternal">>,
             oneway => false,
-            params => {struct, []},
+            params => {struct, {struct, []}},
             reply => {base, string}
         },
         <<"notify">> => #{
             name => <<"notify">>,
             oneway => true,
             params =>
-                {struct, [
-                    {1, default, {base, string}, <<"m">>, undefined}
-                ]}
+                {struct,
+                    {struct, [
+                        {1, default, {base, string}, <<"m">>, undefined}
+                    ]}}
         }
     }.
+
+-spec struct_info(binary()) -> thrift_erl_binary:struct_desc() | error.
+struct_info(<<"point">>) ->
+    point_desc();
+struct_info(<<"boom">>) ->
+    boom_desc();
+struct_info(_) ->
+    error.
 
 -spec point_desc() -> thrift_erl_binary:struct_desc().
 point_desc() ->

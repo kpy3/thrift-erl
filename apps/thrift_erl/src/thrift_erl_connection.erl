@@ -51,7 +51,11 @@ application environment:
     service := module(),
     transport => thrift_erl_socket:transport(),
     max_frame_size => pos_integer(),
-    timeout => pos_integer()
+    timeout => pos_integer(),
+    %% when true, handler arguments and results are records; `types`
+    %% names the generated types module providing record_fields/1
+    record_api => boolean(),
+    types => module()
 }.
 
 -record(state, {
@@ -62,7 +66,7 @@ application environment:
     transport :: thrift_erl_socket:transport(),
     max_frame_size :: pos_integer(),
     timeout :: pos_integer(),
-    %% buffered-mode leftover bytes of the next message
+    record_api :: module() | undefined,
     buffer = <<>> :: binary()
 }).
 
@@ -102,7 +106,12 @@ init(Opts) ->
             service_info = (maps:get(service, Opts)):service_info(),
             transport = maps:get(transport, Opts, framed),
             max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
-            timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT)
+            timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
+            record_api =
+                case maps:get(record_api, Opts, false) of
+                    true -> maps:get(types, Opts);
+                    false -> undefined
+                end
         },
     self() ! loop,
     {ok, State}.
@@ -189,19 +198,25 @@ handle_call_message(Name, SeqId, Tail, #state{} = State) ->
 dispatch(Name, SeqId, Tail, Info, #state{} = State) ->
     case decode_params(Tail, Info) of
         {ok, Args} ->
-            try apply(State#state.handler, function_name(Name), Args) of
-                {ok, Reply} ->
-                    encode_reply(Name, SeqId, Reply, Info, State);
-                {error, {exception, ExceptionName, ExceptionValue}} ->
-                    encode_exception_reply(Name, SeqId, ExceptionName, ExceptionValue, Info, State);
-                Other ->
-                    ?LOG_WARNING(#{
-                        domain => [thrift],
-                        msg => "handler returned an unsupported result",
-                        name => Name,
-                        result => Other
-                    }),
-                    reply_application_exception(Name, SeqId, <<"internal error">>, 6, State)
+            Args1 = args_for_handler(Args, Info, State),
+            try apply(State#state.handler, function_name(Name), Args1) of
+                Result ->
+                    case wire_result(Result, Info, State) of
+                        {ok, Reply} ->
+                            encode_reply(Name, SeqId, Reply, Info, State);
+                        {error, {exception, ExceptionName, ExceptionValue}} ->
+                            encode_exception_reply(
+                                Name, SeqId, ExceptionName, ExceptionValue, Info, State
+                            );
+                        Other ->
+                            ?LOG_WARNING(#{
+                                domain => [thrift],
+                                msg => "handler returned an unsupported result",
+                                name => Name,
+                                result => Other
+                            }),
+                            reply_application_exception(Name, SeqId, <<"internal error">>, 6, State)
+                    end
             catch
                 Class:Reason:Stacktrace ->
                     ?LOG_WARNING(#{
@@ -233,7 +248,8 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
         {ok, Info} ->
             case decode_params(Tail, Info) of
                 {ok, Args} ->
-                    try apply(State#state.handler, function_name(Name), Args) of
+                    Args1 = args_for_handler(Args, Info, State),
+                    try apply(State#state.handler, function_name(Name), Args1) of
                         _ -> ok
                     catch
                         Class:Reason:Stacktrace ->
@@ -262,12 +278,33 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
 -spec decode_params(binary(), thrift_erl_service:function_info()) ->
     {ok, [term()]} | {error, term()}.
 decode_params(Tail, #{params := ParamsDesc}) ->
-    case thrift_erl_binary:decode({struct, ParamsDesc}, Tail) of
+    case thrift_erl_binary:decode(ParamsDesc, Tail) of
         {ok, Values, _Rest} ->
-            {ok, [maps:get(Name, Values, undefined) || {_, _, _, Name, _} <- element(2, ParamsDesc)]};
+            {ok, [
+                maps:get(Name, Values, undefined)
+             || {_, _, _, Name, _} <- thrift_erl_binary:struct_fields(ParamsDesc)
+            ]};
         {error, Reason} ->
             {error, Reason}
     end.
+
+%% Record-API bridging: when enabled, handler arguments arrive as
+%% records and results (including declared exception values) go back
+%% as records; the wire side stays maps.
+
+-spec args_for_handler([term()], thrift_erl_service:function_info(), #state{}) -> [term()].
+args_for_handler(Args, _Info, #state{record_api = undefined}) ->
+    Args;
+args_for_handler(Args, #{params := ParamsDesc}, #state{}) ->
+    thrift_erl_record:args_from_wire(ParamsDesc, Args).
+
+-spec wire_result(term(), thrift_erl_service:function_info(), #state{}) -> term().
+wire_result(Result, _Info, #state{record_api = undefined}) ->
+    Result;
+wire_result(Result, Info, #state{}) ->
+    thrift_erl_record:result_to_wire(
+        maps:get(reply, Info, undefined), maps:get(exceptions, Info, []), Result
+    ).
 
 %% Builds the REPLY payload: field 0 carries the return value when the
 %% function is non-void; declared exceptions were already encoded by

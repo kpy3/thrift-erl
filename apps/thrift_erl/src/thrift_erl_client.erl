@@ -196,11 +196,11 @@ terminate(_Reason, #state{socket = Socket}) ->
     #state{}
 ) -> ok | {error, term()}.
 send_call(Type, Function, SeqId, #{params := ParamsDesc}, Args, #state{} = State) ->
-    Names = [Name || {_, _, _, Name, _} <- element(2, ParamsDesc)],
+    Names = [Name || {_, _, _, Name, _} <- thrift_erl_binary:struct_fields(ParamsDesc)],
     case length(Args) =:= length(Names) of
         true ->
             Values = lists:zip(Names, Args),
-            case thrift_erl_binary:encode({struct, ParamsDesc}, maps:from_list(Values)) of
+            case thrift_erl_binary:encode(ParamsDesc, maps:from_list(Values)) of
                 {ok, Payload} ->
                     Message = thrift_erl_binary:encode_message(Type, Function, SeqId, Payload),
                     send_message(Message, State);
@@ -272,7 +272,7 @@ decode_reply(Function, SeqId, Info, Message, Leftover) ->
 decode_result(Info, Tail, Leftover) ->
     Exceptions = maps:get(exceptions, Info, []),
     ResultDesc = result_desc(Info),
-    case thrift_erl_binary:decode({struct, ResultDesc}, Tail) of
+    case thrift_erl_binary:decode(ResultDesc, Tail) of
         {ok, Values, _Rest} ->
             case exception_field(Values, Exceptions) of
                 {ok, Name, Value} ->
@@ -290,11 +290,11 @@ decode_result(Info, Tail, Leftover) ->
 %% exception under its throw-field id. Exception values decode as maps
 %% (the generic struct representation).
 
--spec result_desc(thrift_erl_service:function_info()) -> thrift_erl_binary:struct_desc().
-result_desc(#{reply := ReplyType} = Info) ->
-    {struct, [{0, default, ReplyType, <<"success">>, undefined} | exception_fields(Info)]};
+-spec result_desc(thrift_erl_service:function_info()) -> thrift_erl_binary:type_desc().
+result_desc(#{reply := ReplyType} = Info) when ReplyType =/= undefined ->
+    {struct, {struct, [{0, default, ReplyType, <<"success">>, undefined} | exception_fields(Info)]}};
 result_desc(#{} = Info) ->
-    {struct, exception_fields(Info)}.
+    {struct, {struct, exception_fields(Info)}}.
 
 -spec exception_fields(thrift_erl_service:function_info()) -> [thrift_erl_binary:field_desc()].
 exception_fields(Info) ->
