@@ -89,6 +89,11 @@ port(Pid) ->
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
+    %% The supervisor shuts children down with exit(shutdown); trapping
+    %% turns that into sys-driven terminate, which is what stops the
+    %% live connections — without it they would survive the stop as
+    %% orphans.
+    process_flag(trap_exit, true),
     case thrift_erl_socket:listen(Opts) of
         {ok, ListenSocket} ->
             ConnectionOpts = maps:with(

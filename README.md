@@ -217,6 +217,36 @@ hanging. Sockets run in `{active, N}` delivery mode, so a dead peer is
 noticed even on an idle connection. Calls are serialized per
 connection; concurrent callers queue in order.
 
+## Reconnecting client
+
+When the caller is not a pool but a long-lived consumer,
+`thrift_erl_reconnecting_client` wraps the simple client with
+automatic reconnection and statistics. The wrapped client keeps its
+no-reconnect contract; the wrapper observes its death, retries with
+exponential backoff (`reconnect_min` → doubled → `reconnect_max`,
+defaults 500 ms / 30 s) and fails calls that arrive in between with
+`{error, disconnected}`. A server that is down does not fail the
+start — the wrapper keeps trying, like the reference Apache
+`thrift_reconnecting_client`:
+
+```erlang
+{ok, Client} = thrift_erl_reconnecting_client:start_link(
+    #{host => "localhost", port => 9090, service => 'Ping_thrift',
+      reconnect_min => 500, reconnect_max => 30000}
+),
+{ok, Pong} = thrift_erl_reconnecting_client:call(Client, <<"ping">>, [], 5000),
+
+%% the pool health-check surface
+#{connected := true, calls_ok := 3, calls_failed := 0,
+  connects := 1, connect_failures := 0} =
+    thrift_erl_reconnecting_client:get_stats(Client),
+thrift_erl_reconnecting_client:get_and_reset_stats(Client).
+```
+
+Server-reported exceptions are protocol replies: they come back
+unchanged and never reconnect. Every failed retry is logged at
+warning level (`domain => [thrift]`).
+
 ## TLS
 
 Add `ssl_opts` to the server or the client and the connection becomes
@@ -321,8 +351,6 @@ Only the speedup ratios on the same machine are meaningful; run
 
 ## Roadmap
 
-- **M8 — Reconnecting client + statistics**: a wrapper with backoff and
-  call/error counters for pool health checks.
 - **M9 — Multiplexed services**: several services over one connection
   (`Service:method` prefixes, server-side dispatch).
 - Off schedule (the axis/option slots are reserved): the compact
