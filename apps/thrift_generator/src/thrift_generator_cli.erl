@@ -47,8 +47,14 @@ run(File, OutDir) ->
                 length(Generated), unicode:characters_to_list(OutDir)
             ]),
             lists:foreach(
-                fun(#{path := Path}) ->
-                    io:format("  ~ts~n", [unicode:characters_to_list(Path)])
+                fun(#{path := Path} = Entry) ->
+                    io:format("  ~ts~n", [unicode:characters_to_list(Path)]),
+                    case Entry of
+                        #{hrl := Hrl} when Hrl =/= undefined ->
+                            io:format("  ~ts~n", [unicode:characters_to_list(Hrl)]);
+                        _ ->
+                            ok
+                    end
                 end,
                 Generated
             ),

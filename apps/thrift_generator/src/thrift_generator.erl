@@ -43,11 +43,14 @@ Full pipeline: load (with includes), semantic analysis, code emission,
 write to `OutDir`.
 
 Writes one `<module>.erl` per generated module (types, and
-client/server/handler per service). `Opts` is reserved for future
-tuning; pass `#{}`. Returns the generated modules with their paths.
+client/server/handler per service) and a `<mod>_types.hrl` next to
+every types module. `Opts` is reserved for future tuning; pass `#{}`.
+Returns the generated modules with their paths (and the include path
+when one was written).
 """.
 -spec generate(file:filename_all(), file:filename_all(), generate_opts()) ->
-    {ok, [#{module := module(), path := file:filename_all()}]} | {error, term()}.
+    {ok, [#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]}
+    | {error, term()}.
 generate(ThriftFile, OutDir, _Opts) ->
     maybe
         {ok, Loaded} ?= thrift_generator_loader:load(ThriftFile),
@@ -59,14 +62,36 @@ generate(ThriftFile, OutDir, _Opts) ->
         Other -> {error, Other}
     end.
 
-write_all([{Module, Source} | Rest], OutDir, Acc) ->
-    Path = filename:join(OutDir, atom_to_list(Module) ++ ".erl"),
+write_all([#{module := Module, source := Source} = Entry | Rest], OutDir, Acc) ->
+    Base = atom_to_list(Module),
+    Path = filename:join(OutDir, Base ++ ".erl"),
     case file:write_file(Path, Source) of
-        ok -> write_all(Rest, OutDir, [#{module => Module, path => Path} | Acc]);
-        {error, Reason} -> {error, {write_error, Path, Reason}}
+        ok ->
+            case write_hrl(Entry, OutDir, Base) of
+                {ok, HrlPath} ->
+                    write_all(Rest, OutDir, [Entry#{path => Path, hrl => HrlPath} | Acc]);
+                none ->
+                    write_all(Rest, OutDir, [Entry#{path => Path} | Acc]);
+                {error, Reason} ->
+                    {error, {write_error, hrl_path(OutDir, Base), Reason}}
+            end;
+        {error, Reason} ->
+            {error, {write_error, Path, Reason}}
     end;
 write_all([], _OutDir, Acc) ->
     {ok, lists:reverse(Acc)}.
+
+write_hrl(#{hrl := Source}, OutDir, Base) when Source =/= undefined ->
+    Path = hrl_path(OutDir, Base),
+    case file:write_file(Path, Source) of
+        ok -> {ok, Path};
+        {error, Reason} -> {error, Reason}
+    end;
+write_hrl(_Entry, _OutDir, _Base) ->
+    none.
+
+hrl_path(OutDir, Base) ->
+    filename:join(OutDir, Base ++ ".hrl").
 
 -doc """
 Reads and lexes an IDL file, appending a `__file__` marker with the

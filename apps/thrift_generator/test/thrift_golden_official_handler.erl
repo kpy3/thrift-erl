@@ -21,7 +21,7 @@ maps, officially generated exception records. Serves OUR generated client
 through the vendored official server (see `thrift_golden_SUITE`).
 """.
 
--include("priv/golden/gen-erl/thrift_test_types.hrl").
+-include_lib("thrift/include/golden/gen-erl/thrift_test_types.hrl").
 
 -export([handle_function/2, notify_oneway/1]).
 

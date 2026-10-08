@@ -37,7 +37,7 @@ the descriptor terms, which keeps the emitter declarative.
 
 -export([sources/1, compile_sources/1]).
 
--export_type([compiled/0]).
+-export_type([compiled/0, source/0]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -47,6 +47,14 @@ the descriptor terms, which keeps the emitter declarative.
 -type compiled() ::
     {ok, module(), binary()}
     | {error, {module(), [tuple()]}}.
+
+%% One generated artifact: the module source plus, for types modules,
+%% the `<mod>_types.hrl` include (records, types, constant macros).
+-type source() :: #{
+    module := module(),
+    source := binary(),
+    hrl => binary()
+}.
 
 -type module_key() :: binary().
 
@@ -68,12 +76,20 @@ the descriptor terms, which keeps the emitter declarative.
 %% API
 %%--------------------------------------------------------------------
 
--doc "Renders every generated module as `{ModuleName, Source}`.".
--spec sources(#tg_model{}) -> [{module(), binary()}].
+-doc "Renders every generated module as a source map with its hrl when present.".
+-spec sources(#tg_model{}) -> [source()].
 sources(Model) ->
     [
-        {Name, format(Forms)}
-     || {Name, Forms} <- module_forms(Model)
+        #{
+            module => Name,
+            source => format(Forms),
+            hrl =>
+                case HrlForms of
+                    undefined -> undefined;
+                    _ -> format(HrlForms)
+                end
+        }
+     || {Name, Forms, HrlForms} <- module_triplets(Model)
     ].
 
 -doc "Compiles every generated module in memory (`compile:forms`).".
@@ -90,6 +106,11 @@ compile_sources(Model) ->
 
 -spec module_forms(#tg_model{}) -> [{module(), erl_syntax:forms()}].
 module_forms(Model) ->
+    [{Name, Forms} || {Name, Forms, _Hrl} <- module_triplets(Model)].
+
+-spec module_triplets(#tg_model{}) ->
+    [{module(), erl_syntax:forms(), erl_syntax:forms() | undefined}].
+module_triplets(Model) ->
     Ctx0 = #ctx{
         modules = #{M#tg_module.name => M || M <- Model#tg_model.modules},
         type_modules =
@@ -104,14 +125,18 @@ module_forms(Model) ->
      || Mod <- Model#tg_model.modules
     ]).
 
--spec module_sources(#tg_module{}, #ctx{}) -> [{module(), erl_syntax:forms()}].
+-spec module_sources(#tg_module{}, #ctx{}) ->
+    [{module(), erl_syntax:forms(), erl_syntax:forms() | undefined}].
 module_sources(Mod, Ctx) ->
     TypesMod = types_module_atom(Mod#tg_module.name),
     ServiceForms = [
         service_sources(Svc, Mod, Ctx)
      || Svc <- Mod#tg_module.services
     ],
-    [{TypesMod, types_forms(Mod, Ctx)} | lists:append(ServiceForms)].
+    [
+        {TypesMod, types_forms(Mod, Ctx), types_hrl_forms(Mod, Ctx)}
+        | lists:append(ServiceForms)
+    ].
 
 %%--------------------------------------------------------------------
 %% <mod>_types.erl
@@ -121,31 +146,625 @@ module_sources(Mod, Ctx) ->
 types_forms(Mod, Ctx) ->
     TypesMod = types_module_atom(Mod#tg_module.name),
     Records = [
-        record_form(S)
+        record_form(S, Mod#tg_module.prefix)
      || S <- Mod#tg_module.structs,
         record_mode(S)
     ],
-    header(TypesMod, types_doc(Mod)) ++
-        Records ++
+    Exports =
         [
-            %% The types module declares every record for consumers;
-            %% introspection forms reference them by name, not usage.
-            erl_syntax:attribute(erl_syntax:atom(compile), [
-                erl_syntax:abstract([nowarn_unused_record])
-            ]),
             export_form([
                 {struct_info, 1},
                 {enum_info, 1},
                 {function_info, 2},
                 {service_info, 0},
-                {record_fields, 1}
-            ])
+                {record_fields, 1},
+                {tag_index, 0},
+                {convert, 2}
+            ]),
+            export_form(struct_codec_entries(Mod)),
+            export_form(enum_helper_entries(Mod)),
+            export_form(const_entries(Mod))
+        ],
+    header(TypesMod, types_doc(Mod)) ++
+        Records ++
+        [
+            %% The types module declares every record for consumers;
+            %% introspection forms reference them by name, not usage.
+            nowarn_unused_record_form()
         ] ++
+        Exports ++
         struct_info_forms(Mod, Ctx) ++
         enum_info_forms(Mod) ++
         function_info_forms(Mod, Ctx) ++
         service_info_forms(Mod, Ctx) ++
-        record_fields_forms(Mod).
+        record_fields_forms(Mod) ++
+        struct_codec_forms(Mod, Ctx) ++
+        tag_index_forms(Mod, Ctx) ++
+        enum_helper_forms(Mod) ++
+        const_forms(Mod).
+
+%%--------------------------------------------------------------------
+%% <mod>_types.hrl
+%%--------------------------------------------------------------------
+
+%% The include consumers bring in: typed records, record and enum
+%% aliases, and macros for scalar constants. Records are also declared
+%% inline in the .erl (compile_sources runs without includes), so the
+%% two files must never both be included into one compilation.
+
+-spec types_hrl_forms(#tg_module{}, #ctx{}) -> erl_syntax:forms().
+types_hrl_forms(Mod, Ctx) ->
+    Guard = hrl_guard(Mod),
+    Header =
+        [
+            " Copyright 2026 Sergei Yelin",
+            "",
+            " Licensed under the Apache License, Version 2.0 (the \"License\");",
+            " you may not use this file except in compliance with the License.",
+            " You may obtain a copy of the License at",
+            "",
+            "     http://www.apache.org/licenses/LICENSE-2.0",
+            "",
+            " Generated from " ++ unicode:characters_to_list(Mod#tg_module.path) ++ ". Do not edit."
+        ] ++ hrl_include_note(Mod, Ctx),
+    [
+        erl_syntax:comment(Header),
+        %% Preprocessor directives have no erl_parse form (epp consumes
+        %% them), so they render as plain attribute trees; -endif must
+        %% not carry the parens — epp rejects `-endif()` — hence the
+        %% raw-text marker handled by format/1. Macro names are
+        %% variable nodes: uppercase atoms would print quoted.
+        erl_syntax:attribute(erl_syntax:atom(ifndef), [
+            erl_syntax:variable(atom_to_list(Guard))
+        ]),
+        erl_syntax:attribute(erl_syntax:atom(define), [
+            erl_syntax:variable(atom_to_list(Guard)), erl_syntax:atom(true)
+        ])
+    ] ++
+        hrl_record_forms(Mod, Ctx) ++
+        hrl_enum_forms(Mod) ++
+        hrl_const_forms(Mod) ++
+        [
+            {raw_text, <<"-endif.\n">>}
+        ].
+
+-spec hrl_guard(#tg_module{}) -> atom().
+hrl_guard(Mod) ->
+    Sanitized = binary:replace(Mod#tg_module.name, <<".">>, <<"_">>, [global]),
+    binary_to_atom(<<(string:uppercase(Sanitized))/binary, "_HRL">>, utf8).
+
+%% Typed record fields may reference records declared in another
+%% module's hrl (an included thrift document); the compiler resolves
+%% #tag{} at the include site, so those hrl files must be included
+%% first. Enum and typedef references compile to scalar/term types and
+%% need no include.
+
+-spec hrl_include_note(#tg_module{}, #ctx{}) -> [string()].
+hrl_include_note(Mod, Ctx) ->
+    Deps =
+        lists:usort([
+            Dep
+         || S <- Mod#tg_module.structs,
+            F <- S#tg_struct.fields,
+            Dep <- [record_dep_module(F#tg_field.type, Ctx)],
+            Dep =/= undefined,
+            Dep =/= Ctx#ctx.current
+        ]),
+    case Deps of
+        [] ->
+            [];
+        _ ->
+            Files = [atom_to_list(types_module_atom(D)) ++ ".hrl" || D <- Deps],
+            [
+                "",
+                " Include " ++ string:join(Files, ", ") ++
+                    " before this file:"
+                    " typed record fields below reference records declared there."
+            ]
+    end.
+
+-spec record_dep_module(thrift_type(), #ctx{}) -> module_key() | undefined.
+record_dep_module({list, T, _}, Ctx) ->
+    record_dep_module(T, Ctx);
+record_dep_module({set, T, _}, Ctx) ->
+    record_dep_module(T, Ctx);
+record_dep_module({map, K, V, _}, Ctx) ->
+    case record_dep_module(K, Ctx) of
+        undefined -> record_dep_module(V, Ctx);
+        Dep -> Dep
+    end;
+record_dep_module({ref, Name, _}, Ctx) ->
+    {ModKey, Local} =
+        case binary:split(Name, <<".">>) of
+            [M, L] -> {M, L};
+            [L] -> {Ctx#ctx.current, L}
+        end,
+    case find_struct(maps:get(ModKey, Ctx#ctx.modules, undefined), Local) of
+        {ok, S} ->
+            case record_mode(S) of
+                true -> ModKey;
+                false -> undefined
+            end;
+        error ->
+            undefined
+    end;
+record_dep_module(_, _) ->
+    undefined.
+
+-spec hrl_record_forms(#tg_module{}, #ctx{}) -> erl_syntax:forms().
+hrl_record_forms(Mod, Ctx) ->
+    lists:append([
+        hrl_struct_forms(S, Ctx)
+     || S <- Mod#tg_module.structs,
+        record_mode(S)
+    ]).
+
+-spec hrl_struct_forms(#tg_struct{}, #ctx{}) -> erl_syntax:forms().
+hrl_struct_forms(S, Ctx) ->
+    Anno = erl_anno:new(0),
+    Tag = record_tag(current_prefix(Ctx), S#tg_struct.name),
+    TypedFields = [
+        {typed_record_field,
+            case F#tg_field.default of
+                undefined ->
+                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}};
+                Default ->
+                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)},
+                        erl_syntax:revert(const_literal(Default))}
+            end,
+            erlang_type(F#tg_field.type, Ctx)}
+     || F <- S#tg_struct.fields
+    ],
+    RecordForm =
+        {attribute, Anno, record, {Tag, TypedFields}},
+    TypeAlias =
+        {attribute, Anno, type, {Tag, {type, Anno, record, [{atom, Anno, Tag}]}, []}},
+    [RecordForm, TypeAlias].
+
+-spec hrl_enum_forms(#tg_module{}) -> erl_syntax:forms().
+hrl_enum_forms(Mod) ->
+    [
+        {attribute, erl_anno:new(0), type,
+            {record_tag(Mod#tg_module.prefix, E#tg_enum.name), enum_type_node(E#tg_enum.values), []}}
+     || E <- Mod#tg_module.enums
+    ].
+
+-spec enum_type_node([{integer(), binary()}]) -> erl_syntax:syntaxTree().
+enum_type_node(Values) ->
+    Anno = erl_anno:new(0),
+    Atoms = [{atom, Anno, enum_atom(Name)} || {_Value, Name} <- Values],
+    case Atoms of
+        [One] -> One;
+        Many -> {type, Anno, union, Many}
+    end.
+
+%% Macros only for scalar and enum-member constants; containers have no
+%% literal macro form worth generating — they get the function.
+
+-spec hrl_const_forms(#tg_module{}) -> erl_syntax:forms().
+hrl_const_forms(Mod) ->
+    lists:append([
+        [
+            erl_syntax:attribute(erl_syntax:atom(define), [
+                erl_syntax:variable(
+                    unicode:characters_to_list(const_macro_name(Mod#tg_module.prefix, C#tg_const.name))
+                ),
+                const_literal(C#tg_const.value)
+            ])
+        ]
+     || C <- Mod#tg_module.consts,
+        scalar_const(C)
+    ]).
+
+%% The constant macro mirrors the (prefixed) function name, macro-style:
+%% the namespace prefix is uppercased, the declared name stays as is —
+%% without a namespace the macro keeps the exact declared name.
+
+-spec const_macro_name(binary(), binary()) -> binary().
+const_macro_name(<<>>, Name) ->
+    Name;
+const_macro_name(Prefix, Name) ->
+    <<(string:uppercase(Prefix))/binary, "_", Name/binary>>.
+
+-spec scalar_const(#tg_const{}) -> boolean().
+scalar_const(#tg_const{value = {ref, _}}) ->
+    true;
+scalar_const(#tg_const{value = {list, _}}) ->
+    false;
+scalar_const(#tg_const{value = {map, _}}) ->
+    false;
+scalar_const(_Const) ->
+    true.
+
+%%--------------------------------------------------------------------
+%% Per-struct codec functions
+%%--------------------------------------------------------------------
+
+-spec struct_codec_entries(#tg_module{}) -> [{atom(), arity()}].
+struct_codec_entries(Mod) ->
+    lists:append([
+        [
+            {binary_to_atom(<<"encode_", Prefix/binary>>, utf8), 1},
+            {binary_to_atom(<<"encode_", Prefix/binary>>, utf8), 2},
+            {binary_to_atom(<<"decode_", Prefix/binary>>, utf8), 1},
+            {binary_to_atom(<<"decode_", Prefix/binary>>, utf8), 2},
+            {binary_to_atom(<<"decode_", Prefix/binary>>, utf8), 3}
+        ] ++
+            case record_mode(S) of
+                true -> [{binary_to_atom(<<Prefix/binary, "_from_map">>, utf8), 1}];
+                false -> []
+            end
+     || S <- Mod#tg_module.structs,
+        Prefix <- [typed_prefix(Mod#tg_module.prefix, string:lowercase(S#tg_struct.name))]
+    ]).
+
+-spec struct_codec_forms(#tg_module{}, #ctx{}) -> erl_syntax:forms().
+struct_codec_forms(Mod, Ctx) ->
+    lists:append([
+        struct_codec_one(S, Ctx)
+     || S <- Mod#tg_module.structs
+    ]).
+
+-spec struct_codec_one(#tg_struct{}, #ctx{}) -> erl_syntax:forms().
+struct_codec_one(S, Ctx) ->
+    Prefix = typed_prefix(current_prefix(Ctx), string:lowercase(S#tg_struct.name)),
+    Encode = binary_to_atom(<<"encode_", Prefix/binary>>, utf8),
+    Decode = binary_to_atom(<<"decode_", Prefix/binary>>, utf8),
+    DefaultRepr =
+        case record_mode(S) of
+            true -> record;
+            false -> map
+        end,
+    Desc = struct_ref(S, Ctx),
+    Anno = erl_anno:new(0),
+    ResultType = fun(Ok) -> ok_error_type(Anno, Ok, error_term_type(Anno)) end,
+    EncodeSpec = fun(Arity) ->
+        {attribute, Anno, spec,
+            {{Encode, Arity}, [
+                fun_type(
+                    [value_type(S, Ctx)] ++
+                        lists:duplicate(Arity - 1, raw_type(term)),
+                    ResultType({type, Anno, binary, []})
+                )
+            ]}}
+    end,
+    DecodeSpec = fun(Arity) ->
+        {attribute, Anno, spec,
+            {{Decode, Arity}, [
+                fun_type(
+                    [raw_type(binary)] ++ lists:duplicate(Arity - 1, raw_type(term)),
+                    ResultType(term_type())
+                )
+            ]}}
+    end,
+    fn_form(Encode, [
+        fn_clause(
+            [erl_syntax:variable("Value")],
+            application(thrift_erl, encode, [abstract(Desc), erl_syntax:variable("Value")])
+        )
+    ]) ++
+        fn_form(Encode, [
+            fn_clause(
+                [erl_syntax:variable("Value"), erl_syntax:variable("Protocol")],
+                application(thrift_erl, encode, [
+                    abstract(Desc), erl_syntax:variable("Value"), erl_syntax:variable("Protocol")
+                ])
+            )
+        ]) ++
+        [EncodeSpec(1), EncodeSpec(2)] ++
+        fn_form(Decode, [
+            fn_clause(
+                [erl_syntax:variable("Binary")],
+                application(thrift_erl, decode, [
+                    abstract(Desc), erl_syntax:variable("Binary"), abstract(DefaultRepr)
+                ])
+            )
+        ]) ++
+        fn_form(Decode, [
+            fn_clause(
+                [erl_syntax:variable("Binary"), erl_syntax:variable("Repr")],
+                application(thrift_erl, decode, [
+                    abstract(Desc), erl_syntax:variable("Binary"), erl_syntax:variable("Repr")
+                ])
+            )
+        ]) ++
+        fn_form(Decode, [
+            fn_clause(
+                [
+                    erl_syntax:variable("Binary"),
+                    erl_syntax:variable("Repr"),
+                    erl_syntax:variable("Protocol")
+                ],
+                application(thrift_erl, decode, [
+                    abstract(Desc),
+                    erl_syntax:variable("Binary"),
+                    erl_syntax:variable("Repr"),
+                    erl_syntax:variable("Protocol")
+                ])
+            )
+        ]) ++
+        [DecodeSpec(1), DecodeSpec(2), DecodeSpec(3)] ++
+        case record_mode(S) of
+            true ->
+                FromMap = binary_to_atom(<<Prefix/binary, "_from_map">>, utf8),
+                [
+                    {attribute, Anno, spec,
+                        {{FromMap, 1}, [
+                            fun_type([raw_type(map)], term_type())
+                        ]}}
+                ] ++
+                    fn_form(FromMap, [
+                        fn_clause(
+                            [erl_syntax:variable("Map")],
+                            erl_syntax:tuple([
+                                erl_syntax:atom(ok),
+                                application(thrift_erl_record, from_wire, [
+                                    abstract(Desc),
+                                    application(thrift_erl_record, to_wire, [
+                                        abstract(Desc), erl_syntax:variable("Map")
+                                    ]),
+                                    abstract(record)
+                                ])
+                            ])
+                        )
+                    ]);
+            false ->
+                []
+        end.
+
+-spec term_type() -> erl_syntax:syntaxTree().
+term_type() ->
+    {type, erl_anno:new(0), term, []}.
+
+%% Shared spec vocabulary: `Ok | ErrorArm`, the `{error, term()}` arm,
+%% and the record type of a generated record tag.
+
+-spec ok_error_type(erl_anno:anno(), erl_syntax:syntaxTree(), erl_syntax:syntaxTree()) ->
+    erl_syntax:syntaxTree().
+ok_error_type(Anno, OkInner, ErrorArm) ->
+    {type, Anno, union, [
+        {type, Anno, tuple, [{atom, Anno, ok}, OkInner]},
+        ErrorArm
+    ]}.
+
+-spec error_term_type(erl_anno:anno()) -> erl_syntax:syntaxTree().
+error_term_type(Anno) ->
+    {type, Anno, tuple, [{atom, Anno, error}, {type, Anno, term, []}]}.
+
+-spec record_type(atom()) -> erl_syntax:syntaxTree().
+record_type(Tag) ->
+    {type, erl_anno:new(0), record, [{atom, erl_anno:new(0), Tag}]}.
+
+-spec list_type(thrift_type(), #ctx{}) -> erl_syntax:syntaxTree().
+list_type(T, Ctx) ->
+    {type, erl_anno:new(0), list, [erlang_type(T, Ctx)]}.
+
+-spec nowarn_unused_record_form() -> erl_syntax:syntaxTree().
+nowarn_unused_record_form() ->
+    erl_syntax:attribute(erl_syntax:atom(compile), [
+        erl_syntax:abstract([nowarn_unused_record])
+    ]).
+
+-spec struct_ref(#tg_struct{}, #ctx{}) -> desc().
+struct_ref(S, Ctx) ->
+    {struct, {ref, types_module_atom(Ctx#ctx.current), S#tg_struct.name}}.
+
+%% The identity tag a struct value carries: the (prefixed) record tag in
+%% record mode, the lowercased wire name in map mode — no record exists
+%% there, so the struct representation tags it by name. The same rule
+%% thrift_erl_record applies when it builds struct maps, so convert/2
+%% finds every struct by the tag its own values carry.
+
+-spec struct_index_tag(#tg_struct{}, binary()) -> atom().
+struct_index_tag(S, Prefix) ->
+    case record_mode(S) of
+        true -> record_tag(Prefix, S#tg_struct.name);
+        false -> record_tag(<<>>, S#tg_struct.name)
+    end.
+
+%% The input side of encode_: a record (record mode) or a map — both
+%% normalize inside thrift_erl_record:to_wire.
+
+-spec value_type(#tg_struct{}, #ctx{}) -> erl_syntax:syntaxTree().
+value_type(S, Ctx) ->
+    case record_mode(S) of
+        true ->
+            Tag = record_tag(current_prefix(Ctx), S#tg_struct.name),
+            {type, erl_anno:new(0), union, [record_type(Tag), raw_type(map)]};
+        false ->
+            raw_type(map)
+    end.
+
+%%--------------------------------------------------------------------
+%% Tag index and convert
+%%--------------------------------------------------------------------
+
+-spec tag_index_forms(#tg_module{}, #ctx{}) -> erl_syntax:forms().
+tag_index_forms(Mod, Ctx) ->
+    Anno = erl_anno:new(0),
+    Pairs = [
+        {struct_index_tag(S, current_prefix(Ctx)), struct_ref(S, Ctx)}
+     || S <- Mod#tg_module.structs
+    ],
+    [
+        {attribute, Anno, spec,
+            {{tag_index, 0}, [
+                fun_type(
+                    [],
+                    {remote_type, Anno, [
+                        {atom, Anno, thrift_erl}, {atom, Anno, tag_index}, []
+                    ]}
+                )
+            ]}},
+        {attribute, Anno, spec,
+            {{convert, 2}, [
+                fun_type(
+                    [
+                        term_type(),
+                        {remote_type, Anno, [
+                            {atom, Anno, thrift_erl}, {atom, Anno, repr}, []
+                        ]}
+                    ],
+                    {type, Anno, union, [
+                        {type, Anno, tuple, [{atom, Anno, ok}, term_type()]},
+                        {type, Anno, tuple, [{atom, Anno, error}, term_type()]}
+                    ]}
+                )
+            ]}}
+    ] ++
+        fn_form(tag_index, [fn_clause([], abstract(maps:from_list(Pairs)))]) ++
+        fn_form(convert, [
+            fn_clause(
+                [erl_syntax:variable("Value"), erl_syntax:variable("Repr")],
+                application(thrift_erl, convert, [
+                    application(
+                        types_module_atom(Ctx#ctx.current), tag_index, []
+                    ),
+                    erl_syntax:variable("Value"),
+                    erl_syntax:variable("Repr")
+                ])
+            )
+        ]).
+
+%%--------------------------------------------------------------------
+%% Enum helpers
+%%--------------------------------------------------------------------
+
+-spec enum_helper_entries(#tg_module{}) -> [{atom(), arity()}].
+enum_helper_entries(Mod) ->
+    lists:append([
+        [
+            {binary_to_atom(<<Prefix/binary, "_to_int">>, utf8), 1},
+            {binary_to_atom(<<Prefix/binary, "_from_int">>, utf8), 1}
+        ]
+     || E <- Mod#tg_module.enums,
+        Prefix <- [typed_prefix(Mod#tg_module.prefix, string:lowercase(E#tg_enum.name))]
+    ]).
+
+-spec enum_helper_forms(#tg_module{}) -> erl_syntax:forms().
+enum_helper_forms(Mod) ->
+    lists:append([
+        enum_helper_one(E, typed_prefix(Mod#tg_module.prefix, string:lowercase(E#tg_enum.name)))
+     || E <- Mod#tg_module.enums
+    ]).
+
+-spec enum_helper_one(#tg_enum{}, binary()) -> erl_syntax:forms().
+enum_helper_one(E, Prefix) ->
+    ToInt = binary_to_atom(<<Prefix/binary, "_to_int">>, utf8),
+    FromInt = binary_to_atom(<<Prefix/binary, "_from_int">>, utf8),
+    %% The literal descriptor — the same list enum_info/1 returns — so
+    %% the helpers do not even call themselves.
+    DescExpr = abstract(enum_desc(E)),
+    Anno = erl_anno:new(0),
+    V = erl_syntax:variable("Value"),
+    Int = erl_syntax:variable("Int"),
+    Atom = erl_syntax:variable("Atom"),
+    OkTuple = fun(Value) ->
+        erl_syntax:tuple([erl_syntax:atom(ok), Value])
+    end,
+    Keyfind = fun(Key, Pos) ->
+        erl_syntax:application(erl_syntax:atom(lists), erl_syntax:atom(keyfind), [
+            Key, abstract(Pos), DescExpr
+        ])
+    end,
+    %% keyfind answers the whole {Key, Value} pair; each helper keeps
+    %% only its own half and underscores the other so the unused pattern
+    %% variable stays warning-free.
+    MatchClause = fun(Pattern, Result) ->
+        erl_syntax:clause([Pattern], none, [OkTuple(Result)])
+    end,
+    Underscore = fun(Name) -> erl_syntax:variable("_" ++ Name) end,
+    ToIntPair = erl_syntax:tuple([Int, Underscore("Atom")]),
+    FromIntPair = erl_syntax:tuple([Underscore("Int"), Atom]),
+    MissClause = erl_syntax:clause([erl_syntax:atom(false)], none, [erl_syntax:atom(error)]),
+    Guard = fun(Fun) ->
+        erl_syntax:conjunction([
+            erl_syntax:application(erl_syntax:atom(Fun), [V])
+        ])
+    end,
+    Union = fun(OkType) -> ok_error_type(Anno, OkType, {atom, Anno, error}) end,
+    [
+        {attribute, Anno, spec,
+            {{ToInt, 1}, [
+                fun_type([{type, Anno, union, [raw_type(atom), raw_type(integer)]}], Union(raw_type(integer)))
+            ]}},
+        {attribute, Anno, spec,
+            {{FromInt, 1}, [
+                fun_type([raw_type(integer)], Union(raw_type(atom)))
+            ]}}
+    ] ++
+        fn_form(ToInt, [
+            erl_syntax:clause([V], Guard(is_atom), [
+                erl_syntax:case_expr(Keyfind(V, 2), [MatchClause(ToIntPair, Int), MissClause])
+            ]),
+            erl_syntax:clause([V], Guard(is_integer), [OkTuple(V)])
+        ]) ++
+        fn_form(FromInt, [
+            erl_syntax:clause([V], none, [
+                erl_syntax:case_expr(Keyfind(V, 1), [MatchClause(FromIntPair, Atom), MissClause])
+            ])
+        ]).
+
+%%--------------------------------------------------------------------
+%% Constants
+%%--------------------------------------------------------------------
+
+-spec const_entries(#tg_module{}) -> [{atom(), arity()}].
+const_entries(Mod) ->
+    [
+        {binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), 0}
+     || C <- Mod#tg_module.consts
+    ].
+
+-spec const_forms(#tg_module{}) -> erl_syntax:forms().
+const_forms(Mod) ->
+    lists:append([
+        [
+            {attribute, erl_anno:new(0), spec,
+                {{binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), 0}, [
+                    fun_type([], const_spec_type(C#tg_const.type))
+                ]}}
+        ] ++
+            fn_form(binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), [
+                fn_clause([], const_literal(C#tg_const.value))
+            ])
+     || C <- Mod#tg_module.consts
+    ]).
+
+%% Constant spec types without a resolution context: refs (enum
+%% members) surface as term, containers mirror erlang_type/2.
+
+-spec const_spec_type(thrift_type()) -> erl_syntax:syntaxTree().
+const_spec_type({base, B, _}) ->
+    base_erlang_type(B);
+const_spec_type({list, T, _}) ->
+    {type, erl_anno:new(0), list, [const_spec_type(T)]};
+const_spec_type({set, T, _}) ->
+    {type, erl_anno:new(0), list, [const_spec_type(T)]};
+const_spec_type({map, K, V, _}) ->
+    Anno = erl_anno:new(0),
+    {type, Anno, map, [
+        {type, Anno, map_field_assoc, [const_spec_type(K), const_spec_type(V)]}
+    ]};
+const_spec_type({ref, _, _}) ->
+    raw_type(term).
+
+%% Constants carry resolved values: enum references as member name
+%% binaries, containers as tagged lists/maps. Enum members surface as
+%% atoms; maps as maps with literal keys.
+
+-spec const_literal(const_value()) -> erl_syntax:syntaxTree().
+const_literal({ref, Name}) ->
+    abstract(binary_to_atom(Name, utf8));
+const_literal({list, Values}) ->
+    erl_syntax:list([const_literal(V) || V <- Values]);
+const_literal({map, KVs}) ->
+    erl_syntax:map_expr([
+        erl_syntax:map_field_assoc(const_literal(K), const_literal(V))
+     || {K, V} <- KVs
+    ]);
+const_literal(Value) ->
+    abstract(Value).
 
 -spec types_doc(#tg_module{}) -> binary().
 types_doc(Mod) ->
@@ -158,8 +777,8 @@ types_doc(Mod) ->
         )
     ).
 
--spec record_form(#tg_struct{}) -> erl_syntax:syntaxTree().
-record_form(S) ->
+-spec record_form(#tg_struct{}, binary()) -> erl_syntax:syntaxTree().
+record_form(S, Prefix) ->
     Fields = [
         case F#tg_field.default of
             undefined ->
@@ -173,7 +792,7 @@ record_form(S) ->
     ],
     erl_syntax:attribute(
         erl_syntax:atom(record),
-        [erl_syntax:atom(record_tag(S#tg_struct.name)), erl_syntax:tuple(Fields)]
+        [erl_syntax:atom(record_tag(Prefix, S#tg_struct.name)), erl_syntax:tuple(Fields)]
     ).
 
 -spec record_mode(#tg_struct{}) -> boolean().
@@ -305,16 +924,35 @@ service_entry([F | Rest], Ctx, Acc0) ->
 -spec record_fields_forms(#tg_module{}) -> erl_syntax:forms().
 record_fields_forms(Mod) ->
     Clauses = [
-        fn_clause(
-            [abstract(S#tg_struct.name)],
-            abstract(
-                {record_tag(S#tg_struct.name), [field_atom(F#tg_field.name) || F <- S#tg_struct.fields]}
-            )
-        )
-     || S <- Mod#tg_module.structs,
-        record_mode(S)
+        fn_clause([abstract(S#tg_struct.name)], abstract(fields_decl(S, Mod#tg_module.prefix)))
+     || S <- Mod#tg_module.structs
     ],
     fn_form(record_fields, Clauses ++ [fn_clause([wildcard()], abstract(none))]).
+
+%% The record_fields contract: record mode answers {Tag, FieldAtoms},
+%% map mode answers {map, KeyType} (default atom keys); structs with no
+%% clause fall through to `none` — the wire passthrough.
+
+-spec fields_decl(#tg_struct{}, binary()) -> {atom(), [atom()]} | {map, atom | binary}.
+fields_decl(S, Prefix) ->
+    case record_mode(S) of
+        true ->
+            {record_tag(Prefix, S#tg_struct.name), [
+                field_atom(F#tg_field.name)
+             || F <- S#tg_struct.fields
+            ]};
+        false ->
+            {map, map_key_type(S)}
+    end.
+
+-spec map_key_type(#tg_struct{}) -> atom | binary.
+map_key_type(S) ->
+    case maps:get('struct_type.map.key_type', S#tg_struct.erl, <<"atom">>) of
+        <<"binary">> ->
+            binary;
+        _ ->
+            atom
+    end.
 
 %%--------------------------------------------------------------------
 %% Type descriptors
@@ -325,8 +963,8 @@ type_desc({base, B, _}, _Ctx) ->
     {base, B};
 type_desc({list, T, _}, Ctx) ->
     {list, type_desc(T, Ctx)};
-type_desc({set, T, _}, Ctx) ->
-    {set, type_desc(T, Ctx)};
+type_desc({set, T, Ann}, Ctx) ->
+    {set, type_desc(T, Ctx), set_impl(Ann)};
 type_desc({map, K, V, _}, Ctx) ->
     {map, type_desc(K, Ctx), type_desc(V, Ctx)};
 type_desc({ref, Name, _}, Ctx) ->
@@ -335,6 +973,23 @@ type_desc({ref, Name, _}, Ctx) ->
             qualified_desc(ModKey, Local, Ctx);
         [Local] ->
             local_desc(Local, Ctx)
+    end.
+
+%% The in-process set implementation carried in the descriptor. `list`
+%% (the default, and the shape hand-written descriptors keep using)
+%% leaves the wire list as is; `sets`/`ordset` name the stdlib module
+%% whose from_list/to_list the runtime applies. The wire encoding is
+%% identical for all three.
+
+-spec set_impl(annotations()) -> list | sets | ordset.
+set_impl(Ann) ->
+    case maps:get(<<"erl.set">>, Ann, <<"list">>) of
+        <<"sets">> ->
+            sets;
+        <<"ordset">> ->
+            ordset;
+        _ ->
+            list
     end.
 
 -spec qualified_desc(module_key(), binary(), #ctx{}) -> desc().
@@ -448,9 +1103,24 @@ enum_atom(Name) ->
 field_atom(Name) ->
     binary_to_atom(Name, utf8).
 
--spec record_tag(binary()) -> atom().
-record_tag(Name) ->
-    binary_to_atom(lowercase(Name), utf8).
+-spec record_tag(binary(), binary()) -> atom().
+record_tag(Prefix, Name) ->
+    binary_to_atom(typed_prefix(Prefix, lowercase(Name)), utf8).
+
+%% The module's namespace-derived identifier prefix: prepended (with a
+%% separating underscore) to every record tag, type alias, derived
+%% function name and constant macro of that module; empty without a
+%% declared erl/wildcard namespace.
+
+-spec typed_prefix(binary(), binary()) -> binary().
+typed_prefix(<<>>, Name) ->
+    Name;
+typed_prefix(Prefix, Name) ->
+    <<Prefix/binary, "_", Name/binary>>.
+
+-spec current_prefix(#ctx{}) -> binary().
+current_prefix(Ctx) ->
+    (maps:get(Ctx#ctx.current, Ctx#ctx.modules))#tg_module.prefix.
 
 -spec lowercase(binary()) -> binary().
 lowercase(Bin) ->
@@ -469,16 +1139,16 @@ sanitize(Name) ->
 %%--------------------------------------------------------------------
 
 -spec service_sources(#tg_service{}, #tg_module{}, #ctx{}) ->
-    [{module(), erl_syntax:forms()}].
+    [{module(), erl_syntax:forms(), undefined}].
 service_sources(Svc, Mod, Ctx) ->
     TypesMod = maps:get(Mod#tg_module.name, Ctx#ctx.type_modules),
     HandlerMod = service_module(Svc#tg_service.name, handler),
     ServerMod = service_module(Svc#tg_service.name, server),
     ClientMod = service_module(Svc#tg_service.name, client),
     [
-        {HandlerMod, handler_forms(Svc, Mod, HandlerMod, Ctx)},
-        {ServerMod, server_forms(Svc, TypesMod, ServerMod)},
-        {ClientMod, client_forms(Svc, TypesMod, ServerMod, ClientMod)}
+        {HandlerMod, handler_forms(Svc, Mod, HandlerMod, Ctx), undefined},
+        {ServerMod, server_forms(Svc, TypesMod, ServerMod), undefined},
+        {ClientMod, client_forms(Svc, TypesMod, ServerMod, ClientMod), undefined}
     ].
 
 -spec service_module(binary(), handler | server | client) -> module().
@@ -511,7 +1181,7 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
     %% the IDL declares many unused structs.
     Needed = service_struct_names(Svc, Mod),
     Records = [
-        record_form(S)
+        record_form(S, Mod#tg_module.prefix)
      || S <- Mod#tg_module.structs,
         record_mode(S),
         lists:member(S#tg_struct.name, Needed)
@@ -521,9 +1191,7 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
         [
             %% Records here appear only in -callback spec types, which
             %% the compiler does not count as usage.
-            erl_syntax:attribute(erl_syntax:atom(compile), [
-                erl_syntax:abstract([nowarn_unused_record])
-            ])
+            nowarn_unused_record_form()
         ] ++
         Records ++
         Callbacks.
@@ -766,13 +1434,7 @@ oneway_ret(F) ->
     case F#tg_function.oneway of
         true ->
             Anno = erl_anno:new(0),
-            {type, Anno, union, [
-                {atom, Anno, ok},
-                {type, Anno, tuple, [
-                    {atom, Anno, error},
-                    {type, Anno, term, []}
-                ]}
-            ]};
+            ok_error_type(Anno, term_type(), error_term_type(Anno));
         false ->
             call_ret()
     end.
@@ -819,18 +1481,32 @@ stop_form() ->
 %%--------------------------------------------------------------------
 
 -spec erlang_type(thrift_type(), #ctx{}) -> erl_syntax:syntaxTree().
-erlang_type({base, bool, _}, _) ->
-    raw_type(boolean);
-erlang_type({base, B, _}, _) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
-    raw_type(integer);
-erlang_type({base, double, _}, _) ->
-    raw_type(float);
-erlang_type({base, S, _}, _) when S =:= string; S =:= binary; S =:= uuid ->
-    raw_type(binary);
-erlang_type({Kind, T, _}, Ctx) when Kind =:= list; Kind =:= set ->
-    %% sets travel as lists on the wire (element type + count), exactly
-    %% like the official generator emits them
-    {type, erl_anno:new(0), list, [erlang_type(T, Ctx)]};
+erlang_type({base, B, _}, _) ->
+    base_erlang_type(B);
+erlang_type({list, T, _}, Ctx) ->
+    list_type(T, Ctx);
+erlang_type({set, T, Ann}, Ctx) ->
+    %% Sets travel as lists on the wire (element type + count), exactly
+    %% like the official generator emits them; erl.set only picks the
+    %% in-process collection.
+    case set_impl(Ann) of
+        list ->
+            list_type(T, Ctx);
+        Impl ->
+            %% sets:set(Elem) / ordsets:ordset(Elem) — the stdlib type
+            %% names the in-process collection.
+            {Module, TypeName} =
+                case Impl of
+                    sets -> {sets, set};
+                    ordset -> {ordsets, ordset}
+                end,
+            Anno = erl_anno:new(0),
+            {remote_type, Anno, [
+                {atom, Anno, Module},
+                {atom, Anno, TypeName},
+                [erlang_type(T, Ctx)]
+            ]}
+    end;
 erlang_type({map, K, V, _}, Ctx) ->
     Anno = erl_anno:new(0),
     {type, Anno, map, [{type, Anno, map_field_assoc, [erlang_type(K, Ctx), erlang_type(V, Ctx)]}]};
@@ -838,22 +1514,36 @@ erlang_type({ref, Name, _}, Ctx) ->
     case binary:split(Name, <<".">>) of
         [ModKey, Local] ->
             Module = maps:get(ModKey, Ctx#ctx.modules, undefined),
-            ref_type(find_struct(Module, Local));
+            ref_type(find_struct(Module, Local), module_prefix(ModKey, Ctx));
         [Local] ->
             Module = maps:get(Ctx#ctx.current, Ctx#ctx.modules),
-            ref_type(find_struct(Module, Local))
+            ref_type(find_struct(Module, Local), current_prefix(Ctx))
     end.
 
--spec ref_type({ok, #tg_struct{}} | error) -> erl_syntax:syntaxTree().
-ref_type({ok, S}) ->
+-spec base_erlang_type(base_type()) -> erl_syntax:syntaxTree().
+base_erlang_type(bool) ->
+    raw_type(boolean);
+base_erlang_type(B) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
+    raw_type(integer);
+base_erlang_type(double) ->
+    raw_type(float);
+base_erlang_type(S) when S =:= string; S =:= binary; S =:= uuid ->
+    raw_type(binary).
+
+-spec module_prefix(module_key(), #ctx{}) -> binary().
+module_prefix(ModKey, Ctx) ->
+    case maps:get(ModKey, Ctx#ctx.modules, undefined) of
+        undefined -> <<>>;
+        Mod -> Mod#tg_module.prefix
+    end.
+
+-spec ref_type({ok, #tg_struct{}} | error, binary()) -> erl_syntax:syntaxTree().
+ref_type({ok, S}, Prefix) ->
     case record_mode(S) of
-        true ->
-            Tag = record_tag(S#tg_struct.name),
-            {type, erl_anno:new(0), record, [{atom, erl_anno:new(0), Tag}]};
-        false ->
-            raw_type(map)
+        true -> record_type(record_tag(Prefix, S#tg_struct.name));
+        false -> raw_type(map)
     end;
-ref_type(error) ->
+ref_type(error, _Prefix) ->
     %% Enums and typedefs surface as their scalar element types.
     raw_type(term).
 
@@ -997,6 +1687,8 @@ format(Forms) ->
     unicode:characters_to_binary(lists:append([format_form(F) || F <- Forms])).
 
 -spec format_form(erl_syntax:forms() | erl_syntax:syntaxTree()) -> string().
+format_form({raw_text, Text}) ->
+    unicode:characters_to_list(Text);
 format_form({tree, _, _, _} = Tree) ->
     [erl_prettypr:format(Tree), "\n"];
 format_form(RawForm) ->

@@ -15,17 +15,24 @@ profiles.
 
 The companion `ThriftTest.thrift` in this directory is the same file that
 ships with the 0.25.0 tarball. The generated code checked in under
-`apps/thrift_generator/priv/golden/gen-erl` was produced
-by the pinned official compiler 0.25.0 (`thrift --gen erl`) from the
-same file minus the `uuid` base type (which the official Erlang generator
-does not support); the variant lives next to the generated code as
-`apps/thrift_generator/test/thrift_golden_SUITE_data/ThriftTest.thrift`
-(in the golden suite data dir) and is what both interop
-sides are generated from. Codegen and runtime
+`include/golden/gen-erl` was produced by the pinned official compiler
+0.25.0 (`thrift --gen erl`) from the same file minus the `uuid` base type
+(which the official Erlang generator does not support); the variant lives
+in the golden suite data dir
+(`apps/thrift_generator/test/thrift_golden_SUITE_data/ThriftTest.thrift`)
+and is what both interop sides are generated from. Codegen and runtime
 versions must move together.
 
 ## Local modifications (kept minimal, documented here)
 
+- `include/golden/gen-erl/` — the committed golden codegen fixture
+  (our addition, not upstream): the officially generated modules and
+  headers for the interop tests. They live here — beside the runtime
+  they were produced for — so no app's `src_dirs`/`test` tree ever
+  contains them: build tools must not compile, lint or eunit-scan the
+  reference artifact (test code reaches it through
+  `-include_lib("thrift/include/golden/gen-erl/...")` and
+  `code:lib_dir(thrift)`).
 - OTP 29 compatibility patches: old-style `catch Expr` is deprecated and
   scheduled for removal, so every use is rewritten to an equivalent
   `try ... catch` (throw passes through, error/exit become `{'EXIT', _}`,

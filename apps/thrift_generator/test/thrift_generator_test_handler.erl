@@ -15,15 +15,16 @@
 %% Handler implementing the callbacks generated from the semantic
 %% fixture (`MainService`): the loopback cases run the full generated
 %% stack — client wrappers, server dispatch, records at the boundary.
-%% The record shapes mirror the emitted definitions (same tags and
-%% field order as the generated `main_types`).
+%% The record shapes mirror the emitted definitions: the `namespace
+%% erl` of each fixture file prefixes the record tags (`shared_inner`
+%% lives in shared.thrift, `main_failed` in main.thrift).
 
 -module(thrift_generator_test_handler).
 
 -export([ping/0, area/2, fetch/1, fire/1]).
 
--record(inner, {name}).
--record(failed, {reason}).
+-record(shared_inner, {name}).
+-record(main_failed, {reason}).
 
 -spec ping() -> {ok, undefined}.
 ping() ->
@@ -33,11 +34,13 @@ ping() ->
 area(W, H) ->
     {ok, W * H}.
 
--spec fetch(integer()) -> {ok, #inner{}} | {error, {exception, binary(), #failed{}}}.
+-spec fetch(integer()) ->
+    {ok, #shared_inner{}}
+    | {error, {exception, binary(), #main_failed{}}}.
 fetch(Id) when Id < 0 ->
-    {error, {exception, <<"Failed">>, #failed{reason = <<"negative id">>}}};
+    {error, {exception, <<"Failed">>, #main_failed{reason = <<"negative id">>}}};
 fetch(Id) ->
-    {ok, #inner{name = integer_to_binary(Id)}}.
+    {ok, #shared_inner{name = integer_to_binary(Id)}}.
 
 -spec fire(integer()) -> ok.
 fire(Code) ->

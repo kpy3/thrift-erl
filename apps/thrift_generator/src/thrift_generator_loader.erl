@@ -61,8 +61,10 @@ visit(Path, Marks, Acc) ->
             Doc = parse(Path),
             Headers = document_headers(Doc),
             Name = module_name(Headers, Path),
+            Prefix = identifier_prefix(Headers, Path),
             Includes = include_paths(Headers, Path),
-            Entry = #tg_loaded{name = Name, path = Path, includes = Includes, doc = Doc},
+            Entry =
+                #tg_loaded{name = Name, prefix = Prefix, path = Path, includes = Includes, doc = Doc},
             {Acc1, Marks1} = lists:foldl(
                 fun(Include, {A, M}) -> visit(Include, M, A) end,
                 {[Entry | Acc], Marks#{Path => visiting}},
@@ -101,22 +103,85 @@ include_paths(Headers, ParentPath) ->
 
 -spec module_name([ast_node()], binary()) -> binary().
 module_name(Headers, Path) ->
-    Namespaces = [
+    Namespaces = document_namespaces(Headers),
+    Fallback = basename_sans_extension(Path),
+    pick_namespace(Namespaces, <<"erl">>, pick_namespace(Namespaces, <<"*">>, Fallback)).
+
+%% Generated identifiers (record tags, type aliases, derived function
+%% names, constant macros) carry the normalized namespace value as a
+%% prefix when an erl or wildcard namespace is declared — same-named
+%% structs of different files then coexist. No such namespace: an empty
+%% prefix, and the emitted names stay exactly the declared ones.
+
+-spec identifier_prefix([ast_node()], binary()) -> binary().
+identifier_prefix(Headers, Path) ->
+    Namespaces = document_namespaces(Headers),
+    case
+        pick_namespace(
+            Namespaces, <<"erl">>, pick_namespace(Namespaces, <<"*">>, undefined)
+        )
+    of
+        undefined -> <<>>;
+        Name -> normalize_prefix(Name, Path)
+    end.
+
+-spec document_namespaces([ast_node()]) -> [{binary(), binary()}].
+document_namespaces(Headers) ->
+    [
         {Scope, Name}
      || #thrift_generator_node{
             payload = #thrift_generator_namespace{scope = Scope, name = Name}
         } <-
             Headers
-    ],
-    Fallback = basename_sans_extension(Path),
-    pick_namespace(Namespaces, <<"erl">>, pick_namespace(Namespaces, <<"*">>, Fallback)).
+    ].
 
--spec pick_namespace([{binary(), binary()}], binary(), binary()) -> binary().
+-spec pick_namespace([{binary(), binary()}], binary(), binary() | undefined) ->
+    binary() | undefined.
 pick_namespace(Namespaces, Scope, Fallback) ->
     case lists:keyfind(Scope, 1, Namespaces) of
         {Scope, Name} -> Name;
         false -> Fallback
     end.
+
+%% The namespace value becomes an atom-building prefix: lowercased,
+%% every run of characters outside [a-z0-9_] collapsed to one
+%% underscore, leading/trailing underscores and a leading digit
+%% normalized away (record tags and type names must be legal bare
+%% atoms). A value that normalizes to nothing is a load error.
+
+-spec normalize_prefix(binary(), binary()) -> binary().
+normalize_prefix(Name, Path) ->
+    Collapsed = collapse_prefix(unicode:characters_to_list(string:lowercase(Name))),
+    Trimmed = strip_underscores(Collapsed),
+    Guarded =
+        case Trimmed of
+            <<C, _/binary>> when C >= $0, C =< $9 -> <<"_", Trimmed/binary>>;
+            _ -> Trimmed
+        end,
+    case Guarded of
+        <<>> -> throw({load_error, {namespace, Path, Name}});
+        Prefix -> Prefix
+    end.
+
+-spec collapse_prefix(string()) -> binary().
+collapse_prefix(Chars) ->
+    collapse_prefix(Chars, <<>>, false).
+
+-spec collapse_prefix(string(), binary(), boolean()) -> binary().
+collapse_prefix([], Acc, _Sep) ->
+    Acc;
+collapse_prefix([C | Rest], Acc, Sep) ->
+    IsWord =
+        (C >= $a andalso C =< $z) orelse (C >= $0 andalso C =< $9) orelse C =:= $_,
+    case IsWord of
+        true -> collapse_prefix(Rest, <<Acc/binary, C>>, false);
+        false when Sep -> collapse_prefix(Rest, Acc, true);
+        false -> collapse_prefix(Rest, <<Acc/binary, "_">>, true)
+    end.
+
+-spec strip_underscores(binary()) -> binary().
+strip_underscores(Bin) ->
+    string:trim(Bin, both, "_").
 
 -spec basename_sans_extension(binary()) -> binary().
 basename_sans_extension(Path) ->
