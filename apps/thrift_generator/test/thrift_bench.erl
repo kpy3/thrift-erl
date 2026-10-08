@@ -22,11 +22,13 @@ fixture as the golden interop suite:
 - **ours (binary)** — `thrift_erl_binary` over the introspection
   descriptors of the in-memory generated `goldentest_types` module;
 - **ours (compact)** — `thrift_erl_compact` over the same descriptors;
+- **ours (json)** — `thrift_erl_json` over the same descriptors;
 - **reference (binary)** — the vendored Apache Thrift 0.25.0 Erlang
   runtime (`thrift_binary_protocol` over `thrift_membuffer_transport`)
   with the committed officially generated `thrift_test_types`;
 - **reference (compact)** — the same runtime's
-  `thrift_compact_protocol`.
+  `thrift_compact_protocol`;
+- **reference (json)** — the same runtime's `thrift_json_protocol`.
 
 Each case first proves the codecs agree: our bytes must decode back
 through the official reader of the same protocol into the expected
@@ -45,16 +47,24 @@ from the environment: `BENCH_WARMUP` (default 1), `BENCH_SAMPLES`
 (default 3), `BENCH_SAMPLE_MS` (default 500). Reference numbers include
 a fresh membuffer transport and protocol per operation — that API has
 no way to decode a bare binary, so the construction is part of its
-codec cost. Throughput is hardware-dependent; only the speedup ratios
-between the two implementations on the same machine are meaningful.
+codec cost. The official JSON reader primes on a whole message array,
+so the JSON decode row measures `decode_message` + struct decode on
+our side and `read(message_begin)` + struct read on the reference
+side; the encode rows stay at bare-struct level like every protocol.
+Throughput is hardware-dependent; only the speedup ratios between the
+two implementations on the same machine are meaningful.
 """.
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
 -include_lib("thrift/include/golden/gen-erl/thrift_test_types.hrl").
+%% #protocol_message_begin for the official JSON message-level decode.
+-include_lib("thrift/include/thrift_protocol.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 -export([main/1, run/0]).
+%% hand-run diagnostics
+-export([official_decode_message/2]).
 
 -type case_spec() :: #{
     name := binary(),
@@ -146,6 +156,12 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     BinaryWire = iolist_to_binary(Encoded),
     {ok, CompactEncoded} = thrift_erl_compact:encode(Desc, OurValue),
     CompactWire = iolist_to_binary(CompactEncoded),
+    {ok, JsonEncoded} = thrift_erl_json:encode(Desc, OurValue),
+    JsonWire = iolist_to_binary(JsonEncoded),
+    %% The official JSON reader's unit is the message array (it primes
+    %% its parser on `read(message_begin)'), so the JSON decode side is
+    %% measured at message level for both implementations.
+    JsonMessage = iolist_to_binary(thrift_erl_json:encode_message(call, <<"bench">>, 0, JsonWire)),
 
     %% Correctness before timing. Each codec round-trips its own
     %% encoding, and the official reader of each protocol must accept
@@ -159,11 +175,21 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     ?assertEqual(OurValue, OurCompactDecoded),
     {_, {ok, CompactDecoded}} = official_decode(CompactWire, compact, OfficialName),
     Check(CompactDecoded),
+    {ok, OurJsonDecoded, <<>>} = thrift_erl_json:decode(Desc, JsonWire),
+    ?assertEqual(OurValue, OurJsonDecoded),
+    {_, {ok, JsonDecoded}} = official_decode_message(JsonMessage, OfficialName),
+    Check(JsonDecoded),
 
     OursEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(Desc, OurValue) end),
     OursDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(Desc, BinaryWire) end),
     OursCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(Desc, OurValue) end),
     OursCompactDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(Desc, CompactWire) end),
+    OursJsonEncode = erlbench(fun() -> {ok, _} = thrift_erl_json:encode(Desc, OurValue) end),
+    OursJsonDecode =
+        erlbench(fun() ->
+            {ok, _, _, _, Payload} = thrift_erl_json:decode_message(JsonMessage),
+            {ok, _, <<>>} = thrift_erl_json:decode(Desc, Payload)
+        end),
     ReferenceBinaryEncode =
         erlbench(fun() -> ok = official_write(OfficialValue, OfficialName, binary) end),
     ReferenceBinaryDecode =
@@ -172,17 +198,26 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
         erlbench(fun() -> ok = official_write(OfficialValue, OfficialName, compact) end),
     ReferenceCompactDecode =
         erlbench(fun() -> {_, {ok, _}} = official_decode(CompactWire, compact, OfficialName) end),
+    ReferenceJsonEncode =
+        erlbench(fun() -> ok = official_write(OfficialValue, OfficialName, json) end),
+    ReferenceJsonDecode = erlbench(fun() -> {_, {ok, _}} = official_decode_message(JsonMessage, OfficialName) end),
 
     Rows = [
         {<<"binary/encode">>, {measured, OursEncode}, {measured, ReferenceBinaryEncode}},
         {<<"binary/decode">>, {measured, OursDecode}, {measured, ReferenceBinaryDecode}},
         {<<"compact/encode">>, {measured, OursCompactEncode}, {measured, ReferenceCompactEncode}},
-        {<<"compact/decode">>, {measured, OursCompactDecode}, {measured, ReferenceCompactDecode}}
+        {<<"compact/decode">>, {measured, OursCompactDecode}, {measured, ReferenceCompactDecode}},
+        {<<"json/encode">>, {measured, OursJsonEncode}, {measured, ReferenceJsonEncode}},
+        {<<"json/decode">>, {measured, OursJsonDecode}, {measured, ReferenceJsonDecode}}
     ],
     io:put_chars([
         format_report(
             Name,
-            [{binary, byte_size(BinaryWire)}, {compact, byte_size(CompactWire)}],
+            [
+                {binary, byte_size(BinaryWire)},
+                {compact, byte_size(CompactWire)},
+                {json, byte_size(JsonWire)}
+            ],
             Rows
         ),
         $\n
@@ -244,7 +279,7 @@ insanity_check(#'thrift.test.Insanity'{userMap = Dict, xtructs = Xs}) ->
 %% protocol) into a fresh membuffer. The encoded bytes stay inside the
 %% transport — the official API offers no extraction — so the encode
 %% numbers measure the write cost only, identically for both protocols.
--spec official_write(tuple(), atom(), binary | compact) -> ok.
+-spec official_write(tuple(), atom(), binary | compact | json) -> ok.
 official_write(Value, Name, ProtocolName) ->
     {ok, Transport} = thrift_membuffer_transport:new(),
     {ok, Protocol0} = protocol_module(ProtocolName, Transport),
@@ -252,11 +287,13 @@ official_write(Value, Name, ProtocolName) ->
     {_Protocol2, ok} = thrift_protocol:flush_transport(Protocol1),
     ok.
 
--spec protocol_module(binary | compact, term()) -> {ok, term()}.
+-spec protocol_module(binary | compact | json, term()) -> {ok, term()}.
 protocol_module(binary, Transport) ->
     thrift_binary_protocol:new(Transport);
 protocol_module(compact, Transport) ->
-    thrift_compact_protocol:new(Transport).
+    thrift_compact_protocol:new(Transport);
+protocol_module(json, Transport) ->
+    thrift_json_protocol:new(Transport).
 
 %% Decodes one struct from `Wire` through the official runtime.
 -spec official_decode(binary(), binary | compact, atom()) ->
@@ -265,6 +302,16 @@ official_decode(Wire, ProtocolName, Name) ->
     {ok, Transport} = thrift_membuffer_transport:new(Wire),
     {ok, Protocol} = protocol_module(ProtocolName, Transport),
     thrift_protocol:read(Protocol, {struct, {thrift_test_types, Name}}).
+
+%% Decodes one JSON message (the envelope array plus the struct) through
+%% the official runtime; the JSON protocol has no bare-struct read.
+-spec official_decode_message(binary(), atom()) ->
+    {term(), {ok, tuple()} | {error, term()}}.
+official_decode_message(Wire, Name) ->
+    {ok, Transport} = thrift_membuffer_transport:new(Wire),
+    {ok, Protocol0} = thrift_json_protocol:new(Transport),
+    {Protocol1, #protocol_message_begin{}} = thrift_protocol:read(Protocol0, message_begin),
+    thrift_protocol:read(Protocol1, {struct, {thrift_test_types, Name}}).
 
 %%--------------------------------------------------------------------
 %% Measurement (erlperf, continuous mode)
@@ -299,7 +346,7 @@ erlbench(Fun) ->
     #{result := #{average := Average, stddev := StdDev}} = erlperf:run(Fun, bench_options()),
     #{average => Average, stddev => StdDev}.
 
--spec format_report(binary(), [{binary | compact, non_neg_integer()}], [row()]) -> string().
+-spec format_report(binary(), [{binary | compact | json, non_neg_integer()}], [row()]) -> string().
 format_report(Name, WireSizes, Rows) ->
     Sizes = [
         io_lib:format("~ts ~p B", [Proto, Size])

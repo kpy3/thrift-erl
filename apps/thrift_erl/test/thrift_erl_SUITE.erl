@@ -27,6 +27,8 @@
     buffered_calls/1,
     compact_framed_calls/1,
     compact_buffered_calls/1,
+    json_framed_calls/1,
+    json_buffered_calls/1,
     declared_exception/1,
     application_exception/1,
     oneway_delivery/1,
@@ -44,6 +46,8 @@ all() ->
         buffered_calls,
         compact_framed_calls,
         compact_buffered_calls,
+        json_framed_calls,
+        json_buffered_calls,
         declared_exception,
         application_exception,
         oneway_delivery,
@@ -83,14 +87,24 @@ buffered_calls(_Config) ->
 
 %% The compact protocol over both transports: the framed path is pure
 %% codec, the buffered path additionally exercises the probe-decode in
-%% extract_message, which skips the payload by wire type. Reply, void
-%% and both exception shapes go over the wire in one scenario.
+%% extract_message, which skips the payload by wire type.
 
 compact_framed_calls(_Config) ->
-    compact_calls(#{transport => framed}).
+    protocol_calls(#{transport => framed, protocol => compact}).
 
 compact_buffered_calls(_Config) ->
-    compact_calls(#{transport => buffered}).
+    protocol_calls(#{transport => buffered, protocol => compact}).
+
+%% The JSON protocol over both transports; buffered additionally runs
+%% the probe-decode in extract_message, whose completeness check relies
+%% on the ]-fold of the envelope bracket. Reply, void and both
+%% exception shapes go over the wire in one scenario.
+
+json_framed_calls(_Config) ->
+    protocol_calls(#{transport => framed, protocol => json}).
+
+json_buffered_calls(_Config) ->
+    protocol_calls(#{transport => buffered, protocol => json}).
 
 declared_exception(_Config) ->
     with_server(#{}, fun(Client) ->
@@ -242,8 +256,8 @@ prefixed_name_to_plain_server(_Config) ->
 %%--------------------------------------------------------------------
 %% Helpers
 
-compact_calls(Overrides) ->
-    with_server(Overrides#{protocol => compact}, fun(Client) ->
+protocol_calls(Overrides) ->
+    with_server(Overrides, fun(Client) ->
         ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
         ?assertEqual({ok, <<"hello">>}, call(Client, <<"echo">>, [<<"hello">>])),
         ?assertEqual({ok, 3}, call(Client, <<"size">>, [[<<"a">>, <<"b">>, <<"c">>]])),
