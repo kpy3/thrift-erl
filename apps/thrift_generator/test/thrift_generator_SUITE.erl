@@ -33,8 +33,12 @@
     loader_cycle/1,
     loader_duplicate_module/1,
     loader_missing_include/1,
+    loader_namespace_prefix/1,
+    loader_namespace_error/1,
+    same_struct_names_coexist/1,
     generated_loopback_buffered/1,
-    generated_loopback_framed/1
+    generated_loopback_framed/1,
+    generated_map_mode/1
 ]).
 
 all() ->
@@ -47,8 +51,12 @@ all() ->
         loader_cycle,
         loader_duplicate_module,
         loader_missing_include,
+        loader_namespace_prefix,
+        loader_namespace_error,
+        same_struct_names_coexist,
         generated_loopback_buffered,
-        generated_loopback_framed
+        generated_loopback_framed,
+        generated_map_mode
     ].
 
 parse_thrift_test_idl(Config) ->
@@ -232,6 +240,107 @@ loader_missing_include(Config) ->
         thrift_generator_loader:load(data_file(Config, "semantic/missing_include.thrift"))
     ).
 
+%% The erl/wildcard namespace becomes the generated identifier prefix:
+%% lowercased, non-identifier runs collapsed, leading digits guarded.
+%% Other scopes (java etc.) are not our naming concern.
+
+loader_namespace_prefix(Config) ->
+    Prefixed = write_snippet(
+        Config,
+        "prefixed.thrift",
+        <<"namespace erl demo.App2\nstruct Point { 1: i32 x }\n">>
+    ),
+    {ok, [Entry]} = thrift_generator_loader:load(Prefixed),
+    ?assertEqual(<<"demo.App2">>, Entry#tg_loaded.name),
+    ?assertEqual(<<"demo_app2">>, Entry#tg_loaded.prefix),
+
+    Digits = write_snippet(
+        Config,
+        "digits.thrift",
+        <<"namespace * _2Fast\nstruct P { 1: i32 x }\n">>
+    ),
+    {ok, [DigitsEntry]} = thrift_generator_loader:load(Digits),
+    ?assertEqual(<<"_2fast">>, DigitsEntry#tg_loaded.prefix),
+
+    Foreign = write_snippet(
+        Config,
+        "foreign.thrift",
+        <<"namespace java com.foo.bar\nstruct P { 1: i32 x }\n">>
+    ),
+    {ok, [ForeignEntry]} = thrift_generator_loader:load(Foreign),
+    ?assertEqual(<<"foreign">>, ForeignEntry#tg_loaded.name),
+    ?assertEqual(<<>>, ForeignEntry#tg_loaded.prefix),
+
+    %% End to end: the prefix lands in the emitted record tag and the
+    %% generated module atom.
+    {ok, Model} = thrift_generator_semantic:analyze([Entry]),
+    Sources = thrift_generator_emitter:sources(Model),
+    [
+        #{
+            module := demo_App2_types,
+            source := Src,
+            hrl := Hrl
+        }
+    ] = Sources,
+    ?assertMatch({match, _}, re:run(Src, <<"-record\\(demo_app2_point, \\{x\\}\\)\\.">>)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-type demo_app2_point\\(\\) :: #demo_app2_point\\{\\}\\.">>)),
+    ok.
+
+%% A namespace that normalizes to nothing is a load error, not a
+%% silently empty prefix of a declared namespace.
+
+loader_namespace_error(Config) ->
+    Empty = write_snippet(
+        Config,
+        "empty_ns.thrift",
+        <<"namespace erl _\nstruct P { 1: i32 x }\n">>
+    ),
+    ?assertMatch(
+        {error, {namespace, _, <<"_">>}},
+        thrift_generator_loader:load(Empty)
+    ).
+
+%% The scenario the prefix exists for: two files declaring the same
+%% struct name coexist once each carries its own namespace — distinct
+%% record tags, distinct type aliases, one compilation unit.
+
+same_struct_names_coexist(Config) ->
+    Included = write_snippet(
+        Config,
+        "second_ns.thrift",
+        <<"namespace erl second\nstruct Point { 1: string y }\n">>
+    ),
+    MainContent =
+        "namespace erl first\n"
+        "include \"" ++
+            unicode:characters_to_list(Included) ++
+            "\"\n"
+            "struct Point { 1: i32 x }\n",
+    Main = write_snippet(
+        Config,
+        "first_ns.thrift",
+        unicode:characters_to_binary(MainContent)
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Main),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Results = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) ->
+                {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) ->
+                erlang:error({generated_module, Name, Errors})
+        end,
+        Results
+    ),
+    ?assertEqual({first_point, [x]}, first_types:record_fields(<<"Point">>)),
+    ?assertEqual({second_point, [y]}, second_types:record_fields(<<"Point">>)),
+    {ok, Bin1} = first_types:encode_first_point({first_point, 7}),
+    {ok, Bin2} = second_types:encode_second_point({second_point, <<"hey">>}),
+    ?assertEqual({ok, {first_point, 7}}, first_types:decode_first_point(Bin1)),
+    ?assertEqual({ok, {second_point, <<"hey">>}}, second_types:decode_second_point(Bin2)),
+    ok.
+
 %% End-to-end through the generated stack: main.thrift → compiled
 %% modules → server + typed client. Struct arguments and results cross
 %% the wire as records; the declared exception comes back typed.
@@ -259,11 +368,11 @@ generated_loopback(Config, Transport) ->
             ?assertEqual({ok, undefined}, 'MainService_client':ping(Client)),
             ?assertEqual({ok, 12}, 'MainService_client':area(Client, 3, 4)),
             ?assertEqual(
-                {ok, {inner, <<"5">>}},
+                {ok, {shared_inner, <<"5">>}},
                 'MainService_client':fetch(Client, 5)
             ),
             ?assertEqual(
-                {error, {exception, <<"Failed">>, {failed, <<"negative id">>}}},
+                {error, {exception, <<"Failed">>, {main_failed, <<"negative id">>}}},
                 'MainService_client':fetch(Client, -1)
             ),
             check_oneway(Client)
@@ -289,6 +398,87 @@ check_oneway(Client) ->
             Sink -> unregister(thrift_generator_test_sink);
             _ -> ok
         end
+    end.
+
+%% End-to-end over the map-mode fixture: structs declared with
+%% `erl.struct_type = "map"` travel as maps (both key types), the
+%% record-mode parent keeps its record with map-mode children inside.
+
+-spec generated_map_mode(ct:config()) -> ok.
+generated_map_mode(Config) ->
+    MainPath = data_file(Config, "mapmode/mapmode.thrift"),
+    {ok, Loaded} = thrift_generator_loader:load(MainPath),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) ->
+                {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam);
+            ({error, {Name, Errors}}) ->
+                erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+    %% the representation contract: map mode for both key types, record
+    %% mode for the parent
+    ?assertEqual({map, atom}, mapmode_types:record_fields(<<"Point">>)),
+    ?assertEqual({map, binary}, mapmode_types:record_fields(<<"BinPoint">>)),
+    ?assertEqual({mapmode_nest, [p, b]}, mapmode_types:record_fields(<<"Nest">>)),
+    %% the hrl keeps records only for record-mode structs
+    {value, #{hrl := Hrl}} =
+        lists:search(
+            fun(E) -> maps:get(module, E) =:= mapmode_types end,
+            thrift_generator_emitter:sources(Model)
+        ),
+    ?assertMatch(
+        {match, _},
+        re:run(Hrl, <<"-record\\(mapmode_nest,\\{p :: map\\(\\), b :: map\\(\\)\\}\\)\\.">>)
+    ),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_point">>)),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_binpoint">>)),
+    %% the codec axis on a map-mode struct: the default target is the map
+    {ok, PointBin} = mapmode_types:encode_mapmode_point(#{x => 1, y => 2}),
+    ?assertEqual({ok, #{x => 1, y => 2}}, mapmode_types:decode_mapmode_point(PointBin)),
+    ?assertEqual(
+        %% struct maps are tagged by the wire name — map-mode structs
+        %% have no record tag
+        {ok, #{'__struct__' => point, x => 1, y => 2}},
+        mapmode_types:decode_mapmode_point(PointBin, struct)
+    ),
+    ?assertEqual(
+        {error, {no_record, point}},
+        mapmode_types:convert(#{'__struct__' => point, x => 1, y => 2}, record)
+    ),
+    {ok, NestBin} =
+        mapmode_types:encode_mapmode_nest({mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}),
+    ?assertEqual(
+        {ok, {mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}},
+        mapmode_types:decode_mapmode_nest(NestBin)
+    ),
+    %% e2e: maps over the wire, both key types, declared exception
+    {ok, Server} =
+        'MapSvc_server':start_link(#{port => 0, handler => thrift_generator_mapmode_handler}),
+    try
+        {ok, Port} = 'MapSvc_server':port(Server),
+        {ok, Client} = 'MapSvc_client':start_link(#{host => "127.0.0.1", port => Port}),
+        try
+            ?assertEqual(
+                {ok, #{x => 2, y => 1}},
+                'MapSvc_client':reflect(Client, #{x => 1, y => 2})
+            ),
+            ?assertEqual(
+                {ok, {mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 101}}},
+                'MapSvc_client':wrap(Client, #{x => 1, y => 2})
+            ),
+            ?assertEqual({ok, 12}, 'MapSvc_client':area(Client, 3, 4)),
+            ?assertEqual(
+                {error, {exception, <<"Oops">>, {mapmode_oops, <<"negative width">>}}},
+                'MapSvc_client':area(Client, -1, 4)
+            )
+        after
+            'MapSvc_client':stop(Client)
+        end
+    after
+        'MapSvc_server':stop(Server)
     end.
 
 %% Generates and loads the modules for the semantic fixture. Safe to

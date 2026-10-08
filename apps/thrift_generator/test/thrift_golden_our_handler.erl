@@ -78,11 +78,11 @@ testBinary(Thing) ->
     {ok, Thing}.
 
 -doc false.
-testStruct(#xtruct{} = Thing) ->
+testStruct(#goldentest_xtruct{} = Thing) ->
     {ok, Thing}.
 
 -doc false.
-testNest(#xtruct2{} = Thing) ->
+testNest(#goldentest_xtruct2{} = Thing) ->
     {ok, Thing}.
 
 -doc false.
@@ -116,17 +116,20 @@ testMapMap(_Hi) ->
 
 -doc false.
 testException(<<"Xception">>) ->
-    {error, {exception, <<"Xception">>, #xception{errorCode = 1001, message = <<"Xception">>}}};
+    {error, {exception, <<"Xception">>, #goldentest_xception{errorCode = 1001, message = <<"Xception">>}}};
 testException(_) ->
     {ok, undefined}.
 
 -doc false.
 testMultiException(<<"Xception">>, _) ->
-    {error, {exception, <<"Xception">>, #xception{errorCode = 1001, message = <<"This is not Xception2">>}}};
+    {error, {exception, <<"Xception">>, #goldentest_xception{errorCode = 1001, message = <<"This is not Xception2">>}}};
 testMultiException(<<"Xception2">>, Arg1) ->
-    {error, {exception, <<"Xception2">>, #xception2{errorCode = 2002, struct_thing = #xtruct{string_thing = Arg1}}}};
+    {error,
+        {exception, <<"Xception2">>, #goldentest_xception2{
+            errorCode = 2002, struct_thing = #goldentest_xtruct{string_thing = Arg1}
+        }}};
 testMultiException(_, Arg1) ->
-    {ok, #xtruct{string_thing = Arg1}}.
+    {ok, #goldentest_xtruct{string_thing = Arg1}}.
 
 -doc false.
 testOneway(Secs) ->

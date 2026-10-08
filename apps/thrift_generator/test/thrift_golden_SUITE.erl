@@ -38,7 +38,7 @@ connection.
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
--include("priv/golden/gen-erl/thrift_test_types.hrl").
+-include_lib("thrift/include/golden/gen-erl/thrift_test_types.hrl").
 -include("thrift_golden_records.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
@@ -57,11 +57,12 @@ all() ->
     [our_client_official_server, official_client_our_server_buffered, official_client_our_server_framed].
 
 init_per_suite(Config) ->
-    %% The committed official generated code lives under the app's
-    %% priv/ (kept out of the test source tree so build tools never
-    %% scan it); rebar3 copies priv/ into the build directory.
-    AppDir = code:lib_dir(thrift_generator),
-    GenDir = filename:join(AppDir, "priv/golden/gen-erl"),
+    %% The committed official generated code lives with the vendored
+    %% official runtime (`thrift/include/golden/gen-erl`, copied into
+    %% the build directory with the app); `code:lib_dir` points at the
+    %% build copy in the test profile. The fixture is a reference
+    %% artifact: nothing compiles it except this suite.
+    GenDir = filename:join(code:lib_dir(thrift), "include/golden/gen-erl"),
     ok = compile_official_generated(GenDir, priv_dir(Config)),
     DataDir = proplists:get_value(data_dir, Config),
     ok = load_our_thrift_test_modules(DataDir),
@@ -116,9 +117,9 @@ run_our_client_assertions(Client) ->
     ?assertEqual({ok, 3.25}, 'ThriftTest_client':testDouble(Client, 3.25)),
     ?assertEqual({ok, <<1, 2, 3>>}, 'ThriftTest_client':testBinary(Client, <<1, 2, 3>>)),
 
-    X = #xtruct{string_thing = <<"hi">>, byte_thing = -1, i32_thing = 7, i64_thing = 99},
+    X = #goldentest_xtruct{string_thing = <<"hi">>, byte_thing = -1, i32_thing = 7, i64_thing = 99},
     ?assertEqual({ok, X}, 'ThriftTest_client':testStruct(Client, X)),
-    X2 = #xtruct2{byte_thing = 5, struct_thing = X, i32_thing = 77},
+    X2 = #goldentest_xtruct2{byte_thing = 5, struct_thing = X, i32_thing = 77},
     ?assertEqual({ok, X2}, 'ThriftTest_client':testNest(Client, X2)),
 
     ?assertEqual({ok, #{1 => 10, 2 => 20}}, 'ThriftTest_client':testMap(Client, #{1 => 10, 2 => 20})),
@@ -138,22 +139,25 @@ run_our_client_assertions(Client) ->
     ?assertEqual({ok, ExpectedMapMap}, 'ThriftTest_client':testMapMap(Client, 2)),
 
     ?assertEqual(
-        {error, {exception, <<"Xception">>, #xception{errorCode = 1001, message = <<"Xception">>}}},
+        {error, {exception, <<"Xception">>, #goldentest_xception{errorCode = 1001, message = <<"Xception">>}}},
         'ThriftTest_client':testException(Client, <<"Xception">>)
     ),
     ?assertEqual({ok, undefined}, 'ThriftTest_client':testException(Client, <<"fine">>)),
 
     ?assertEqual(
-        {error, {exception, <<"Xception">>, #xception{errorCode = 1001, message = <<"This is not Xception2">>}}},
+        {error,
+            {exception, <<"Xception">>, #goldentest_xception{errorCode = 1001, message = <<"This is not Xception2">>}}},
         'ThriftTest_client':testMultiException(Client, <<"Xception">>, <<"x">>)
     ),
     ?assertEqual(
         {error,
-            {exception, <<"Xception2">>, #xception2{errorCode = 2002, struct_thing = #xtruct{string_thing = <<"y">>}}}},
+            {exception, <<"Xception2">>, #goldentest_xception2{
+                errorCode = 2002, struct_thing = #goldentest_xtruct{string_thing = <<"y">>}
+            }}},
         'ThriftTest_client':testMultiException(Client, <<"Xception2">>, <<"y">>)
     ),
     ?assertEqual(
-        {ok, #xtruct{string_thing = <<"y">>}},
+        {ok, #goldentest_xtruct{string_thing = <<"y">>}},
         'ThriftTest_client':testMultiException(Client, <<"fine">>, <<"y">>)
     ),
 
@@ -297,15 +301,19 @@ compile_official_generated(GenDir, _PrivDir) ->
 
 %% Generates and loads OUR modules for the same ThriftTest fixture the
 %% official gen-erl was compiled from (the no-uuid variant in the suite
-%% data dir). Our types module is renamed: the committed official code
-%% owns `thrift_test_types` (same `namespace erl thrift.test`), and both
-%% must coexist in the test VM.
+%% data dir). Our side is renamed as a whole: the committed official
+%% code owns `thrift_test_types` (from the same `namespace * thrift.test`),
+%% so module and the namespace-derived identifier prefix both become
+%% `goldentest` and the two generations coexist in the test VM.
 load_our_thrift_test_modules(DataDir) ->
     ThriftFile = filename:join(DataDir, "ThriftTest.thrift"),
     {ok, Loaded} = thrift_generator_loader:load(ThriftFile),
     {ok, Model0} = thrift_generator_semantic:analyze(Loaded),
     Model = Model0#tg_model{
-        modules = [Mod#tg_module{name = <<"goldentest">>} || Mod <- Model0#tg_model.modules]
+        modules = [
+            Mod#tg_module{name = <<"goldentest">>, prefix = <<"goldentest">>}
+         || Mod <- Model0#tg_model.modules
+        ]
     },
     Beams = thrift_generator_emitter:compile_sources(Model),
     lists:foreach(

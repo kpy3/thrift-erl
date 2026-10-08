@@ -32,7 +32,12 @@
     record_fields_and_defaults_test/0,
     map_representation_test/0,
     handler_callbacks_test/0,
-    source_is_readable_text_test/0
+    source_is_readable_text_test/0,
+    types_hrl_content_test/0,
+    struct_codec_test/0,
+    enum_and_const_helpers_test/0,
+    set_annotation_test/0,
+    namespace_prefix_test/0
 ]).
 
 -define(SNIPPET,
@@ -40,12 +45,22 @@
     "struct Outer { 1: Inner inner, 2: i32 count = 10 }\n"
     "enum Color { RED, GREEN = 10, BLUE }\n"
     "exception Failed { 1: string reason }\n"
+    "const i32 BASE = 10\n"
     "service Svc {\n"
     "  void ping(),\n"
     "  i32 area(1: i32 w, 2: i32 h) throws (1: Failed f),\n"
     "  oneway void fire(1: i32 code),\n"
     "  Outer fetch(1: i64 id)\n"
     "}\n"
+).
+
+-define(NS_SNIPPET,
+    "namespace erl demo.widgets\n"
+    "struct Point { 1: i32 x = 5 }\n"
+    "enum Color { RED, GREEN = 10 }\n"
+    "const i32 BASE = 10\n"
+    "const string GREETING = \"hi\"\n"
+    "service Svc { void ping() }\n"
 ).
 
 -spec generate() -> [thrift_generator_emitter:compiled()].
@@ -143,7 +158,7 @@ map_representation_test() ->
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     [{ok, t_types, Beam}] = thrift_generator_emitter:compile_sources(Model),
     {module, t_types} = code:load_binary(t_types, "t_types.erl", Beam),
-    ?assertEqual(none, t_types:record_fields(<<"M">>)),
+    ?assertEqual({map, atom}, t_types:record_fields(<<"M">>)),
     ok.
 
 handler_callbacks_test() ->
@@ -161,12 +176,239 @@ source_is_readable_text_test() ->
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Sources = thrift_generator_emitter:sources(Model),
-    {_, ClientSrc} = lists:keyfind('Svc_client', 1, Sources),
+    ClientSrc = entry_source('Svc_client', Sources),
     ?assertMatch(
         {match, _},
         re:run(ClientSrc, <<"area\\(Client, P1, P2\\) -> area\\(Client, P1, P2, 5000\\).">>)
     ),
-    {_, TypesSrc} = lists:keyfind(t_types, 1, Sources),
+    TypesSrc = entry_source(t_types, Sources),
     ?assertMatch({match, _}, re:run(TypesSrc, <<"-record\\(outer, \\{inner, count = 10\\}\\).">>)),
     ?assertMatch({match, _}, re:run(TypesSrc, <<"struct_info\\(<<\"Outer\">>\\)">>)),
     ok.
+
+types_hrl_content_test() ->
+    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Sources = thrift_generator_emitter:sources(Model),
+    Hrl = entry_hrl(t_types, Sources),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-ifndef\\(T_HRL\\)\\.">>)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-define\\(T_HRL, true\\)\\.">>)),
+    ?assertMatch(
+        {match, _},
+        re:run(Hrl, <<"-record\\(outer,\\{inner :: #inner\\{\\}, count = 10 :: integer\\(\\)\\}\\)\\.">>)
+    ),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-type outer\\(\\) :: #outer\\{\\}\\.">>)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-type color\\(\\) :: 'RED' \\| 'GREEN' \\| 'BLUE'\\.">>)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-define\\(BASE, 10\\)\\.">>)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-endif\\.">>)),
+    ok.
+
+struct_codec_test() ->
+    generate(),
+    Record = {outer, {inner, <<"x">>}, 42},
+    {ok, Bin} = t_types:encode_outer(Record),
+    ?assertEqual({ok, Record}, t_types:decode_outer(Bin)),
+    %% map representation: uniform atom-keyed maps all the way down
+    ?assertEqual(
+        {ok, #{inner => #{name => <<"x">>}, count => 42}},
+        t_types:decode_outer(Bin, map)
+    ),
+    %% struct representation: the tag survives as identity metadata
+    {ok, Struct} = t_types:decode_outer(Bin, struct),
+    ?assertEqual(outer, maps:get('__struct__', Struct)),
+    ?assertEqual({ok, Record}, t_types:outer_from_map(#{inner => {inner, <<"x">>}, count => 42})),
+    %% convert/2 travels between representations through the tag index
+    ?assertEqual({ok, Record}, t_types:convert(Struct, record)),
+    ?assertEqual(
+        {ok, #{inner => #{name => <<"x">>}, count => 42}},
+        t_types:convert(Record, map)
+    ),
+    ?assertMatch(#{outer := {struct, {ref, t_types, <<"Outer">>}}}, t_types:tag_index()),
+    %% strict decoding refuses trailing bytes and truncation
+    ?assertEqual({error, trailing}, t_types:decode_outer(<<Bin/binary, 0>>)),
+    ?assertEqual(
+        {error, truncated},
+        t_types:decode_outer(binary:part(Bin, 0, byte_size(Bin) - 1))
+    ),
+    ok.
+
+enum_and_const_helpers_test() ->
+    generate(),
+    ?assertEqual({ok, 0}, t_types:color_to_int('RED')),
+    ?assertEqual({ok, 10}, t_types:color_to_int('GREEN')),
+    ?assertEqual({ok, 11}, t_types:color_to_int('BLUE')),
+    ?assertEqual({ok, 7}, t_types:color_to_int(7)),
+    ?assertEqual(error, t_types:color_to_int(mauve)),
+    ?assertEqual({ok, 'GREEN'}, t_types:color_from_int(10)),
+    ?assertEqual(error, t_types:color_from_int(99)),
+    ?assertEqual(10, t_types:'BASE'()),
+    ok.
+
+%% erl.set picks the in-process set implementation. The wire encoding
+%% stays a list; descriptors carry the impl, hrl types name the stdlib
+%% collection, decode/encode convert both ways.
+
+set_annotation_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        "typedef set<i32> (erl.set = \"ordset\") OrdInts\n"
+        "struct Bag {\n"
+        "  1: set<i32> plain,\n"
+        "  2: set<i32> (erl.set = \"ordset\") ords,\n"
+        "  3: set<string> (erl.set = \"sets\") tags,\n"
+        "  4: set<set<i32>> nested,\n"
+        "  5: OrdInts via_typedef\n"
+        "}\n"
+    ),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Results = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        Results
+    ),
+
+    %% Descriptors carry the impl as the third element; plain sets keep
+    %% `list` and hand-written 2-tuples stay valid.
+    ?assertEqual(
+        {struct, [
+            {1, default, {set, {base, i32}, list}, <<"plain">>, undefined},
+            {2, default, {set, {base, i32}, ordset}, <<"ords">>, undefined},
+            {3, default, {set, {base, string}, sets}, <<"tags">>, undefined},
+            {4, default, {set, {set, {base, i32}, list}, list}, <<"nested">>, undefined},
+            {5, default, {set, {base, i32}, ordset}, <<"via_typedef">>, undefined}
+        ]},
+        t_types:struct_info(<<"Bag">>)
+    ),
+    Sources = thrift_generator_emitter:sources(Model),
+    Hrl = entry_hrl(t_types, Sources),
+    ?assertMatch({match, _}, re:run(Hrl, <<"plain :: \\[integer\\(\\)\\]">>)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"ords :: ordsets:ordset\\(integer\\(\\)\\)">>)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"tags :: sets:set\\(binary\\(\\)\\)">>)),
+
+    %% Encode accepts each implementation's input shape, decode builds
+    %% it back: ordsets sort and dedup, sets v2 dedup.
+    {ok, Bin} = t_types:encode_bag(#{
+        plain => [9, 9, 1],
+        ords => ordsets:from_list([3, 1, 2]),
+        tags => sets:from_list([<<"b">>, <<"a">>]),
+        nested => [ordsets:from_list([1, 2])],
+        via_typedef => [7]
+    }),
+    {ok, Bag} = t_types:decode_bag(Bin, map),
+    ?assertEqual(#{plain => [9, 9, 1]}, maps:with([plain], Bag)),
+    ?assertEqual([1, 2, 3], maps:get(ords, Bag)),
+    ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), maps:get(tags, Bag)),
+    ?assertEqual([[1, 2]], maps:get(nested, Bag)),
+    ?assertEqual([7], maps:get(via_typedef, Bag)),
+
+    %% Record representation: set fields become record elements of the
+    %% same shapes, and encode auto-detects them back.
+    {ok, Record} = t_types:decode_bag(Bin, record),
+    {bag, Plain, Ords, Tags, Nested, ViaTypedef} = Record,
+    ?assertEqual([9, 9, 1], Plain),
+    ?assertEqual([1, 2, 3], Ords),
+    ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), Tags),
+    ?assertEqual([[1, 2]], Nested),
+    ?assertEqual([7], ViaTypedef),
+    ?assertEqual({ok, Bin}, t_types:encode_bag(Record)),
+
+    %% The wire codec itself stays list-shaped: 2-tuple descriptors and
+    %% raw lists roundtrip through thrift_erl_binary untouched.
+    WireDesc = {set, {base, i32}},
+    {ok, WireIo} = thrift_erl_binary:encode(WireDesc, [1, 2]),
+    WireBin = iolist_to_binary(WireIo),
+    ?assertEqual({ok, [1, 2], <<>>}, thrift_erl_binary:decode(WireDesc, WireBin)),
+    ok.
+
+%% A declared `namespace erl` (or `namespace *`) prefixes every
+%% generated identifier of the module — record tag, type aliases,
+%% derived function names, constant macro — while the wire names (the
+%% struct_info/enum_info keys) and enum member atoms stay exactly as
+%% declared. Services keep their own name-derived module atoms.
+
+namespace_prefix_test() ->
+    {ok, Doc} = thrift_generator:parse_string(?NS_SNIPPET),
+    Loaded = [
+        #tg_loaded{
+            name = <<"demo.widgets">>,
+            prefix = <<"demo_widgets">>,
+            path = <<"t.thrift">>,
+            includes = [],
+            doc = Doc
+        }
+    ],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Results = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        Results
+    ),
+    ?assertEqual(
+        ['Svc_client', 'Svc_handler', 'Svc_server', demo_widgets_types],
+        lists:sort([Name || {ok, Name, _} <- Results])
+    ),
+
+    %% The record contract and the codec functions carry the prefix;
+    %% struct_info stays keyed by the wire name.
+    ?assertEqual({demo_widgets_point, [x]}, demo_widgets_types:record_fields(<<"Point">>)),
+    ?assertEqual(
+        {struct, [{1, default, {base, i32}, <<"x">>, 5}]},
+        demo_widgets_types:struct_info(<<"Point">>)
+    ),
+    Record = {demo_widgets_point, 5},
+    {ok, Bin} = demo_widgets_types:encode_demo_widgets_point(Record),
+    ?assertEqual({ok, Record}, demo_widgets_types:decode_demo_widgets_point(Bin)),
+    ?assertEqual({ok, #{x => 5}}, demo_widgets_types:decode_demo_widgets_point(Bin, map)),
+    ?assertEqual({ok, Record}, demo_widgets_types:demo_widgets_point_from_map(#{x => 5})),
+    ?assertMatch(
+        #{demo_widgets_point := {struct, {ref, demo_widgets_types, <<"Point">>}}},
+        demo_widgets_types:tag_index()
+    ),
+
+    %% Enum helpers get the prefix; member atoms and enum_info do not.
+    ?assertEqual({ok, 0}, demo_widgets_types:demo_widgets_color_to_int('RED')),
+    ?assertEqual({ok, 'GREEN'}, demo_widgets_types:demo_widgets_color_from_int(10)),
+    ?assertEqual([{0, 'RED'}, {10, 'GREEN'}], demo_widgets_types:enum_info(<<"Color">>)),
+
+    %% Constant functions carry the prefix; scalar macros uppercase it.
+    ?assertEqual(10, demo_widgets_types:'demo_widgets_BASE'()),
+    ?assertEqual(<<"hi">>, demo_widgets_types:'demo_widgets_GREETING'()),
+
+    Hrl = entry_hrl(demo_widgets_types, thrift_generator_emitter:sources(Model)),
+    ?assertMatch(
+        {match, _},
+        re:run(Hrl, <<"-record\\(demo_widgets_point,\\{x = 5 :: integer\\(\\)\\}\\)\\.">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(Hrl, <<"-type demo_widgets_point\\(\\) :: #demo_widgets_point\\{\\}\\.">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(Hrl, <<"-type demo_widgets_color\\(\\) :: 'RED' \\| 'GREEN'\\.">>)
+    ),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-define\\(DEMO_WIDGETS_BASE, 10\\)\\.">>)),
+    ok.
+
+%%--------------------------------------------------------------------
+
+-spec entry(module(), [thrift_generator_emitter:source()]) -> thrift_generator_emitter:source().
+entry(Module, Sources) ->
+    {value, Entry} =
+        lists:search(fun(E) -> maps:get(module, E) =:= Module end, Sources),
+    Entry.
+
+-spec entry_source(module(), [thrift_generator_emitter:source()]) -> binary().
+entry_source(Module, Sources) ->
+    maps:get(source, entry(Module, Sources)).
+
+-spec entry_hrl(module(), [thrift_generator_emitter:source()]) -> binary().
+entry_hrl(Module, Sources) ->
+    maps:get(hrl, entry(Module, Sources)).

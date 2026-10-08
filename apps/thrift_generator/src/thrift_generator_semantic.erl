@@ -166,6 +166,7 @@ analyze_module(Loaded, Ctx0) ->
     Module =
         #tg_module{
             name = Loaded#tg_loaded.name,
+            prefix = Loaded#tg_loaded.prefix,
             path = Loaded#tg_loaded.path,
             includes = Loaded#tg_loaded.includes,
             structs = lists:reverse(Structs),
@@ -174,7 +175,75 @@ analyze_module(Loaded, Ctx0) ->
             consts = lists:reverse(Consts),
             services = lists:reverse(Services)
         },
-    {Module, Ctx7}.
+    {Module, check_generated_names(Module, Ctx7)}.
+
+%% The emitter derives function and record names by flattening
+%% (lowercasing) definition names; two definitions that flatten to the
+%% same generated name would produce a duplicate — reject at analysis
+%% time with a readable error instead of a compiler crash later.
+
+-spec check_generated_names(#tg_module{}, #ctx{}) -> #ctx{}.
+check_generated_names(Module, Ctx) ->
+    StructTags = [{string:lowercase(S#tg_struct.name), S#tg_struct.line} || S <- Module#tg_module.structs],
+    EnumPrefixes = [{string:lowercase(E#tg_enum.name), E#tg_enum.line} || E <- Module#tg_module.enums],
+    Ctx1 = check_flat_clashes(StructTags, "record tag", Ctx),
+    Ctx2 = check_flat_clashes(EnumPrefixes, "enum helper prefix", Ctx1),
+    check_const_clashes(Module, Ctx2).
+
+-spec check_flat_clashes([{binary(), non_neg_integer()}], string(), #ctx{}) -> #ctx{}.
+check_flat_clashes(Pairs, What, Ctx) ->
+    ByName = maps:groups_from_list(fun({N, _}) -> N end, fun({_N, L}) -> L end, Pairs),
+    maps:fold(
+        fun
+            (Name, Lines, C) when length(Lines) > 1 ->
+                [First, _Second | _] = lists:sort(Lines),
+                err(First, "duplicate ~ts ~ts", [What, Name], C);
+            (_Name, _Lines, C) ->
+                C
+        end,
+        Ctx,
+        ByName
+    ).
+
+%% Constant functions live in one namespace with the generated codecs:
+%% a constant named like a codec function or the shared convert/tag_index
+%% entries would shadow or collide with them.
+
+-spec check_const_clashes(#tg_module{}, #ctx{}) -> #ctx{}.
+check_const_clashes(Module, Ctx) ->
+    Generated =
+        [<<"convert">>, <<"tag_index">>] ++
+            [
+                Prefix
+             || S <- Module#tg_module.structs,
+                Prefix <- [
+                    <<"encode_", (string:lowercase(S#tg_struct.name))/binary>>,
+                    <<"decode_", (string:lowercase(S#tg_struct.name))/binary>>,
+                    <<(string:lowercase(S#tg_struct.name))/binary, "_from_map">>
+                ]
+            ] ++
+            [
+                <<(string:lowercase(E#tg_enum.name))/binary, Suffix/binary>>
+             || E <- Module#tg_module.enums,
+                Suffix <- [<<"_to_int">>, <<"_from_int">>]
+            ],
+    lists:foldl(
+        fun(C, C0) ->
+            case lists:member(C#tg_const.name, Generated) of
+                true ->
+                    err(
+                        C#tg_const.line,
+                        "constant ~ts collides with a generated function name",
+                        [C#tg_const.name],
+                        C0
+                    );
+                false ->
+                    C0
+            end
+        end,
+        Ctx,
+        Module#tg_module.consts
+    ).
 
 %% Duplicate definition names within one module are rejected whatever
 %% kinds are involved (a const colliding with a struct is a clash).
@@ -226,7 +295,41 @@ build_struct(Node, Kind, Acc, Ctx0) ->
             doc = Node#thrift_generator_node.doc,
             line = Line
         },
-    {[Struct | Acc], Ctx}.
+    Ctx1 = check_struct_annotations(Struct, Ctx),
+    {[Struct | Acc], Ctx1}.
+
+%% The erl.* struct annotations drive the representation axis in the
+%% generated code; an unrecognized value would silently change meaning,
+%% so analysis rejects it.
+
+-spec check_struct_annotations(#tg_struct{}, #ctx{}) -> #ctx{}.
+check_struct_annotations(S, Ctx0) ->
+    Erl = S#tg_struct.erl,
+    Ctx1 =
+        case maps:get(struct_type, Erl, undefined) of
+            undefined -> Ctx0;
+            <<"map">> -> Ctx0;
+            <<"record">> -> Ctx0;
+            Value -> err(S#tg_struct.line, "unknown erl.struct_type ~ts", [Value], Ctx0)
+        end,
+    case maps:get('struct_type.map.key_type', Erl, undefined) of
+        undefined ->
+            Ctx1;
+        KeyType when KeyType =:= <<"atom">>; KeyType =:= <<"binary">> ->
+            case maps:get(struct_type, Erl, undefined) of
+                <<"map">> ->
+                    Ctx1;
+                _ ->
+                    err(
+                        S#tg_struct.line,
+                        "erl.struct_type.map.key_type requires erl.struct_type = \"map\"",
+                        [],
+                        Ctx1
+                    )
+            end;
+        KeyType ->
+            err(S#tg_struct.line, "unknown erl.struct_type.map.key_type ~ts", [KeyType], Ctx1)
+    end.
 
 %% Field conversion shared by structs/unions/exceptions and function
 %% parameters/throws. Thrift legacy rule: fields without an explicit id
@@ -747,12 +850,27 @@ validate_type({ref, Name, _}, Line, Ctx) ->
     end;
 validate_type({list, Elem, _}, Line, Ctx) ->
     validate_type(Elem, Line, Ctx);
-validate_type({set, Elem, _}, Line, Ctx) ->
-    validate_type(Elem, Line, Ctx);
+validate_type({set, Elem, Ann}, Line, Ctx) ->
+    Ctx1 = validate_set_impl(Ann, Line, Ctx),
+    validate_type(Elem, Line, Ctx1);
 validate_type({map, Key, Value, _}, Line, Ctx) ->
     validate_type(Key, Line, validate_type(Value, Line, Ctx));
 validate_type(_Base, _Line, Ctx) ->
     Ctx.
+
+%% The erl.set annotation picks the in-process set implementation
+%% (`sets` v2 or `ordsets`); the wire encoding is unchanged either way.
+
+-spec validate_set_impl(annotations(), non_neg_integer(), #ctx{}) -> #ctx{}.
+validate_set_impl(Ann, Line, Ctx) ->
+    case maps:find(<<"erl.set">>, Ann) of
+        error ->
+            Ctx;
+        {ok, Impl} when Impl =:= <<"sets">>; Impl =:= <<"ordset">> ->
+            Ctx;
+        {ok, Impl} ->
+            err(Line, "unknown erl.set ~ts (expected \"sets\" or \"ordset\")", [Impl], Ctx)
+    end.
 
 %% A name without dots resolves locally; a dotted name resolves as
 %% Module.Name across every loaded module.

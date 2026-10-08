@@ -106,9 +106,14 @@
 %% One IDL file = one module. `name` comes from `namespace erl` (or
 %% `namespace *`), falling back to the file base name without the
 %% .thrift extension — this is the name used to qualify references
-%% from including files and to name generated modules.
+%% from including files and to name generated modules. `prefix` comes
+%% from the same namespace (empty without one): the identifier prefix
+%% every generated record tag, type alias, derived function name and
+%% constant macro carries, so same-named definitions of different
+%% files keep coexisting once both hrl files land in one compilation.
 -record(tg_module, {
     name :: binary(),
+    prefix = <<>> :: binary(),
     path :: binary(),
     includes = [] :: [binary()],
     structs = [] :: [#tg_struct{}],
@@ -128,6 +133,7 @@
 %% One entry handed from the loader to the semantic pass.
 -record(tg_loaded, {
     name :: binary(),
+    prefix = <<>> :: binary(),
     path :: binary(),
     includes :: [binary()],
     doc :: ast_node()

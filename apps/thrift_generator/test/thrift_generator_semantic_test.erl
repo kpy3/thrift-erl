@@ -36,7 +36,13 @@
     service_extends_merge_test/0,
     override_inherited_error_test/0,
     recursive_struct_ok_test/0,
-    default_from_const_test/0
+    default_from_const_test/0,
+    generated_tag_clash_error_test/0,
+    enum_prefix_clash_error_test/0,
+    const_codec_clash_error_test/0,
+    const_reserved_clash_error_test/0,
+    struct_annotation_error_test/0,
+    set_annotation_error_test/0
 ]).
 
 -spec analyze(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.
@@ -164,4 +170,93 @@ recursive_struct_ok_test() ->
 default_from_const_test() ->
     {ok, Model} = analyze(<<"const i32 BASE = 10\nstruct S { 1: i32 x = BASE }">>),
     [#tg_struct{fields = [#tg_field{default = 10}]}] = (model_module(Model))#tg_module.structs,
+    ok.
+
+%% The emitter flattens struct and enum names into function/record-tag
+%% namespaces; a clash there would surface as a compiler error in the
+%% generated code, so analysis rejects it with a readable message.
+
+generated_tag_clash_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"duplicate record tag item">>}]},
+        analyze(
+            "struct Item { 1: string a }\n"
+            "struct item { 1: string b }\n"
+        )
+    ),
+    ok.
+
+enum_prefix_clash_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"duplicate enum helper prefix color">>}]},
+        analyze(
+            "enum Color { RED }\n"
+            "enum color { BLUE }\n"
+        )
+    ),
+    ok.
+
+const_codec_clash_error_test() ->
+    %% encode_foo/1 is generated for struct Foo; a constant would shadow it.
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"constant encode_foo collides with a generated function name">>}]},
+        analyze(
+            "struct Foo { 1: i32 x }\n"
+            "const i32 encode_foo = 1\n"
+        )
+    ),
+    ok.
+
+const_reserved_clash_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"constant tag_index collides with a generated function name">>}]},
+        analyze(<<"const i32 tag_index = 1">>)
+    ),
+    {ok, _} = analyze("struct Foo { 1: i32 x }\nconst i32 encode_bar = 1"),
+    ok.
+
+struct_annotation_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.struct_type weird">>}]},
+        analyze(<<"struct S { 1: i32 x } (erl.struct_type = \"weird\")">>)
+    ),
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.struct_type.map.key_type uuid">>}]},
+        analyze(
+            "struct S { 1: i32 x } (erl.struct_type = \"map\", "
+            "erl.struct_type.map.key_type = \"uuid\")"
+        )
+    ),
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"erl.struct_type.map.key_type requires erl.struct_type = \"map\"">>}]},
+        analyze(<<"struct S { 1: i32 x } (erl.struct_type.map.key_type = \"binary\")">>)
+    ),
+    {ok, _} = analyze(<<"struct S { 1: i32 x } (erl.struct_type = \"record\")">>),
+    {ok, _} = analyze(<<"struct S { 1: i32 x } (erl.struct_type = \"map\")">>),
+    {ok, _} = analyze(
+        "struct S { 1: i32 x } (erl.struct_type = \"map\", erl.struct_type.map.key_type = \"binary\")"
+    ),
+    ok.
+
+%% erl.set accepts exactly the two supported set implementations, on a
+%% field type or a typedef; anything else is rejected at the set's line.
+
+set_annotation_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.set hashset (expected \"sets\" or \"ordset\")">>}]},
+        analyze(<<"struct S { 1: set<i32> (erl.set = \"hashset\") tags }">>)
+    ),
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.set v1 (expected \"sets\" or \"ordset\")">>}]},
+        analyze(<<"typedef set<i32> (erl.set = \"v1\") Tags">>)
+    ),
+    %% A set of sets validates both annotations.
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.set list (expected \"sets\" or \"ordset\")">>}]},
+        analyze(<<"struct S { 1: set<set<i32> (erl.set = \"list\")> tags }">>)
+    ),
+    {ok, _} = analyze(<<"struct S { 1: set<i32> plain }">>),
+    {ok, _} = analyze(<<"struct S { 1: set<i32> (erl.set = \"sets\") tags }">>),
+    {ok, _} = analyze(<<"typedef set<i32> (erl.set = \"ordset\") Tags">>),
+    {ok, _} = analyze(<<"struct S { 1: set<set<i32>> tags }">>),
     ok.
