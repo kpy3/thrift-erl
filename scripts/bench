@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Manual codec benchmark (ours vs the vendored Apache Thrift runtime).
+# Not part of the test suites: run it when you want the numbers.
+#
+# Knobs (environment): BENCH_WARMUP, BENCH_SAMPLES, BENCH_SAMPLE_MS.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+rebar3 as test compile >/dev/null
+# extra_src_dirs land test/ beams in a sibling of ebin
+exec erl -noshell -pa _build/test/lib/*/ebin -pa _build/test/lib/*/test -eval "thrift_bench:main([])"
