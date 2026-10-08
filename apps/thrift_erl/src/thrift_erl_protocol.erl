@@ -43,7 +43,7 @@ descriptor with its code-to-name table.
 
 %% Named protocols known to `thrift_erl:protocol_module/1`; a custom
 %% implementation is passed as a module name instead.
--type protocol() :: binary | compact.
+-type protocol() :: binary | compact | json.
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
 -callback encode(thrift_erl_binary:type_desc(), term()) -> {ok, iodata()} | {error, term()}.

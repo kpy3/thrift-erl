@@ -51,6 +51,8 @@ connection.
     official_client_our_server_framed/1,
     official_compact_client_our_server_buffered/1,
     official_compact_client_our_server_framed/1,
+    official_json_client_our_server_buffered/1,
+    official_json_client_our_server_framed/1,
     official_multiplexed_client_our_multiplexed_server/1
 ]).
 
@@ -63,6 +65,8 @@ all() ->
         official_client_our_server_framed,
         official_compact_client_our_server_buffered,
         official_compact_client_our_server_framed,
+        official_json_client_our_server_buffered,
+        official_json_client_our_server_framed,
         official_multiplexed_client_our_multiplexed_server
     ].
 
@@ -123,6 +127,18 @@ official_compact_client_our_server_buffered(_Config) ->
 
 official_compact_client_our_server_framed(_Config) ->
     official_client_scenario(framed, compact).
+
+%% The official JSON client (`thrift_json_protocol': every value a JSON
+%% document whose shape carries the Thrift types) <-> our JSON server,
+%% on both transports. Full assertion battery: scalars, doubles with
+%% their 16-digit form, nested structs, maps as objects with stringified
+%% keys, sets, lists, exceptions and a oneway.
+
+official_json_client_our_server_buffered(_Config) ->
+    official_client_scenario(buffered, json).
+
+official_json_client_our_server_framed(_Config) ->
+    official_client_scenario(framed, json).
 
 %% The official multiplexed client (`thrift_multiplexed_protocol' wraps
 %% the binary protocol and prefixes every outgoing message name with

@@ -10,7 +10,7 @@ official 0.25.0 runtime over buffered and framed transports).
 
 ```
 apps/thrift_generator/   IDL parser (leex/yecc), semantics, emitter, CLI
-apps/thrift_erl/         runtime: binary & compact protocols, transports, server, client
+apps/thrift_erl/         runtime: binary, compact & JSON protocols, transports, server, client
 apps/rebar3_thrift/      rebar3 plugin (the thrift provider)
 vendor/apache-thrift-erl official Apache Thrift Erlang runtime (0.25.0),
                          test profile only — the golden interop fixture
@@ -131,8 +131,8 @@ ok = 'Ping_server':stop(Server).
 `start_link` options (a map at creation time, not app env):
 
 - `transport` — `framed` (the default) or `buffered`;
-- `protocol` — `binary` (the default), `compact`, or any module
-  implementing the `thrift_erl_protocol` behaviour;
+- `protocol` — `binary` (the default), `compact`, `json`, or any
+  module implementing the `thrift_erl_protocol` behaviour;
 - server: `port`, `handler`, `max_frame_size`, `max_connections`,
   `timeout`, `backlog`;
 - client: `host`, `port`, `timeout` (connect and per-call),
@@ -141,7 +141,7 @@ ok = 'Ping_server':stop(Server).
 ## Representations and protocols
 
 Structs live in two independent axes. The **protocol** axis picks the
-wire format (`binary` and `compact` are built in; any
+wire format (`binary`, `compact` and `json` are built in; any
 `thrift_erl_protocol` module plugs in; `native`-style EEP-79 records
 are reserved for a future milestone). The **representation** axis
 (`thrift_erl:repr()`) picks the in-process shape:
@@ -216,6 +216,38 @@ is covered in both directions: the golden suite runs the official
 compact client (`thrift_client_util:new(..., [{protocol, compact}])`)
 against our compact server on both transports, and the benchmark
 proves the official reader accepts our compact bytes struct by struct.
+
+### The JSON protocol
+
+`thrift_erl_json` implements the Apache JSON wire format: a message is
+the array `[1,"name",type,seqid,payload]`, a struct is an object keyed
+by field id where every value is a one-key object naming the type
+(`{"1":{"i32":5}}`), a list or set is `["i32",2,1,2]`, and a map is an
+object with stringified keys (`["i32","i32",2,{"1":10}]`). Every
+`protocol` slot accepts the atom `json` exactly like the other built
+ins:
+
+```erlang
+{ok, Server} = 'Ping_server':start_link(#{
+    port => 9090, handler => ping_handler, protocol => json
+}),
+{ok, Client} = 'Ping_client':start_link(#{
+    host => "127.0.0.1", port => 9090, protocol => json, transport => buffered
+}),
+{ok, Bin} = ping_api_types:encode_pingrequest(Req, thrift_erl_json),
+{ok, Req} = thrift_erl_json:decode(ping_api_types:pingrequest_struct_info(), Bin).
+```
+
+Two bends are documented on the module: the envelope's closing bracket
+is folded into the top-level struct decode (which keeps the buffered
+transport's completeness probe byte-exact), and map keys are limited to
+what a JSON object key can carry — booleans, numbers, strings, enums —
+while a struct-keyed map and `uuid` are refused by encode and decode
+alike. Interop with the stock Apache runtime is covered in both
+directions: the golden suite runs the official JSON client
+(`thrift_client_util:new(..., [{protocol, json}])`) against our JSON
+server on both transports, and the benchmark proves the official reader
+accepts our JSON messages struct by struct.
 
 ## Pooling
 
@@ -421,14 +453,32 @@ The **compact protocol** runs the same payload set on both sides —
 | Insanity (1.2 KB)  | encode | 19.5 K/s | 9.3 K/s | 2.1x |
 | Insanity           | decode | 16.7 K/s | 4.6 K/s | 3.6x |
 
+The **JSON protocol** runs the same payload set on both sides —
+`thrift_erl_json` against the vendored `thrift_json_protocol`
+(87 B / 110 B / 6.7 KB on the wire; decode is measured at message
+level, since the official JSON reader primes on a whole message):
+
+| case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
+|------|-----------|-----------:|---------------------:|--------:|
+| Xtruct (87 B)      | encode | 796 K/s | 109 K/s | 7.3x |
+| Xtruct             | decode | 84 K/s  | 66 K/s  | 1.3x |
+| Xtruct2 (110 B)    | encode | 587 K/s | 60 K/s  | 9.8x |
+| Xtruct2            | decode | 51 K/s  | 46 K/s  | 1.1x |
+| Insanity (6.7 KB)  | encode | 5.7 K/s | 1.2 K/s | 4.8x |
+| Insanity           | decode | 1.1 K/s | 1.1 K/s | 1.0x |
+
+Encode is several times faster because the official side formats every
+token through `io_lib`; on decode both sides scan the same text, so the
+gap is small.
+
 Only the speedup ratios on the same machine are meaningful; run
 `./scripts/bench` to get numbers for your hardware.
 
 ## Roadmap
 
 Done through M9 (SSL, the reconnecting client, multiplexed services)
-plus the compact protocol off schedule. Remaining off schedule (the
-axis/option slots are reserved): a JSON protocol, an HTTP transport,
+plus the compact and JSON protocols off schedule. Remaining off
+schedule (the axis/option slots are reserved): an HTTP transport,
 native EEP-79 records.
 
 ## License
