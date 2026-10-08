@@ -315,7 +315,7 @@ reads the legacy headerless format.
 -spec encode_message(message_type(), binary(), non_neg_integer(), iodata()) -> iodata().
 encode_message(Type, Name, SeqId, Payload) ->
     [
-        <<(?VERSION_1 bor message_type_id(Type)):32/big-unsigned>>,
+        <<(?VERSION_1 bor thrift_erl_protocol:message_type_id(Type)):32/big-unsigned>>,
         int32(byte_size(Name)),
         Name,
         int32(SeqId),
@@ -383,7 +383,7 @@ Codes follow the Thrift specification: 0 unknown, 1 unknown method,
     {ok, iodata()} | {error, term()}.
 encode_application_exception(Message, Code) ->
     encode(
-        {struct, application_exception_desc()},
+        {struct, thrift_erl_protocol:application_exception_desc()},
         #{<<"message">> => Message, <<"code">> => Code}
     ).
 
@@ -394,13 +394,13 @@ Unknown fields are skipped per the usual struct rules.
 """.
 -spec decode_application_exception(binary()) -> decode_result(application_exception()).
 decode_application_exception(Bin) ->
-    case decode({struct, application_exception_desc()}, Bin) of
+    case decode({struct, thrift_erl_protocol:application_exception_desc()}, Bin) of
         {ok, #{<<"message">> := Message} = Map, Rest} ->
             {ok,
                 #{
                     message => Message,
                     code => maps:get(<<"code">>, Map, 0),
-                    name => application_exception_name(maps:get(<<"code">>, Map, 0))
+                    name => thrift_erl_protocol:application_exception_name(maps:get(<<"code">>, Map, 0))
                 },
                 Rest};
         {ok, Map, Rest} ->
@@ -408,7 +408,7 @@ decode_application_exception(Bin) ->
                 #{
                     message => <<>>,
                     code => maps:get(<<"code">>, Map, 0),
-                    name => application_exception_name(maps:get(<<"code">>, Map, 0))
+                    name => thrift_erl_protocol:application_exception_name(maps:get(<<"code">>, Map, 0))
                 },
                 Rest};
         Other ->
@@ -930,12 +930,6 @@ struct_fields({struct, {ref, Module, Name}}) ->
 struct_fields({struct, {_Kind, Fields}}) ->
     Fields.
 
--spec message_type_id(message_type()) -> non_neg_integer().
-message_type_id(call) -> 1;
-message_type_id(reply) -> 2;
-message_type_id(exception) -> 3;
-message_type_id(oneway) -> 4.
-
 -spec message_type(non_neg_integer()) -> {ok, message_type()} | error.
 message_type(1) -> {ok, call};
 message_type(2) -> {ok, reply};
@@ -949,24 +943,6 @@ message_type_or(TypeByte) ->
         {ok, Type} -> {ok, Type};
         error -> {error, {decode, {unknown_message_type, TypeByte}}}
     end.
-
--spec application_exception_desc() -> struct_desc().
-application_exception_desc() ->
-    {exception, [
-        {1, default, {base, string}, <<"message">>, undefined},
-        {2, default, {base, i32}, <<"code">>, undefined}
-    ]}.
-
--spec application_exception_name(non_neg_integer()) -> binary().
-application_exception_name(0) -> <<"UNKNOWN">>;
-application_exception_name(1) -> <<"UNKNOWN_METHOD">>;
-application_exception_name(2) -> <<"INVALID_MESSAGE_TYPE">>;
-application_exception_name(3) -> <<"WRONG_METHOD_NAME">>;
-application_exception_name(4) -> <<"BAD_SEQUENCE_ID">>;
-application_exception_name(5) -> <<"MISSING_RESULT">>;
-application_exception_name(6) -> <<"INTERNAL_ERROR">>;
-application_exception_name(7) -> <<"PROTOCOL_ERROR">>;
-application_exception_name(_) -> <<"UNKNOWN">>.
 
 -spec enum_to_int(enum_desc(), atom() | integer()) -> {ok, integer()} | error.
 enum_to_int(Desc, V) when is_atom(V) ->

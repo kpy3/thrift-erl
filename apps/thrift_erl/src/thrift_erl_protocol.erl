@@ -23,10 +23,21 @@ type descriptors the generated introspection functions return
 a binary and returns the remaining bytes, so callers can stream;
 `more` marks a truncated but otherwise valid input.
 
-`thrift_erl_binary` implements this behaviour. Any other module passed
-as a `thrift_erl:protocol()` — to the facade, the client or the server
-— must export every callback with these exact shapes.
+`thrift_erl_binary` and `thrift_erl_compact` implement this behaviour.
+Any other module passed as a `thrift_erl:protocol()` — to the facade,
+the client or the server — must export every callback with these exact
+shapes.
+
+The module also hosts the constants both implementations share: the
+`TMessageType` ids of the message envelope and the `TApplicationException`
+descriptor with its code-to-name table.
 """.
+
+-export([
+    message_type_id/1,
+    application_exception_desc/0,
+    application_exception_name/1
+]).
 
 -export_type([protocol/0]).
 
@@ -68,3 +79,34 @@ truncated one.
 -doc "Decodes a `TApplicationException` payload.".
 -callback decode_application_exception(binary()) ->
     thrift_erl_binary:decode_result(thrift_erl_binary:application_exception()).
+
+%% TMessageType ids shared by the binary envelope and the compact
+%% envelope (they travel in different bit layouts, the numbers are the
+%% same).
+%%
+%% The mapping is total over message_type(): an unknown value cannot
+%% reach it — callers take message_type() from their own types.
+
+-spec message_type_id(thrift_erl_binary:message_type()) -> non_neg_integer().
+message_type_id(call) -> 1;
+message_type_id(reply) -> 2;
+message_type_id(exception) -> 3;
+message_type_id(oneway) -> 4.
+
+-spec application_exception_desc() -> thrift_erl_binary:struct_desc().
+application_exception_desc() ->
+    {exception, [
+        {1, default, {base, string}, <<"message">>, undefined},
+        {2, default, {base, i32}, <<"code">>, undefined}
+    ]}.
+
+-spec application_exception_name(non_neg_integer()) -> binary().
+application_exception_name(0) -> <<"UNKNOWN">>;
+application_exception_name(1) -> <<"UNKNOWN_METHOD">>;
+application_exception_name(2) -> <<"INVALID_MESSAGE_TYPE">>;
+application_exception_name(3) -> <<"WRONG_METHOD_NAME">>;
+application_exception_name(4) -> <<"BAD_SEQUENCE_ID">>;
+application_exception_name(5) -> <<"MISSING_RESULT">>;
+application_exception_name(6) -> <<"INTERNAL_ERROR">>;
+application_exception_name(7) -> <<"PROTOCOL_ERROR">>;
+application_exception_name(_) -> <<"UNKNOWN">>.

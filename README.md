@@ -10,7 +10,7 @@ official 0.25.0 runtime over buffered and framed transports).
 
 ```
 apps/thrift_generator/   IDL parser (leex/yecc), semantics, emitter, CLI
-apps/thrift_erl/         runtime: binary protocol, transports, server, client
+apps/thrift_erl/         runtime: binary & compact protocols, transports, server, client
 apps/rebar3_thrift/      rebar3 plugin (the thrift provider)
 vendor/apache-thrift-erl official Apache Thrift Erlang runtime (0.25.0),
                          test profile only — the golden interop fixture
@@ -131,8 +131,8 @@ ok = 'Ping_server':stop(Server).
 `start_link` options (a map at creation time, not app env):
 
 - `transport` — `framed` (the default) or `buffered`;
-- `protocol` — `binary` (the default) or any module implementing the
-  `thrift_erl_protocol` behaviour; `compact` is reserved;
+- `protocol` — `binary` (the default), `compact`, or any module
+  implementing the `thrift_erl_protocol` behaviour;
 - server: `port`, `handler`, `max_frame_size`, `max_connections`,
   `timeout`, `backlog`;
 - client: `host`, `port`, `timeout` (connect and per-call),
@@ -141,10 +141,10 @@ ok = 'Ping_server':stop(Server).
 ## Representations and protocols
 
 Structs live in two independent axes. The **protocol** axis picks the
-wire format (`binary` today; any `thrift_erl_protocol` module plugs in;
-`compact` and `native`-style EEP-79 records are reserved for future
-milestones). The **representation** axis (`thrift_erl:repr()`) picks
-the in-process shape:
+wire format (`binary` and `compact` are built in; any
+`thrift_erl_protocol` module plugs in; `native`-style EEP-79 records
+are reserved for a future milestone). The **representation** axis
+(`thrift_erl:repr()`) picks the in-process shape:
 
 - `record` — the generated record (the default for plain structs);
 - `map` — plain atom-key maps matching the IDL field names;
@@ -187,6 +187,35 @@ Enums get `color_to_int/1` / `color_from_int/1` helpers, constants get
 zero-argument functions plus `-define` macros for scalars, and the
 header file declares typed records, record/enum aliases and those
 macros.
+
+### The compact protocol
+
+`thrift_erl_compact` implements the Apache compact wire format: zigzag
+varint integers, delta-encoded field ids, nibble-packed type tags and
+collections whose header carries the element type. Every `protocol`
+slot accepts the atom `compact` — clients, servers, the facade and the
+generated codecs all resolve it through `thrift_erl:protocol_module/1`
+the same way as `binary`:
+
+```erlang
+{ok, Server} = 'Ping_server':start_link(#{
+    port => 9090, handler => ping_handler, protocol => compact
+}),
+{ok, Client} = 'Ping_client':start_link(#{
+    host => "127.0.0.1", port => 9090, protocol => compact, transport => buffered
+}),
+{ok, Bin} = ping_api_types:encode_pingrequest(Req, thrift_erl_compact),
+{ok, Req} = thrift_erl_compact:decode(ping_api_types:pingrequest_struct_info(), Bin).
+```
+
+The same values take up to ~2.5× fewer wire bytes than binary on
+container-heavy structs (see Performance). Booleans ride in the field header nibble;
+`uuid` is the one Thrift type the compact format cannot carry and is
+rejected at encode/decode time. Interop with the stock Apache runtime
+is covered in both directions: the golden suite runs the official
+compact client (`thrift_client_util:new(..., [{protocol, compact}])`)
+against our compact server on both transports, and the benchmark
+proves the official reader accepts our compact bytes struct by struct.
 
 ## Pooling
 
@@ -372,26 +401,35 @@ nested schemas are never re-resolved per wire occurrence.
 
 | case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (42 B)     | encode | 2.20 M/s | 458 K/s | 4.8x |
-| Xtruct            | decode | 1.00 M/s | 217 K/s | 4.6x |
-| Xtruct2 (51 B)    | encode | 1.48 M/s | 310 K/s | 4.8x |
-| Xtruct2           | decode | 619 K/s  | 112 K/s | 5.6x |
-| Insanity (3.2 KB) | encode | 17.0 K/s | 4.2 K/s | 4.0x |
-| Insanity          | decode | 8.7 K/s  | 2.5 K/s | 3.5x |
+| Xtruct (42 B)     | encode | 4.37 M/s | 902 K/s | 4.8x |
+| Xtruct            | decode | 1.96 M/s | 431 K/s | 4.5x |
+| Xtruct2 (51 B)    | encode | 1.89 M/s | 623 K/s | 3.0x |
+| Xtruct2           | decode | 1.05 M/s | 230 K/s | 4.6x |
+| Insanity (3.2 KB) | encode | 31.8 K/s | 8.4 K/s | 3.8x |
+| Insanity          | decode | 16.8 K/s | 5.0 K/s | 3.4x |
 
-The same payload set runs against the vendored **compact protocol**
-(28 B / 24 B / 1.2 KB on the wire): our runtime reserves the compact
-axis, so the reference side runs alone for now — 245/203 K/s on Xtruct,
-193/126 K/s on Xtruct2, 4.8/2.3 K/s on Insanity (encode/decode).
+The **compact protocol** runs the same payload set on both sides —
+`thrift_erl_compact` against the vendored `thrift_compact_protocol`
+(28 B / 24 B / 1.2 KB on the wire, roughly half the binary encoding):
+
+| case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
+|------|-----------|-----------:|---------------------:|--------:|
+| Xtruct (28 B)      | encode | 2.88 M/s | 500 K/s | 5.8x |
+| Xtruct             | decode | 2.04 M/s | 401 K/s | 5.1x |
+| Xtruct2 (24 B)     | encode | 1.50 M/s | 398 K/s | 3.8x |
+| Xtruct2            | decode | 945 K/s  | 253 K/s | 3.7x |
+| Insanity (1.2 KB)  | encode | 19.5 K/s | 9.3 K/s | 2.1x |
+| Insanity           | decode | 16.7 K/s | 4.6 K/s | 3.6x |
 
 Only the speedup ratios on the same machine are meaningful; run
 `./scripts/bench` to get numbers for your hardware.
 
 ## Roadmap
 
-Done through M9 (SSL, the reconnecting client, multiplexed services).
-Off schedule (the axis/option slots are reserved): the compact
-protocol, a JSON protocol, an HTTP transport, native EEP-79 records.
+Done through M9 (SSL, the reconnecting client, multiplexed services)
+plus the compact protocol off schedule. Remaining off schedule (the
+axis/option slots are reserved): a JSON protocol, an HTTP transport,
+native EEP-79 records.
 
 ## License
 

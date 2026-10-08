@@ -18,9 +18,9 @@
 High-level facade over the runtime codecs: two independent axes.
 
 The **protocol** axis picks the wire format; the default is the Thrift
-binary protocol, and any module implementing `thrift_erl_protocol`
-plugs in without code changes here (`compact` is reserved for a future
-implementation). The **representation** axis picks the in-process shape
+binary protocol, `compact` is the built-in Apache compact protocol, and
+any module implementing `thrift_erl_protocol` plugs in without code
+changes here. The **representation** axis picks the in-process shape
 of struct values:
 
 - `record` — tuple records as declared by generated `<mod>_types.erl`
@@ -160,15 +160,15 @@ convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
 -doc """
 Resolves a protocol axis value to its implementation module.
 
-`binary` is the built-in binary protocol; a module name is accepted
-after verifying it exports every `thrift_erl_protocol` callback.
-`compact` is reserved and not implemented yet.
+`binary` and `compact` are the built-in protocols; a module name is
+accepted after verifying it exports every `thrift_erl_protocol`
+callback.
 """.
 -spec protocol_module(protocol()) -> {ok, module()} | {error, term()}.
 protocol_module(binary) ->
     {ok, thrift_erl_binary};
 protocol_module(compact) ->
-    {error, {unsupported_protocol, compact}};
+    {ok, thrift_erl_compact};
 protocol_module(Mod) when is_atom(Mod) ->
     case code:ensure_loaded(Mod) of
         {module, Mod} ->

@@ -19,25 +19,25 @@ Manual codec-level benchmark of the protocol implementations in the
 repository, measured with erlperf and driven from the same ThriftTest
 fixture as the golden interop suite:
 
-- **ours** — `thrift_erl_binary` over the introspection descriptors of
-  the in-memory generated `goldentest_types` module;
+- **ours (binary)** — `thrift_erl_binary` over the introspection
+  descriptors of the in-memory generated `goldentest_types` module;
+- **ours (compact)** — `thrift_erl_compact` over the same descriptors;
 - **reference (binary)** — the vendored Apache Thrift 0.25.0 Erlang
   runtime (`thrift_binary_protocol` over `thrift_membuffer_transport`)
   with the committed officially generated `thrift_test_types`;
 - **reference (compact)** — the same runtime's
-  `thrift_compact_protocol`, the baseline for thrift_erl's reserved
-  compact axis (no compact implementation on our side yet, so those
-  rows print `reserved` instead of a speedup).
+  `thrift_compact_protocol`.
 
 Each case first proves the codecs agree: our bytes must decode back
-through the official binary reader into the expected record, and both
-compact encodings must round-trip through the reference codec. Only
-then are encode and decode benchmarked separately, in erlperf
-continuous mode: one discarded warmup sample followed by three 500 ms
-samples, concurrency 1; the reported number is erlperf's average
-iterations per second with the sample stddev. Encode numbers measure
-the write cost only — the official membuffer transport keeps its bytes
-private, identically for both protocols.
+through the official reader of the same protocol into the expected
+record (both directions of wire compatibility, one per protocol), and
+each of the four codecs must round-trip its own encoding. Only then
+are encode and decode benchmarked separately, in erlperf continuous
+mode: one discarded warmup sample followed by three 500 ms samples,
+concurrency 1; the reported number is erlperf's average iterations per
+second with the sample stddev. Encode numbers measure the write cost
+only — the official membuffer transport keeps its bytes private,
+identically for both protocols.
 
 This is a hand-run script, not a test: run it with `scripts/bench` (or
 `erl -pa _build/test/lib/*/ebin -run thrift_bench main`). Knobs come
@@ -144,22 +144,26 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     Desc = {struct, goldentest_types:struct_info(Name)},
     {ok, Encoded} = thrift_erl_binary:encode(Desc, OurValue),
     BinaryWire = iolist_to_binary(Encoded),
+    {ok, CompactEncoded} = thrift_erl_compact:encode(Desc, OurValue),
+    CompactWire = iolist_to_binary(CompactEncoded),
 
-    %% Correctness before timing. Our binary roundtrip is exact, and
-    %% the official binary reader must accept our bytes; the compact
-    %% side round-trips through the reference codec only — the compact
-    %% axis is reserved in thrift_erl, these numbers are the baseline
-    %% for that milestone.
+    %% Correctness before timing. Each codec round-trips its own
+    %% encoding, and the official reader of each protocol must accept
+    %% our bytes for that protocol — the same wire-compatibility proof
+    %% the golden suite runs over TCP, here at the codec level.
     {ok, OurDecoded, <<>>} = thrift_erl_binary:decode(Desc, BinaryWire),
     ?assertEqual(OurValue, OurDecoded),
     {_, {ok, OfficialDecoded}} = official_decode(BinaryWire, binary, OfficialName),
     Check(OfficialDecoded),
-    CompactWire = official_wire(OfficialValue, OfficialName, compact),
+    {ok, OurCompactDecoded, <<>>} = thrift_erl_compact:decode(Desc, CompactWire),
+    ?assertEqual(OurValue, OurCompactDecoded),
     {_, {ok, CompactDecoded}} = official_decode(CompactWire, compact, OfficialName),
     Check(CompactDecoded),
 
     OursEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(Desc, OurValue) end),
     OursDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(Desc, BinaryWire) end),
+    OursCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(Desc, OurValue) end),
+    OursCompactDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(Desc, CompactWire) end),
     ReferenceBinaryEncode =
         erlbench(fun() -> ok = official_write(OfficialValue, OfficialName, binary) end),
     ReferenceBinaryDecode =
@@ -172,8 +176,8 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     Rows = [
         {<<"binary/encode">>, {measured, OursEncode}, {measured, ReferenceBinaryEncode}},
         {<<"binary/decode">>, {measured, OursDecode}, {measured, ReferenceBinaryDecode}},
-        {<<"compact/encode">>, reserved, {measured, ReferenceCompactEncode}},
-        {<<"compact/decode">>, reserved, {measured, ReferenceCompactDecode}}
+        {<<"compact/encode">>, {measured, OursCompactEncode}, {measured, ReferenceCompactEncode}},
+        {<<"compact/decode">>, {measured, OursCompactDecode}, {measured, ReferenceCompactDecode}}
     ],
     io:put_chars([
         format_report(
@@ -248,31 +252,6 @@ official_write(Value, Name, ProtocolName) ->
     {_Protocol2, ok} = thrift_protocol:flush_transport(Protocol1),
     ok.
 
-%% One-shot compact encode whose bytes come back: the official
-%% membuffer keeps its bytes private, so this round goes through a
-%% temp file (the benchmark itself still measures the membuffer write).
--spec official_wire(tuple(), atom(), binary | compact) -> binary().
-official_wire(Value, Name, compact) ->
-    Path = filename:join(temp_dir(), "thrift_bench_compact_" ++ integer_to_list(erlang:unique_integer([positive]))),
-    {ok, Device} = file:open(Path, [write, binary, raw]),
-    {ok, Transport} = thrift_file_transport:new(Device),
-    {ok, Protocol0} = thrift_compact_protocol:new(Transport),
-    {Protocol1, ok} = thrift_protocol:write(Protocol0, {{struct, {thrift_test_types, Name}}, Value}),
-    {_Protocol2, ok} = thrift_protocol:flush_transport(Protocol1),
-    thrift_protocol:close_transport(Protocol1),
-    {ok, Binary} = file:read_file(Path),
-    ok = file:delete(Path),
-    Binary.
-
--spec temp_dir() -> file:filename_all().
-temp_dir() ->
-    case os:getenv("TMPDIR") of
-        false ->
-            ".";
-        Dir ->
-            Dir
-    end.
-
 -spec protocol_module(binary | compact, term()) -> {ok, term()}.
 protocol_module(binary, Transport) ->
     thrift_binary_protocol:new(Transport);
@@ -331,11 +310,7 @@ format_report(Name, WireSizes, Rows) ->
     Lines = [row_line(Row) || Row <- Rows],
     lists:flatten([Header, $\n, lists:join($\n, Lines)]).
 
--type row() :: {
-    binary(),
-    reserved | {measured, throughput()},
-    reserved | {measured, throughput()}
-}.
+-type row() :: {binary(), {measured, throughput()}, {measured, throughput()}}.
 
 -spec row_line(row()) -> string().
 row_line({Label, Ours, Reference}) ->
@@ -354,9 +329,7 @@ row_line({Label, Ours, Reference}) ->
 %% has no %% sequence); widths go through string:pad because ~-Nts
 %% truncates instead of widening.
 
--spec pad_side(reserved | {measured, throughput()}) -> string().
-pad_side(reserved) ->
-    string:pad("reserved", 18, trailing);
+-spec pad_side({measured, throughput()}) -> string().
 pad_side({measured, #{average := Average, stddev := StdDev}}) ->
     string:pad(
         lists:flatten(io_lib:format("~ts ±~.1f%", [format_qps(Average), 100 * StdDev / Average])),
@@ -364,12 +337,9 @@ pad_side({measured, #{average := Average, stddev := StdDev}}) ->
         trailing
     ).
 
--spec speedup_note(reserved | {measured, throughput()}, reserved | {measured, throughput()}) ->
-    string().
+-spec speedup_note({measured, throughput()}, {measured, throughput()}) -> string().
 speedup_note({measured, #{average := Ours}}, {measured, #{average := Reference}}) ->
-    io_lib:format("speedup ~5.2fx", [Ours / Reference]);
-speedup_note(_Ours, _Reference) ->
-    "".
+    io_lib:format("speedup ~5.2fx", [Ours / Reference]).
 
 -spec format_qps(float()) -> string().
 format_qps(Qps) when Qps >= 1000000 ->
