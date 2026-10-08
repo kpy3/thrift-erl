@@ -21,18 +21,19 @@ Two framing modes, mirroring the classic Thrift transports:
 
 - `framed` — every message is prefixed with its big-endian i32 length;
   a `max_frame_size` guards against hostile sizes.
-- `buffered` — raw byte stream; messages are parsed incrementally by
-  retrying `thrift_erl_binary:decode_message/1` whenever new bytes
-  arrive and it answers `more`.
+- `buffered` — raw byte stream; message boundaries come from the
+  protocol itself: `extract_message/4` probes the envelope and payload
+  struct with the protocol module's decode functions, which answer
+  `more` while the input is a truncated but valid encoding.
 
-All functions are plain helpers over `gen_tcp`; each takes the socket
-and a per-call timeout.
+Socket reads happen in the owning processes via `{active, N}` delivery
+— this module only provides the pure frame splitter over accumulated
+buffers plus send/listen/accept helpers.
 """.
 
 -export([
     send/2,
-    recv_message/5,
-    read_frame/2,
+    extract_message/4,
     listen/1,
     accept/1
 ]).
@@ -52,113 +53,55 @@ send(Socket, Data) ->
     gen_tcp:send(Socket, Data).
 
 %%--------------------------------------------------------------------
-%% Reads
+%% Frame splitting
 %%--------------------------------------------------------------------
 
 -doc """
-Reads one complete message.
+Splits one complete message off the front of `Buffer`.
 
-In `framed` mode reads the length prefix (checked against
-`MaxFrameSize`), then the frame. In `buffered` mode keeps reading
-whatever is available until the envelope and its payload struct parse
-completely; `InitialBuffer` carries leftover bytes of the next message
-from a previous read.
+`more` means the buffer holds a truncated but so-far valid encoding —
+wait for more bytes. `framed` counts the length prefix against
+`MaxFrameSize`; `buffered` probes completeness with `ProtocolMod`
+(the envelope plus a skip-everything payload struct), so any protocol
+implementing `thrift_erl_protocol` with streaming-friendly `more`
+semantics works.
 
-The timeout applies to every individual socket read.
+Errors mean the bytes cannot form a valid message: the stream is
+unrecoverable and the owning connection must close.
 """.
--spec recv_message(
-    socket(),
-    transport(),
-    Timeout :: non_neg_integer() | infinity,
-    MaxFrameSize :: pos_integer(),
-    InitialBuffer :: binary()
-) ->
-    {ok, Message :: binary(), Leftover :: binary()}
-    | {error, closed | timeout | frame_too_large | bad_frame | term()}.
-recv_message(Socket, framed, Timeout, MaxFrameSize, _InitialBuffer) ->
-    case recv_exact(Socket, 4, Timeout, []) of
-        {ok, <<Size:32/big-unsigned>>} when Size =< MaxFrameSize ->
-            case recv_exact(Socket, Size, Timeout, []) of
-                {ok, Frame} -> {ok, Frame, <<>>};
-                Error -> Error
+-spec extract_message(binary(), transport(), module(), MaxFrameSize :: pos_integer()) ->
+    {ok, Message :: binary(), Leftover :: binary()} | more | {error, term()}.
+extract_message(Buffer, framed, _ProtocolMod, MaxFrameSize) ->
+    case Buffer of
+        <<Size:32/big-unsigned, Rest/binary>> when Size =< MaxFrameSize ->
+            case Rest of
+                <<Frame:Size/binary, Leftover/binary>> -> {ok, Frame, Leftover};
+                _ -> more
             end;
-        {ok, _} ->
+        <<_Size:32/big-unsigned, _/binary>> ->
             {error, frame_too_large};
-        Error ->
-            Error
+        _ ->
+            more
     end;
-recv_message(Socket, buffered, Timeout, _MaxFrameSize, InitialBuffer) ->
-    recv_buffered(Socket, InitialBuffer, Timeout).
-
--doc "Reads a framed transport frame header (4-byte size prefix).".
--spec read_frame(socket(), Timeout :: non_neg_integer() | infinity) ->
-    {ok, binary()} | {error, closed | timeout | term()}.
-read_frame(Socket, Timeout) ->
-    recv_exact(Socket, 4, Timeout, []).
-
--spec recv_exact(socket(), non_neg_integer(), Timeout :: non_neg_integer() | infinity, [binary()]) ->
-    {ok, binary()} | {error, closed | timeout | term()}.
-recv_exact(_Socket, 0, _Timeout, Acc) ->
-    {ok, iolist_to_binary(lists:reverse(Acc))};
-recv_exact(Socket, N, Timeout, Acc) ->
-    case gen_tcp:recv(Socket, N, Timeout) of
-        {ok, Data} ->
-            recv_exact(Socket, N - byte_size(Data), Timeout, [Data | Acc]);
-        Error ->
-            Error
-    end.
-
--spec recv_buffered(socket(), binary(), Timeout :: non_neg_integer() | infinity) ->
-    {ok, binary(), binary()} | {error, closed | timeout | bad_frame | term()}.
-recv_buffered(Socket, Buffer, Timeout) ->
-    case message_complete(Buffer) of
-        complete ->
-            split_complete(Buffer);
-        incomplete ->
-            case gen_tcp:recv(Socket, 0, Timeout) of
-                {ok, Data} ->
-                    recv_buffered(Socket, <<Buffer/binary, Data/binary>>, Timeout);
-                Error ->
-                    Error
-            end;
-        invalid ->
-            %% Bytes that cannot form a valid envelope or payload:
-            %% the stream is unrecoverable.
-            {error, bad_frame}
-    end.
-
-%% Splits a complete buffered message into the message bytes and the
-%% leftover that belongs to the next one, by skipping the payload
-%% struct with an empty descriptor (every field unknown, skipped by
-%% wire type).
-
--spec split_complete(binary()) -> {ok, binary(), binary()}.
-split_complete(Buffer) ->
-    {ok, _Type, _Name, _SeqId, Tail} = thrift_erl_binary:decode_message(Buffer),
-    {ok, _Skipped, Leftover} = thrift_erl_binary:decode({struct, {struct, []}}, Tail),
-    Consumed = byte_size(Buffer) - byte_size(Leftover),
-    {ok, binary:part(Buffer, 0, Consumed), Leftover}.
-
-%% A message is complete when its envelope parses and the payload
-%% struct can be consumed to its stop byte. Decoding a descriptor with
-%% no fields makes every wire field unknown, so the codec skips each by
-%% wire type — exactly the completeness probe we need.
-
--spec message_complete(binary()) -> complete | incomplete | invalid.
-message_complete(<<>>) ->
-    incomplete;
-message_complete(Buffer) ->
-    case thrift_erl_binary:decode_message(Buffer) of
+extract_message(Buffer, buffered, ProtocolMod, _MaxFrameSize) ->
+    case ProtocolMod:decode_message(Buffer) of
         {ok, _Type, _Name, _SeqId, Tail} ->
-            case thrift_erl_binary:decode({struct, {struct, []}}, Tail) of
-                {ok, _Skipped, _Rest} -> complete;
-                more -> incomplete;
-                {error, _} -> invalid
+            %% Decoding a descriptor with no fields makes every wire
+            %% field unknown, so the codec skips each by wire type —
+            %% exactly the completeness probe we need.
+            case ProtocolMod:decode({struct, {struct, []}}, Tail) of
+                {ok, _Skipped, Leftover} ->
+                    Consumed = byte_size(Buffer) - byte_size(Leftover),
+                    {ok, binary:part(Buffer, 0, Consumed), Leftover};
+                more ->
+                    more;
+                {error, Reason} ->
+                    {error, {bad_frame, Reason}}
             end;
         more ->
-            incomplete;
-        {error, _} ->
-            invalid
+            more;
+        {error, Reason} ->
+            {error, {bad_frame, Reason}}
     end.
 
 %%--------------------------------------------------------------------
@@ -166,8 +109,11 @@ message_complete(Buffer) ->
 %%--------------------------------------------------------------------
 
 -doc """
-Listens with the standard socket options for the binary protocol
-(binary, passive, raw) plus `backlog` from `Opts`.
+Listens with the standard socket options (binary, passive, raw) plus
+`backlog` from `Opts`.
+
+The listen socket stays passive; accepted connections switch
+themselves to `{active, N}` delivery after taking ownership.
 """.
 -spec listen(map()) -> {ok, socket()} | {error, term()}.
 listen(#{port := Port} = Opts) ->

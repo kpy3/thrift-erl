@@ -53,6 +53,10 @@ incompatible versions.
     struct_fields/1
 ]).
 
+%% The exported encode/decode/message functions are the
+%% thrift_erl_protocol callbacks under the same names.
+-behaviour(thrift_erl_protocol).
+
 -export_type([
     base_type/0,
     type_desc/0,
@@ -103,8 +107,18 @@ incompatible versions.
     | {enum, enum_desc()}
     | {list, type_desc()}
     | {set, type_desc()}
+    | {set, type_desc(), set_impl()}
     | {map, type_desc(), type_desc()}
     | {struct, struct_desc()}.
+
+%% The in-process representation a decoded set is built into. `list`
+%% keeps the wire list as is; `sets`/`ordset` name the stdlib collection
+%% the representation layer (`thrift_erl_record`) builds from it. This
+%% codec — the wire layer — encodes and decodes lists regardless; the
+%% third element only has to be tolerated here so generated descriptors
+%% pass through.
+
+-type set_impl() :: list | sets | ordset.
 
 %% Generic struct representation: binary field names to values.
 
@@ -423,6 +437,8 @@ compile_type({set, T}) ->
         error -> error;
         CT -> {c_set, ?SET, c_wire(CT), CT}
     end;
+compile_type({set, T, _Impl}) ->
+    compile_type({set, T});
 compile_type({map, K, V}) ->
     case {compile_type(K), compile_type(V)} of
         {error, _} -> error;
@@ -898,6 +914,7 @@ type_id({base, S}) when S =:= string; S =:= binary -> ?STRING;
 type_id({enum, _}) -> ?I32;
 type_id({list, _}) -> ?LIST;
 type_id({set, _}) -> ?SET;
+type_id({set, _, _}) -> ?SET;
 type_id({map, _, _}) -> ?MAP;
 type_id({struct, _}) -> ?STRUCT.
 
