@@ -33,15 +33,25 @@ the stream (bad frame, socket error, timeout) closes the connection.
 Configuration comes in at creation time as a map — never from the
 application environment:
 
-- `handler` (required) — module implementing the service;
-- `service` (required) — module implementing `thrift_erl_service`;
 - `socket` (required) — the accepted, already handshaken socket;
 - `transport` — `framed` (default) or `buffered`;
 - `protocol` — `binary` (default), or any `thrift_erl_protocol`
   implementation module (see `thrift_erl:protocol_module/1`);
 - `max_frame_size` — framed mode guard, default 64 MiB;
 - `timeout` — maximum silence between messages, default 5000 ms;
-- `active_n` — `{active, N}` batch size, default 100.
+- `active_n` — `{active, N}` batch size, default 100;
+- `record_api` — when true, handler arguments and results are records;
+  `types` names the generated types module providing `record_fields/1`.
+
+Exactly one service mode is required:
+
+- `handler` + `service` — single-service mode: `service` implements
+  `thrift_erl_service`, `handler` implements it;
+- `services` — multiplexed mode: a map from the service name (binary,
+  as it appears in the `Service:function` message-name prefix) to
+  `#{handler := module(), service := module()}`. Incoming message names
+  are routed strictly by that prefix; replies are sent back with the
+  plain function name, matching the Apache multiplexed protocol.
 """.
 
 -behaviour(gen_server).
@@ -54,10 +64,10 @@ application environment:
 
 -include_lib("kernel/include/logger.hrl").
 
+-type service_entry() :: #{handler := module(), service := module()}.
+
 -type options() :: #{
     socket := thrift_erl_socket:socket(),
-    handler := module(),
-    service := module(),
     transport => thrift_erl_socket:transport(),
     protocol => binary | compact | module(),
     max_frame_size => pos_integer(),
@@ -66,14 +76,18 @@ application environment:
     %% when true, handler arguments and results are records; `types`
     %% names the generated types module providing record_fields/1
     record_api => boolean(),
-    types => module()
+    types => module(),
+    handler => module(),
+    service => module(),
+    services => #{binary() => service_entry()}
 }.
+
+%% Handler + descriptor per dispatch key: `<<>>' in single-service
+%% mode, the service name in multiplexed mode.
 
 -record(state, {
     socket :: thrift_erl_socket:socket(),
-    handler :: module(),
-    service :: module(),
-    service_info :: thrift_erl_service:service_info(),
+    services :: #{binary() => {module(), thrift_erl_service:service_info()}},
     protocol :: module(),
     transport :: thrift_erl_socket:transport(),
     max_frame_size :: pos_integer(),
@@ -114,8 +128,8 @@ stop(Pid) ->
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
-    case thrift_erl:protocol_module(maps:get(protocol, Opts, binary)) of
-        {ok, Protocol} ->
+    case {thrift_erl:protocol_module(maps:get(protocol, Opts, binary)), services(Opts)} of
+        {{ok, Protocol}, {ok, Services}} ->
             Socket = maps:get(socket, Opts),
             ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
             %% The socket arrives owned by the acceptor and still
@@ -125,9 +139,7 @@ init(Opts) ->
             State0 =
                 #state{
                     socket = Socket,
-                    handler = maps:get(handler, Opts),
-                    service = maps:get(service, Opts),
-                    service_info = (maps:get(service, Opts)):service_info(),
+                    services = Services,
                     protocol = Protocol,
                     transport = maps:get(transport, Opts, framed),
                     max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
@@ -140,9 +152,36 @@ init(Opts) ->
                         end
                 },
             {ok, State0};
-        {error, Reason} ->
-            {stop, {protocol, Reason}}
+        {{error, Reason}, _} ->
+            {stop, {protocol, Reason}};
+        {_, {error, Reason}} ->
+            {stop, Reason}
     end.
+
+%% Resolves the service-mode options into the dispatch table. A
+%% malformed entry (non-binary name, missing modules, unloaded
+%% descriptors) stops the connection at init instead of failing later
+%% per message.
+
+-spec services(options()) ->
+    {ok, #{binary() => {module(), thrift_erl_service:service_info()}}} | {error, term()}.
+services(#{services := Map}) when is_map(Map) ->
+    try
+        {ok, maps:fold(fun service_entry/3, #{}, Map)}
+    catch
+        error:Reason -> {error, {services, Reason}}
+    end;
+services(#{handler := Handler, service := Service}) ->
+    {ok, #{<<>> => {Handler, Service:service_info()}}};
+services(_Opts) ->
+    {error, missing_service}.
+
+-spec service_entry(binary(), service_entry(), #{binary() => {module(), term()}}) ->
+    #{binary() => {module(), term()}}.
+service_entry(Name, #{handler := Handler, service := Service}, Acc) when is_binary(Name) ->
+    Acc#{Name => {Handler, Service:service_info()}};
+service_entry(Name, _Entry, _Acc) ->
+    erlang:error({bad_service_entry, Name}).
 
 -doc false.
 -spec handle_call(term(), {pid(), reference()}, #state{}) -> {reply, term(), #state{}}.
@@ -245,76 +284,116 @@ process_message(Message, #state{} = State) ->
 
 -spec handle_call_message(binary(), non_neg_integer(), binary(), #state{}) -> #state{}.
 handle_call_message(Name, SeqId, Tail, #state{} = State) ->
-    case State#state.service_info of
-        #{Name := Info} ->
-            dispatch(Name, SeqId, Tail, Info, State);
-        _ ->
+    case resolve(Name, State) of
+        {ok, Function, Handler, Info} ->
+            dispatch(Function, Handler, SeqId, Tail, Info, State);
+        error ->
             reply_application_exception(
                 Name, SeqId, <<"unknown function">>, 1, State
             )
     end.
 
--spec dispatch(binary(), non_neg_integer(), binary(), thrift_erl_service:function_info(), #state{}) ->
+%% Splits the wire message name into a service prefix and the function,
+%% then finds both in the dispatch table. A multiplexed server requires
+%% the prefix to name one of its services. In single-service mode the
+%% one service answers plain names — and keeps answering names that
+%% carry any `Service:' prefix, so an Apache-style multiplexed client
+%% pointed at a non-multiplexed service still finds its functions.
+
+-spec resolve(binary(), #state{}) ->
+    {ok, binary(), module(), thrift_erl_service:function_info()} | error.
+resolve(WireName, #state{services = Services}) ->
+    case binary:split(WireName, <<":">>) of
+        [Function] ->
+            lookup(<<>>, Function, Services);
+        [_Service, Function] when is_map_key(<<>>, Services) ->
+            lookup(<<>>, Function, Services);
+        [Service, Function] ->
+            lookup(Service, Function, Services)
+    end.
+
+-spec lookup(binary(), binary(), #{binary() => {module(), thrift_erl_service:service_info()}}) ->
+    {ok, binary(), module(), thrift_erl_service:function_info()} | error.
+lookup(Service, Function, Services) ->
+    case Services of
+        #{Service := {Handler, Info}} ->
+            case Info of
+                %% Narrow to the one function's descriptor: the dispatch
+                %% and decode paths work on function_info, not the map.
+                #{Function := FunctionInfo} ->
+                    {ok, Function, Handler, FunctionInfo};
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end.
+
+-spec dispatch(
+    binary(), module(), non_neg_integer(), binary(), thrift_erl_service:function_info(), #state{}
+) ->
     #state{}.
-dispatch(Name, SeqId, Tail, Info, #state{} = State) ->
+dispatch(Function, Handler, SeqId, Tail, Info, #state{} = State) ->
     case decode_params(Tail, Info, State) of
         {ok, Args} ->
             Args1 = args_for_handler(Args, Info, State),
-            try apply(State#state.handler, function_name(Name), Args1) of
+            try apply(Handler, function_name(Function), Args1) of
                 Result ->
                     case wire_result(Result, Info, State) of
                         {ok, Reply} ->
-                            encode_reply(Name, SeqId, Reply, Info, State);
+                            encode_reply(Function, SeqId, Reply, Info, State);
                         {error, {exception, ExceptionName, ExceptionValue}} ->
                             encode_exception_reply(
-                                Name, SeqId, ExceptionName, ExceptionValue, Info, State
+                                Function, SeqId, ExceptionName, ExceptionValue, Info, State
                             );
                         Other ->
                             ?LOG_WARNING(#{
                                 domain => [thrift],
                                 msg => "handler returned an unsupported result",
-                                name => Name,
+                                name => Function,
                                 result => Other
                             }),
-                            reply_application_exception(Name, SeqId, <<"internal error">>, 6, State)
+                            reply_application_exception(
+                                Function, SeqId, <<"internal error">>, 6, State
+                            )
                     end
             catch
                 Class:Reason:Stacktrace ->
                     ?LOG_WARNING(#{
                         domain => [thrift],
                         msg => "handler crashed",
-                        name => Name,
+                        name => Function,
                         class => Class,
                         reason => Reason,
                         stack => Stacktrace
                     }),
-                    reply_application_exception(Name, SeqId, <<"internal error">>, 6, State)
+                    reply_application_exception(Function, SeqId, <<"internal error">>, 6, State)
             end;
         {error, Reason} ->
             ?LOG_WARNING(#{
                 domain => [thrift],
                 msg => "params decoding failed",
-                name => Name,
+                name => Function,
                 reason => Reason
             }),
-            reply_application_exception(Name, SeqId, <<"protocol error">>, 7, State)
+            reply_application_exception(Function, SeqId, <<"protocol error">>, 7, State)
     end.
 
 -spec handle_oneway_message(binary(), binary(), #state{}) -> #state{}.
 handle_oneway_message(Name, Tail, #state{} = State) ->
-    case State#state.service_info of
-        #{Name := Info} ->
+    case resolve(Name, State) of
+        {ok, Function, Handler, Info} ->
             case decode_params(Tail, Info, State) of
                 {ok, Args} ->
                     Args1 = args_for_handler(Args, Info, State),
-                    try apply(State#state.handler, function_name(Name), Args1) of
+                    try apply(Handler, function_name(Function), Args1) of
                         _ -> ok
                     catch
                         Class:Reason:Stacktrace ->
                             ?LOG_WARNING(#{
                                 domain => [thrift],
                                 msg => "oneway handler crashed",
-                                name => Name,
+                                name => Function,
                                 class => Class,
                                 reason => Reason,
                                 stack => Stacktrace
@@ -326,12 +405,12 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
                     ?LOG_WARNING(#{
                         domain => [thrift],
                         msg => "oneway params decoding failed",
-                        name => Name,
+                        name => Function,
                         reason => Reason
                     }),
                     State
             end;
-        _ ->
+        error ->
             ?LOG_WARNING(#{domain => [thrift], msg => "unknown oneway function", name => Name}),
             State
     end.

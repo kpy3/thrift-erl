@@ -29,7 +29,11 @@
     application_exception/1,
     oneway_delivery/1,
     many_sequential_calls/1,
-    unknown_function_is_local_error/1
+    unknown_function_is_local_error/1,
+    multiplexed_calls/1,
+    multiplexed_unknown_service/1,
+    plain_client_to_multiplexed_server/1,
+    prefixed_name_to_plain_server/1
 ]).
 
 all() ->
@@ -40,11 +44,17 @@ all() ->
         application_exception,
         oneway_delivery,
         many_sequential_calls,
-        unknown_function_is_local_error
+        unknown_function_is_local_error,
+        multiplexed_calls,
+        multiplexed_unknown_service,
+        plain_client_to_multiplexed_server,
+        prefixed_name_to_plain_server
     ].
 
 -define(SERVICE, thrift_erl_test_service).
 -define(HANDLER, thrift_erl_test_handler).
+-define(SERVICE2, thrift_erl_test_service2).
+-define(HANDLER2, thrift_erl_test_handler2).
 
 %%--------------------------------------------------------------------
 
@@ -112,6 +122,108 @@ unknown_function_is_local_error(_Config) ->
         ?assertEqual({error, unknown_function}, call(Client, <<"nope">>, []))
     end).
 
+%% Two services on one port; each client prefixes with its service
+%% name. The second service answers differently under the SAME function
+%% names (add multiplies, echo marks), so the assertions prove the
+%% `Service:' prefix actually routed the call.
+
+multiplexed_calls(_Config) ->
+    with_services_server(
+        fun(Port) ->
+            {ok, Alpha} = multiplex_client(Port, <<"Alpha">>, ?SERVICE),
+            {ok, Beta} = multiplex_client(Port, <<"Beta">>, ?SERVICE2),
+            try
+                ?assertEqual({ok, 5}, call(Alpha, <<"add">>, [2, 3])),
+                ?assertEqual({ok, 6}, call(Beta, <<"add">>, [2, 3])),
+                ?assertEqual(
+                    {ok, <<"hello">>}, call(Alpha, <<"echo">>, [<<"hello">>])
+                ),
+                ?assertEqual(
+                    {ok, <<"echo2:hello">>}, call(Beta, <<"echo">>, [<<"hello">>])
+                ),
+                ?assertEqual({ok, undefined}, call(Beta, <<"ping">>, [])),
+                true = register(thrift_erl_test_sink, self()),
+                try
+                    ok = thrift_erl_client:oneway(Beta, <<"notify">>, [<<"fire">>], 5000),
+                    receive
+                        {notified2, <<"fire">>} ->
+                            ok
+                    after 2000 ->
+                        erlang:error(oneway_not_delivered)
+                    end
+                after
+                    unregister(thrift_erl_test_sink)
+                end
+            after
+                thrift_erl_client:stop(Alpha),
+                thrift_erl_client:stop(Beta)
+            end
+        end
+    ).
+
+%% A multiplexed client pointing at a service name the server does not
+%% host gets the application-exception UNKNOWN_FUNCTION; the connection
+%% survives the exchange.
+
+multiplexed_unknown_service(_Config) ->
+    with_services_server(
+        fun(Port) ->
+            {ok, Client} = multiplex_client(Port, <<"Nope">>, ?SERVICE),
+            try
+                ?assertMatch(
+                    {error, {application_exception, <<"unknown function">>, 1, <<"UNKNOWN_METHOD">>}},
+                    call(Client, <<"add">>, [2, 3])
+                ),
+                ?assertMatch(
+                    {error, {application_exception, _, 1, _}}, call(Client, <<"add">>, [4, 5])
+                )
+            after
+                thrift_erl_client:stop(Client)
+            end
+        end
+    ).
+
+%% A multiplexed server is strict: a plain (unprefixed) name finds no
+%% service and is refused with UNKNOWN_FUNCTION.
+
+plain_client_to_multiplexed_server(_Config) ->
+    with_services_server(
+        fun(Port) ->
+            {ok, Client} =
+                thrift_erl_client:start_link(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+            try
+                ?assertMatch(
+                    {error, {application_exception, <<"unknown function">>, 1, <<"UNKNOWN_METHOD">>}},
+                    call(Client, <<"add">>, [2, 3])
+                )
+            after
+                thrift_erl_client:stop(Client)
+            end
+        end
+    ).
+
+%% The reverse stays compatible: a client that prefixes with ANY
+%% service name still reaches the one service of a plain server, which
+%% ignores the prefix in single-service mode.
+
+prefixed_name_to_plain_server(_Config) ->
+    {ok, Server} =
+        thrift_erl_server:start_link(#{port => 0, handler => ?HANDLER, service => ?SERVICE}),
+    try
+        {ok, Port} = thrift_erl_server:port(Server),
+        {ok, Client} =
+            thrift_erl_client:start_link(#{
+                host => "127.0.0.1", port => Port, service => ?SERVICE, multiplex => <<"Whatever">>
+            }),
+        try
+            ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3]))
+        after
+            thrift_erl_client:stop(Client)
+        end
+    after
+        thrift_erl_server:stop(Server)
+    end.
+
 %%--------------------------------------------------------------------
 %% Helpers
 
@@ -139,3 +251,27 @@ with_server(Overrides, Test) ->
     after
         thrift_erl_server:stop(Server)
     end.
+
+%% A multiplexed server hosting the given `ServiceName => {Handler,
+%% Service}' pairs; the test gets the bound port and brings its own
+%% clients.
+
+-spec with_services_server(fun((inet:port_number()) -> term())) -> term().
+with_services_server(Test) ->
+    Services = #{
+        <<"Alpha">> => #{handler => ?HANDLER, service => ?SERVICE},
+        <<"Beta">> => #{handler => ?HANDLER2, service => ?SERVICE2}
+    },
+    {ok, Server} = thrift_erl_server:start_link(#{port => 0, services => Services}),
+    try
+        {ok, Port} = thrift_erl_server:port(Server),
+        Test(Port)
+    after
+        thrift_erl_server:stop(Server)
+    end.
+
+-spec multiplex_client(inet:port_number(), binary(), module()) -> {ok, pid()}.
+multiplex_client(Port, Service, ServiceMod) ->
+    thrift_erl_client:start_link(#{
+        host => "127.0.0.1", port => Port, service => ServiceMod, multiplex => Service
+    }).

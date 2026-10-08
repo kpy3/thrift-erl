@@ -27,6 +27,19 @@ Example:
 {ok, Server} = thrift_erl_server:start_link(#{port => 0, handler => my_handler, service => my_service}),
 {ok, Port} = thrift_erl_server:port(Server).
 ```
+
+Multiplexed (several services on one port, clients opt in with the
+`multiplex` option on the client side):
+
+```
+{ok, Server} = thrift_erl_server:start_link(#{
+    port => 0,
+    services => #{
+        <<"First">> => #{handler => first_handler, service => first_service},
+        <<"Second">> => #{handler => second_handler, service => second_service}
+    }
+}).
+```
 """.
 
 -behaviour(supervisor).

@@ -35,8 +35,9 @@ mechanism.
 -include_lib("kernel/include/logger.hrl").
 
 -type options() :: #{
-    handler := module(),
-    service := module(),
+    handler => module(),
+    service => module(),
+    services => #{binary() => #{handler := module(), service := module()}},
     transport => thrift_erl_socket:transport(),
     max_frame_size => pos_integer(),
     max_connections => pos_integer(),
@@ -97,7 +98,17 @@ init(Opts) ->
     case thrift_erl_socket:listen(Opts) of
         {ok, ListenSocket} ->
             ConnectionOpts = maps:with(
-                [handler, service, transport, protocol, max_frame_size, timeout, record_api, types],
+                [
+                    handler,
+                    service,
+                    services,
+                    transport,
+                    protocol,
+                    max_frame_size,
+                    timeout,
+                    record_api,
+                    types
+                ],
                 Opts
             ),
             State =
@@ -164,7 +175,19 @@ handle_info(_Info, State) ->
 -spec terminate(term(), #state{}) -> term().
 terminate(_Reason, #state{listen_socket = ListenSocket, connections = Connections}) ->
     thrift_erl_socket:close(ListenSocket),
-    lists:foreach(fun thrift_erl_connection:stop/1, maps:values(Connections)),
+    %% A connection can exit on its own between the last 'DOWN' bookkeeping
+    %% and this sweep; a dead pid makes gen_server:stop throw noproc, which
+    %% must not mask the shutdown.
+    lists:foreach(
+        fun(Pid) ->
+            try thrift_erl_connection:stop(Pid) of
+                _ -> ok
+            catch
+                _:_ -> ok
+            end
+        end,
+        maps:values(Connections)
+    ),
     ok.
 
 %%--------------------------------------------------------------------

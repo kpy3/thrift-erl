@@ -50,7 +50,12 @@ both:
 - `max_frame_size` — framed guard, default 64 MiB;
 - `ssl_opts` — a list of `ssl:tls_client_option()`; presence switches
   the connection to TLS (verify the server with `verify_peer` plus
-  `cacerts`).
+  `cacerts`);
+- `multiplex` — the service name of a multiplexed server: outgoing
+  message names are prefixed `<<"Service:function">>` (the reply keeps
+  the plain function name, so nothing else changes). Only the name on
+  the wire is touched; pass the same plain function names to
+  `call/4`/`oneway/4`.
 """.
 
 -behaviour(gen_server).
@@ -69,7 +74,8 @@ both:
     protocol => binary | compact | module(),
     timeout => pos_integer(),
     max_frame_size => pos_integer(),
-    ssl_opts => [ssl:tls_client_option()]
+    ssl_opts => [ssl:tls_client_option()],
+    multiplex => binary()
 }.
 
 -type call_result() ::
@@ -106,6 +112,7 @@ both:
     service_info :: thrift_erl_service:service_info(),
     protocol :: module(),
     transport :: thrift_erl_socket:transport(),
+    multiplex :: undefined | binary(),
     timeout :: pos_integer(),
     max_frame_size :: pos_integer(),
     active_n :: pos_integer(),
@@ -198,6 +205,7 @@ init(Opts) ->
                 service_info = Service:service_info(),
                 protocol = Protocol,
                 transport = maps:get(transport, Opts, framed),
+                multiplex = maps:get(multiplex, Opts, undefined),
                 timeout = Timeout,
                 max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
                 active_n = ActiveN
@@ -343,7 +351,7 @@ prepare_args(Request, SeqId, #{params := ParamsDesc}, #state{} = State) ->
                             oneway -> oneway
                         end,
                     Message = (State#state.protocol):encode_message(
-                        Type, Request#request.function, SeqId, Payload
+                        Type, wire_name(Request#request.function, State), SeqId, Payload
                     ),
                     {ok, Message};
                 {error, Reason} ->
@@ -357,6 +365,17 @@ prepare_args(Request, SeqId, #{params := ParamsDesc}, #state{} = State) ->
 request_info(Request, #state{} = State) ->
     #{Request#request.function := Info} = State#state.service_info,
     Info.
+
+%% The name that goes on the wire: plain, or `Service:function' for a
+%% multiplexed server. Replies keep the plain name (the Apache
+%% multiplexed protocol prefixes writes only), so the receive path
+%% needs no changes.
+
+-spec wire_name(binary(), #state{}) -> binary().
+wire_name(Function, #state{multiplex = undefined}) ->
+    Function;
+wire_name(Function, #state{multiplex = Service}) ->
+    <<Service/binary, ":", Function/binary>>.
 
 -spec arm_call_timer(#request{}) -> undefined | reference().
 arm_call_timer(#request{timeout = infinity}) ->
