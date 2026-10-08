@@ -48,13 +48,19 @@ connection.
     end_per_suite/1,
     our_client_official_server/1,
     official_client_our_server_buffered/1,
-    official_client_our_server_framed/1
+    official_client_our_server_framed/1,
+    official_multiplexed_client_our_multiplexed_server/1
 ]).
 
 -define(CLIENT_TIMEOUT, 10000).
 
 all() ->
-    [our_client_official_server, official_client_our_server_buffered, official_client_our_server_framed].
+    [
+        our_client_official_server,
+        official_client_our_server_buffered,
+        official_client_our_server_framed,
+        official_multiplexed_client_our_multiplexed_server
+    ].
 
 init_per_suite(Config) ->
     %% The committed official generated code lives with the vendored
@@ -102,6 +108,63 @@ official_client_our_server_buffered(_Config) ->
 %% The official client <-> our server, framed.
 official_client_our_server_framed(_Config) ->
     official_client_scenario(framed).
+
+%% The official multiplexed client (`thrift_multiplexed_protocol' wraps
+%% the binary protocol and prefixes every outgoing message name with
+%% `ThriftTest:') <-> our multiplexed server hosting the service under
+%% the same name. Wire-level proof that the `Service:' convention
+%% matches the official implementation: calls, an exception and a
+%% oneway over the shared connection.
+
+official_multiplexed_client_our_multiplexed_server(_Config) ->
+    {ok, Server} =
+        'ThriftTest_server':start_link(#{
+            port => 0,
+            %% The official multiplexed client is buffered by default.
+            transport => buffered,
+            services =>
+                #{<<"ThriftTest">> => #{handler => thrift_golden_our_handler, service => 'ThriftTest_server'}}
+        }),
+    {ok, Port} = 'ThriftTest_server':port(Server),
+    {ok, [{_ServiceName, Client0}]} =
+        thrift_client_util:new_multiplexed("127.0.0.1", Port, [{"ThriftTest", thrift_test_thrift}], [
+            {recv_timeout, ?CLIENT_TIMEOUT}
+        ]),
+    try
+        true = register(thrift_golden_oneway_sink, self()),
+        {C1, {ok, <<"foo">>}} = thrift_client:call(Client0, testString, [<<"foo">>]),
+        {C2, {ok, -42}} = thrift_client:call(C1, testByte, [-42]),
+        {C3, {ok, 123456789012}} = thrift_client:call(C2, testI64, [123456789012]),
+
+        X = #'thrift.test.Xtruct'{string_thing = <<"hi">>, byte_thing = -1, i32_thing = 7, i64_thing = 99},
+        {C4, {ok, X}} = thrift_client:call(C3, testStruct, [X]),
+
+        {C5, {ok, ok}} = thrift_client:call(C4, testException, [<<"fine">>]),
+        {C6, {exception, Xception}} =
+            try thrift_client:call(C5, testException, [<<"Xception">>]) of
+                Unexpected -> erlang:error({unexpected_success, Unexpected})
+            catch
+                _:{_, {exception, _}} = Thrown -> Thrown
+            end,
+        ?assertEqual({'thrift.test.Xception', 1001, <<"Xception">>}, Xception),
+
+        %% Oneway fires the sink; the connection stays usable afterwards.
+        {_C7, {ok, ok}} = thrift_client:call(C6, testOneway, [1]),
+        receive
+            {fired, 1} -> ok
+        after ?CLIENT_TIMEOUT ->
+            erlang:error(oneway_not_delivered)
+        end,
+        {_C8, {ok, <<"after oneway">>}} = thrift_client:call(C6, testString, [<<"after oneway">>])
+    after
+        unregister(thrift_golden_oneway_sink),
+        try
+            thrift_client:close(Client0)
+        catch
+            _:_ -> ok
+        end,
+        ok = 'ThriftTest_server':stop(Server)
+    end.
 
 %%--------------------------------------------------------------------
 %% Our client against the official server

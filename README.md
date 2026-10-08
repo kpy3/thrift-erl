@@ -247,6 +247,44 @@ Server-reported exceptions are protocol replies: they come back
 unchanged and never reconnect. Every failed retry is logged at
 warning level (`domain => [thrift]`).
 
+## Multiplexed services
+
+Several services can share one port. The server hosts them by name;
+clients opt in with `multiplex`, which prefixes every outgoing message
+name with `<<"Service:function">>` (the Apache multiplexed protocol
+convention — replies keep the plain function name, so nothing else
+changes):
+
+```erlang
+%% server: host two services on one port
+{ok, Server} = thrift_erl_server:start_link(#{
+    port => 9090,
+    services => #{
+        <<"Widgets">> => #{handler => WidgetsHandler, service => 'Widgets_thrift'},
+        <<"Users">>   => #{handler => UsersHandler,   service => 'Users_thrift'}
+    }
+}),
+
+%% clients pick their service; function names stay plain
+{ok, Widgets} = thrift_erl_client:start_link(
+    #{host => "localhost", port => 9090, service => 'Widgets_thrift', multiplex => <<"Widgets">>}),
+{ok, Users} = thrift_erl_client:start_link(
+    #{host => "localhost", port => 9090, service => 'Users_thrift', multiplex => <<"Users">>}),
+```
+
+A generated server/client pair takes the same options — pass
+`services` to the generated server module or `multiplex` to the
+generated client, everything else is unchanged. The dispatch is strict
+in multiplexed mode: a name whose prefix is not a hosted service (or a
+plain name) is refused with the `UNKNOWN_METHOD` application
+exception, and the connection stays usable. A single-service server
+stays liberal: it answers plain names and keeps answering names that
+carry any `Service:' prefix, so a multiplexed client pointed at a
+non-multiplexed service still finds its functions. The golden suite
+covers the wire compatibility both ways: the official Apache
+multiplexed client (`thrift_client_util:new_multiplexed`) runs against
+our multiplexed server.
+
 ## TLS
 
 Add `ssl_opts` to the server or the client and the connection becomes
@@ -351,10 +389,9 @@ Only the speedup ratios on the same machine are meaningful; run
 
 ## Roadmap
 
-- **M9 — Multiplexed services**: several services over one connection
-  (`Service:method` prefixes, server-side dispatch).
-- Off schedule (the axis/option slots are reserved): the compact
-  protocol, a JSON protocol, an HTTP transport, native EEP-79 records.
+Done through M9 (SSL, the reconnecting client, multiplexed services).
+Off schedule (the axis/option slots are reserved): the compact
+protocol, a JSON protocol, an HTTP transport, native EEP-79 records.
 
 ## License
 
