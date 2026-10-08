@@ -32,6 +32,12 @@ Two framing modes, mirroring the classic Thrift transports:
   protocol itself: `extract_message/4` probes the envelope and payload
   struct with the protocol module's decode functions, which answer
   `more` while the input is a truncated but valid encoding.
+- `http` — each Thrift message rides as the body of one HTTP/1.1
+  exchange; `thrift_erl_http` provides the framing (requests on the
+  server, responses on the client) with the same `more` semantics, and
+  `max_frame_size` bounds the body. The two directions parse
+  differently, so the endpoints call it directly instead of going
+  through `extract_message/4`.
 
 Socket reads happen in the owning processes via `{active, N}` delivery
 — this module only provides the pure frame splitter over accumulated
@@ -51,7 +57,7 @@ buffers plus the send/listen/accept/connect helpers.
 
 -export_type([transport/0, socket/0]).
 
--type transport() :: buffered | framed.
+-type transport() :: buffered | framed | http.
 -type socket() :: {tcp, gen_tcp:socket()} | {ssl, ssl:sslsocket()}.
 
 %%--------------------------------------------------------------------

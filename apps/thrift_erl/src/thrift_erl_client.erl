@@ -42,12 +42,17 @@ both:
 
 - `host`, `port` (required);
 - `service` — module implementing `thrift_erl_service` (required);
-- `transport` — `framed` (default) or `buffered`;
+- `transport` — `framed` (default), `buffered`, or `http`: each call
+  POSTs one Thrift message to `http_path` (default `"/"`) over a
+  keep-alive connection and waits for the response whose body is the
+  reply. A oneway waits for the (empty) response too — HTTP is
+  request/response. `max_frame_size` bounds the response body; a
+  non-200 status fails the call with `{error, {http_status, Code}}`;
 - `protocol` — `binary` (default), or any `thrift_erl_protocol`
   implementation module (see `thrift_erl:protocol_module/1`);
 - `timeout` — connect, TLS handshake and per-call timeout, default
   5000 ms;
-- `max_frame_size` — framed guard, default 64 MiB;
+- `max_frame_size` — framed guard and HTTP body bound, default 64 MiB;
 - `ssl_opts` — a list of `ssl:tls_client_option()`; presence switches
   the connection to TLS (verify the server with `verify_peer` plus
   `cacerts`);
@@ -74,6 +79,7 @@ both:
     protocol => binary | compact | module(),
     timeout => pos_integer(),
     max_frame_size => pos_integer(),
+    http_path => binary(),
     ssl_opts => [ssl:tls_client_option()],
     multiplex => binary()
 }.
@@ -103,6 +109,9 @@ both:
     function :: binary(),
     seqid :: non_neg_integer(),
     info :: thrift_erl_service:function_info(),
+    %% an HTTP oneway waits for the (empty) response and answers ok
+    %% without any Thrift decoding
+    oneway = false :: boolean(),
     timer :: undefined | reference()
 }).
 
@@ -115,6 +124,8 @@ both:
     multiplex :: undefined | binary(),
     timeout :: pos_integer(),
     max_frame_size :: pos_integer(),
+    http_path :: binary(),
+    host_value :: binary(),
     active_n :: pos_integer(),
     seqid = 0 :: non_neg_integer(),
     buffer = <<>> :: binary(),
@@ -208,6 +219,8 @@ init(Opts) ->
                 multiplex = maps:get(multiplex, Opts, undefined),
                 timeout = Timeout,
                 max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
+                http_path = maps:get(http_path, Opts, <<"/">>),
+                host_value = host_value(maps:get(host, Opts), maps:get(port, Opts)),
                 active_n = ActiveN
             }};
         {{error, Reason}, _} ->
@@ -299,6 +312,25 @@ try_dispatch(State) ->
 
 -spec dispatch_request(#request{}, iodata(), non_neg_integer(), #state{}) ->
     {noreply, #state{}} | {stop, term(), #state{}}.
+dispatch_request(
+    #request{kind = oneway, from = From} = Request, Message, SeqId, #state{transport = http} = State
+) ->
+    %% HTTP is request/response: the server answers even a oneway, and
+    %% the next exchange rides behind that response, so it must be
+    %% consumed before anything else goes out.
+    Pending =
+        #pending{
+            from = From,
+            function = Request#request.function,
+            seqid = SeqId,
+            info = request_info(Request, State),
+            oneway = true,
+            timer = arm_call_timer(Request)
+        },
+    case send_message(Message, State#state{seqid = SeqId, pending = Pending}) of
+        #state{} = Sent -> {noreply, Sent};
+        Stop -> Stop
+    end;
 dispatch_request(#request{kind = oneway, from = From}, Message, SeqId, State) ->
     case send_message(Message, State) of
         #state{} = Sent ->
@@ -380,7 +412,7 @@ wire_name(Function, #state{multiplex = Service}) ->
 -spec arm_call_timer(#request{}) -> undefined | reference().
 arm_call_timer(#request{timeout = infinity}) ->
     undefined;
-arm_call_timer(#request{timeout = Timeout, kind = call}) ->
+arm_call_timer(#request{timeout = Timeout}) ->
     erlang:start_timer(Timeout, self(), call_timer).
 
 -spec send_message(iodata(), #state{}) -> #state{} | {stop, normal, #state{}}.
@@ -388,7 +420,8 @@ send_message(Message, #state{} = State) ->
     Bytes =
         case State#state.transport of
             framed -> [<<(iolist_size(Message)):32/big-unsigned>>, Message];
-            buffered -> Message
+            buffered -> Message;
+            http -> thrift_erl_http:request(State#state.host_value, State#state.http_path, [], Message)
         end,
     case thrift_erl_socket:send(State#state.socket, Bytes) of
         ok ->
@@ -403,7 +436,25 @@ send_message(Message, #state{} = State) ->
 %% Receive path
 %%--------------------------------------------------------------------
 
--spec handle_stream(#state{}) -> {noreply, #state{}} | {stop, term(), #state{}}.
+%% The HTTP direction parses whole responses; the body is the Thrift
+%% reply, a non-200 status fails the call.
+
+handle_stream(#state{buffer = Buffer, transport = http, max_frame_size = Max} = State) ->
+    case thrift_erl_http:extract_response(Buffer, Max) of
+        {ok, {200, _Headers, Message}, Leftover} ->
+            case handle_message(Message, State#state{buffer = Leftover}) of
+                {ok, State1} ->
+                    try_dispatch(State1);
+                Stop ->
+                    Stop
+            end;
+        {ok, {Code, _Headers, _Body}, _Leftover} ->
+            abort({http_status, Code}, State);
+        more ->
+            {noreply, State};
+        {error, Reason} ->
+            abort(Reason, State)
+    end;
 handle_stream(#state{buffer = Buffer} = State) ->
     case
         thrift_erl_socket:extract_message(
@@ -428,6 +479,14 @@ handle_stream(#state{buffer = Buffer} = State) ->
 
 -spec handle_message(binary(), #state{}) ->
     {ok, #state{}} | {stop, term(), #state{}}.
+handle_message(
+    _Body, #state{pending = #pending{oneway = true, from = From, timer = Timer}} = State
+) ->
+    %% The HTTP response that carries a oneway: no Thrift payload in
+    %% it, the call is done.
+    cancel_call_timer(Timer),
+    gen_server:reply(From, ok),
+    {ok, State#state{pending = undefined}};
 handle_message(_Message, #state{pending = undefined} = State) ->
     {stop, {error, unexpected_message}, State};
 handle_message(Message, #state{pending = Pending} = State) ->
@@ -545,6 +604,23 @@ abort(Reason, #state{pending = #pending{from = From, timer = Timer}} = State) ->
     fail_queue(closed, State#state{pending = undefined});
 abort(_Reason, #state{pending = undefined} = State) ->
     fail_queue(closed, State).
+
+%% The `Host:' header value from the connect options; cosmetic to this
+%% runtime's server but honest on the wire.
+
+-spec host_value(inet:socket_address() | inet:hostname(), inet:port_number()) -> binary().
+host_value(Host, Port) ->
+    <<(render_host(Host))/binary, ":", (integer_to_binary(Port))/binary>>.
+
+-spec render_host(inet:socket_address() | inet:hostname()) -> binary().
+render_host(Host) when is_tuple(Host) ->
+    list_to_binary(inet:ntoa(Host));
+render_host(Host) when is_atom(Host) ->
+    atom_to_binary(Host, utf8);
+render_host(Host) when is_binary(Host) ->
+    Host;
+render_host(Host) when is_list(Host) ->
+    unicode:characters_to_binary(Host).
 
 -spec cancel_call_timer(undefined | reference()) -> ok.
 cancel_call_timer(undefined) ->
