@@ -17,12 +17,17 @@
 -moduledoc """
 One server-side connection: read message, dispatch, answer, repeat.
 
-Runs as a gen_server owning the accepted socket. The receive loop is
-driven by a self-message; socket reads are passive `gen_tcp:recv`
-calls, so the process does nothing between messages. Handler crashes
-are contained per call and answered with `TApplicationException`
-(INTERNAL_ERROR); anything that breaks the stream (bad frame, socket
-error) closes the connection.
+Runs as a gen_server owning the accepted socket in `{active, N}`
+delivery mode: incoming bytes arrive as `tcp` messages, complete
+messages are split off the buffer by `thrift_erl_socket:extract_message/4`
+and dispatched; the socket re-arms itself on `tcp_passive`. A peer
+closing the connection is seen as `tcp_closed` even while idle.
+
+Timeouts: one timer guards the stream between messages (idle with an
+empty buffer, or a partial message mid-parse) — when it fires the
+connection stops. Handler crashes are contained per call and answered
+with `TApplicationException` (INTERNAL_ERROR); anything that breaks
+the stream (bad frame, socket error, timeout) closes the connection.
 
 Configuration comes in at creation time as a map — never from the
 application environment:
@@ -31,8 +36,11 @@ application environment:
 - `service` (required) — module implementing `thrift_erl_service`;
 - `socket` (required) — the accepted socket;
 - `transport` — `framed` (default) or `buffered`;
+- `protocol` — `binary` (default), or any `thrift_erl_protocol`
+  implementation module (see `thrift_erl:protocol_module/1`);
 - `max_frame_size` — framed mode guard, default 64 MiB;
-- `timeout` — per-message receive timeout, default 5000 ms.
+- `timeout` — maximum silence between messages, default 5000 ms;
+- `active_n` — `{active, N}` batch size, default 100.
 """.
 
 -behaviour(gen_server).
@@ -50,8 +58,10 @@ application environment:
     handler := module(),
     service := module(),
     transport => thrift_erl_socket:transport(),
+    protocol => binary | compact | module(),
     max_frame_size => pos_integer(),
     timeout => pos_integer(),
+    active_n => pos_integer(),
     %% when true, handler arguments and results are records; `types`
     %% names the generated types module providing record_fields/1
     record_api => boolean(),
@@ -63,15 +73,19 @@ application environment:
     handler :: module(),
     service :: module(),
     service_info :: thrift_erl_service:service_info(),
+    protocol :: module(),
     transport :: thrift_erl_socket:transport(),
     max_frame_size :: pos_integer(),
-    timeout :: pos_integer(),
+    timeout :: pos_integer() | infinity,
+    active_n :: pos_integer(),
     record_api :: module() | undefined,
+    idle_timer :: undefined | reference(),
     buffer = <<>> :: binary()
 }).
 
 -define(DEFAULT_MAX_FRAME_SIZE, 64 * 1024 * 1024).
 -define(DEFAULT_TIMEOUT, 5000).
+-define(DEFAULT_ACTIVE_N, 100).
 
 -doc "Starts a linked connection process for an accepted socket.".
 -spec start_link(options()) -> gen_server:start_ret().
@@ -96,25 +110,38 @@ stop(Pid) ->
 %% gen_server callbacks
 
 -doc false.
--spec init(options()) -> {ok, #state{}}.
+-spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    State =
-        #state{
-            socket = maps:get(socket, Opts),
-            handler = maps:get(handler, Opts),
-            service = maps:get(service, Opts),
-            service_info = (maps:get(service, Opts)):service_info(),
-            transport = maps:get(transport, Opts, framed),
-            max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
-            timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
-            record_api =
-                case maps:get(record_api, Opts, false) of
-                    true -> maps:get(types, Opts);
-                    false -> undefined
-                end
-        },
-    self() ! loop,
-    {ok, State}.
+    Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
+    case thrift_erl:protocol_module(maps:get(protocol, Opts, binary)) of
+        {ok, Protocol} ->
+            Socket = maps:get(socket, Opts),
+            ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
+            %% The socket arrives owned by the acceptor and still
+            %% passive; it takes over ownership (the acceptor calls
+            %% controlling_process) and only then arms active delivery
+            %% — see the 'go' handler.
+            State0 =
+                #state{
+                    socket = Socket,
+                    handler = maps:get(handler, Opts),
+                    service = maps:get(service, Opts),
+                    service_info = (maps:get(service, Opts)):service_info(),
+                    protocol = Protocol,
+                    transport = maps:get(transport, Opts, framed),
+                    max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
+                    timeout = Timeout,
+                    active_n = ActiveN,
+                    record_api =
+                        case maps:get(record_api, Opts, false) of
+                            true -> maps:get(types, Opts);
+                            false -> undefined
+                        end
+                },
+            {ok, State0};
+        {error, Reason} ->
+            {stop, {protocol, Reason}}
+    end.
 
 -doc false.
 -spec handle_call(term(), {pid(), reference()}, #state{}) -> {reply, term(), #state{}}.
@@ -127,17 +154,29 @@ handle_cast(_Request, State) ->
     {noreply, State}.
 
 -doc false.
--spec handle_info(term(), #state{}) -> {noreply, #state{}} | {stop, normal | {error, term()}, #state{}}.
-handle_info(loop, State) ->
-    case read_message(State) of
-        {ok, Message, Leftover} ->
-            State1 = State#state{buffer = Leftover},
-            State2 = process_message(Message, State1),
-            self() ! loop,
-            {noreply, State2};
-        {error, Reason} ->
-            {stop, {error, Reason}, State}
-    end;
+-spec handle_info(term(), #state{}) ->
+    {noreply, #state{}} | {stop, normal | {error, term()}, #state{}}.
+%% The acceptor has handed the socket over (controlling_process) and
+%% signals the connection to start reading. Data sent before this is
+%% buffered by the passive socket, nothing is lost.
+
+handle_info(go, #state{socket = Socket, active_n = ActiveN} = State) ->
+    ok = arm_active(Socket, ActiveN),
+    {noreply, arm_idle_timer(State)};
+handle_info({tcp, Socket, Data}, #state{socket = Socket} = State) ->
+    State1 = cancel_idle_timer(State),
+    handle_stream(State1#state{buffer = <<(State#state.buffer)/binary, Data/binary>>});
+handle_info({tcp_passive, Socket}, #state{socket = Socket} = State) ->
+    ok = arm_active(Socket, State#state.active_n),
+    {noreply, State};
+handle_info({tcp_closed, _Socket}, State) ->
+    {stop, normal, State};
+handle_info({tcp_error, _Socket, Reason}, State) ->
+    {stop, {error, Reason}, State};
+handle_info({timeout, Timer, idle}, #state{idle_timer = Timer} = State) ->
+    %% Same consequence for an idle peer and a stalled partial message:
+    %% the stream is no longer trusted.
+    {stop, {error, timeout}, State#state{idle_timer = undefined}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -148,18 +187,29 @@ terminate(_Reason, #state{socket = Socket}) ->
     ok.
 
 %%--------------------------------------------------------------------
-%% Message loop
+%% Stream processing
 %%--------------------------------------------------------------------
 
--spec read_message(#state{}) -> {ok, binary(), binary()} | {error, term()}.
-read_message(#state{} = State) ->
-    thrift_erl_socket:recv_message(
-        State#state.socket,
-        State#state.transport,
-        State#state.timeout,
-        State#state.max_frame_size,
-        State#state.buffer
-    ).
+%% Extracts and dispatches every complete message in the buffer, then
+%% re-arms the silence timer.
+
+-spec handle_stream(#state{}) -> {noreply, #state{}} | {stop, normal | {error, term()}, #state{}}.
+handle_stream(#state{buffer = Buffer} = State) ->
+    case
+        thrift_erl_socket:extract_message(
+            Buffer, State#state.transport, State#state.protocol, State#state.max_frame_size
+        )
+    of
+        {ok, Message, Leftover} ->
+            handle_stream(
+                process_message(Message, State#state{buffer = Leftover})
+            );
+        more ->
+            {noreply, arm_idle_timer(State)};
+        {error, Reason} ->
+            ?LOG_WARNING(#{domain => [thrift], msg => "bad stream", reason => Reason}),
+            {stop, {error, Reason}, State}
+    end.
 
 %%--------------------------------------------------------------------
 %% Dispatch
@@ -167,7 +217,7 @@ read_message(#state{} = State) ->
 
 -spec process_message(binary(), #state{}) -> #state{}.
 process_message(Message, #state{} = State) ->
-    case thrift_erl_binary:decode_message(Message) of
+    case (State#state.protocol):decode_message(Message) of
         {ok, call, Name, SeqId, Tail} ->
             handle_call_message(Name, SeqId, Tail, State);
         {ok, oneway, Name, _SeqId, Tail} ->
@@ -196,7 +246,7 @@ handle_call_message(Name, SeqId, Tail, #state{} = State) ->
 -spec dispatch(binary(), non_neg_integer(), binary(), thrift_erl_service:function_info(), #state{}) ->
     #state{}.
 dispatch(Name, SeqId, Tail, Info, #state{} = State) ->
-    case decode_params(Tail, Info) of
+    case decode_params(Tail, Info, State) of
         {ok, Args} ->
             Args1 = args_for_handler(Args, Info, State),
             try apply(State#state.handler, function_name(Name), Args1) of
@@ -243,7 +293,7 @@ dispatch(Name, SeqId, Tail, Info, #state{} = State) ->
 handle_oneway_message(Name, Tail, #state{} = State) ->
     case State#state.service_info of
         #{Name := Info} ->
-            case decode_params(Tail, Info) of
+            case decode_params(Tail, Info, State) of
                 {ok, Args} ->
                     Args1 = args_for_handler(Args, Info, State),
                     try apply(State#state.handler, function_name(Name), Args1) of
@@ -275,10 +325,10 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
             State
     end.
 
--spec decode_params(binary(), thrift_erl_service:function_info()) ->
+-spec decode_params(binary(), thrift_erl_service:function_info(), #state{}) ->
     {ok, [term()]} | {error, term()}.
-decode_params(Tail, #{params := ParamsDesc}) ->
-    case thrift_erl_binary:decode(ParamsDesc, Tail) of
+decode_params(Tail, #{params := ParamsDesc}, #state{} = State) ->
+    case (State#state.protocol):decode(ParamsDesc, Tail) of
         {ok, Values, _Rest} ->
             {ok, [
                 maps:get(Name, Values, undefined)
@@ -315,7 +365,7 @@ wire_result(Result, Info, #state{}) ->
 ) -> #state{}.
 encode_reply(Name, SeqId, Reply, #{reply := ReplyType} = _Info, #state{} = State) ->
     case
-        thrift_erl_binary:encode(
+        (State#state.protocol):encode(
             {struct, {struct, [{0, default, ReplyType, <<"success">>, undefined}]}},
             #{<<"success">> => Reply}
         )
@@ -333,7 +383,7 @@ encode_reply(Name, SeqId, Reply, #{reply := ReplyType} = _Info, #state{} = State
     end;
 encode_reply(Name, SeqId, _Reply, #{}, #state{} = State) ->
     %% void function: empty struct payload.
-    {ok, Payload} = thrift_erl_binary:encode({struct, {struct, []}}, #{}),
+    {ok, Payload} = (State#state.protocol):encode({struct, {struct, []}}, #{}),
     send_message(reply, Name, SeqId, Payload, State).
 
 -spec encode_exception_reply(
@@ -358,14 +408,13 @@ encode_exception_reply(Name, SeqId, ExceptionName, ExceptionValue, Info, #state{
             false
     end,
     case lists:search(Pred, Exceptions) of
-        {value, {Id, _, {struct, Desc}, _, _}} ->
-            case thrift_erl_binary:encode({struct, Desc}, ExceptionValue) of
-                {ok, EncodedValue} ->
-                    Payload = [
-                        <<(thrift_erl_binary:type_id({struct, Desc})):8/big-unsigned, Id:16/big-signed>>,
-                        EncodedValue,
-                        0
-                    ],
+        {value, {_, _, _, FieldName, _} = Field} ->
+            %% Encoding the one-field reply struct produces exactly the
+            %% old hand-assembled bytes (field header, value, stop)
+            %% without the connection knowing protocol wire details.
+            PayloadDesc = {struct, {struct, [Field]}},
+            case (State#state.protocol):encode(PayloadDesc, #{FieldName => ExceptionValue}) of
+                {ok, Payload} ->
                     send_message(reply, Name, SeqId, Payload, State);
                 {error, Reason} ->
                     ?LOG_WARNING(#{
@@ -391,7 +440,7 @@ encode_exception_reply(Name, SeqId, ExceptionName, ExceptionValue, Info, #state{
     binary(), non_neg_integer(), binary(), non_neg_integer(), #state{}
 ) -> #state{}.
 reply_application_exception(Name, SeqId, Message, Code, #state{} = State) ->
-    case thrift_erl_binary:encode_application_exception(Message, Code) of
+    case (State#state.protocol):encode_application_exception(Message, Code) of
         {ok, Payload} ->
             send_message(exception, Name, SeqId, Payload, State);
         {error, _} ->
@@ -402,7 +451,7 @@ reply_application_exception(Name, SeqId, Message, Code, #state{} = State) ->
     thrift_erl_binary:message_type(), binary(), non_neg_integer(), iodata(), #state{}
 ) -> #state{}.
 send_message(Type, Name, SeqId, Payload, #state{} = State) ->
-    Message = thrift_erl_binary:encode_message(Type, Name, SeqId, Payload),
+    Message = (State#state.protocol):encode_message(Type, Name, SeqId, Payload),
     Bytes =
         case State#state.transport of
             framed -> [<<(iolist_size(Message)):32/big-unsigned>>, Message];
@@ -423,3 +472,42 @@ send_message(Type, Name, SeqId, Payload, #state{} = State) ->
 %% The badarg for unknown names is caught by the dispatch try/catch.
 function_name(Name) ->
     binary_to_existing_atom(Name, utf8).
+
+%%--------------------------------------------------------------------
+%% Timers and active mode
+%%--------------------------------------------------------------------
+
+%% One timer guards the stream whether it is idle (empty buffer) or
+%% mid-message: the receive-timeout semantics of the old passive loop.
+
+-spec arm_idle_timer(#state{}) -> #state{}.
+arm_idle_timer(#state{timeout = infinity} = State) ->
+    State;
+arm_idle_timer(#state{idle_timer = undefined} = State) ->
+    State#state{idle_timer = erlang:start_timer(State#state.timeout, self(), idle)};
+arm_idle_timer(State) ->
+    State.
+
+-spec cancel_idle_timer(#state{}) -> #state{}.
+cancel_idle_timer(#state{idle_timer = undefined} = State) ->
+    State;
+cancel_idle_timer(#state{idle_timer = Timer} = State) ->
+    erlang:cancel_timer(Timer),
+    drain_timer(Timer),
+    State#state{idle_timer = undefined}.
+
+%% The timeout message may already sit in the queue when data arrives;
+%% it must not kill a healthy connection.
+
+-spec drain_timer(reference()) -> ok.
+drain_timer(Timer) ->
+    receive
+        {timeout, Timer, idle} -> ok
+    after 0 ->
+        ok
+    end.
+
+-spec arm_active(gen_tcp:socket(), pos_integer()) -> ok.
+arm_active(Socket, ActiveN) ->
+    ok = inet:setopts(Socket, [{active, ActiveN}]),
+    ok.

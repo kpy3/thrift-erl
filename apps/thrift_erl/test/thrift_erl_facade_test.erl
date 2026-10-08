@@ -1,0 +1,419 @@
+%% Copyright 2026 Sergei Yelin
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%    http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+
+%% Unit tests for the public API surface: the protocol and
+%% representation axes of `thrift_erl`, the record engine's
+%% auto-detection and conversions, strict facade decoding, frame
+%% splitting, and the client's queueing/failure behavior (against a
+%% real loopback server or a mute TCP peer).
+
+-module(thrift_erl_facade_test).
+
+-include_lib("stdlib/include/assert.hrl").
+
+-export([
+    protocol_module_axis_test/0,
+    facade_roundtrip_test/0,
+    facade_strict_decode_test/0,
+    facade_convert_test/0,
+    record_engine_autodetect_test/0,
+    record_engine_repr_test/0,
+    record_engine_map_mode_test/0,
+    record_engine_wire_passthrough_test/0,
+    extract_message_framed_test/0,
+    extract_message_buffered_test/0,
+    client_queue_serializes_test/0,
+    client_start_unlinked_test/0,
+    client_stop_with_pending_test/0,
+    client_peer_close_fails_pending_test/0,
+    client_call_timeout_test/0
+]).
+
+-define(SERVICE, thrift_erl_test_service).
+-define(FIXTURE, thrift_erl_record_fixture).
+
+%%--------------------------------------------------------------------
+%% Protocol axis
+
+protocol_module_axis_test() ->
+    ?assertEqual({ok, thrift_erl_binary}, thrift_erl:protocol_module(binary)),
+    %% reserved, not implemented yet
+    ?assertEqual({error, {unsupported_protocol, compact}}, thrift_erl:protocol_module(compact)),
+    %% the module axis verifies the callback set
+    ?assertEqual({ok, thrift_erl_binary}, thrift_erl:protocol_module(thrift_erl_binary)),
+    ?assertMatch({error, {bad_protocol, ?MODULE, _}}, thrift_erl:protocol_module(?MODULE)),
+    ?assertMatch(
+        {error, {bad_protocol, no_such_protocol_xyz, _}},
+        thrift_erl:protocol_module(no_such_protocol_xyz)
+    ),
+    ?assertEqual({error, {bad_protocol, <<"binary">>}}, thrift_erl:protocol_module(<<"binary">>)),
+    ok.
+
+%%--------------------------------------------------------------------
+%% Facade: encode/decode over the representation axis
+
+facade_roundtrip_test() ->
+    Desc = point_desc(),
+    Record = {point, 1, 2},
+    {ok, FromRecord} = thrift_erl:encode(Desc, Record),
+    %% every input representation encodes to the same bytes
+    ?assertEqual({ok, FromRecord}, thrift_erl:encode(Desc, #{x => 1, y => 2})),
+    ?assertEqual({ok, FromRecord}, thrift_erl:encode(Desc, #{<<"x">> => 1, <<"y">> => 2})),
+    ?assertEqual(
+        {ok, FromRecord},
+        thrift_erl:encode(Desc, #{'__struct__' => point, x => 1, y => 2})
+    ),
+    %% the protocol module axis drives the same codec
+    ?assertEqual({ok, FromRecord}, thrift_erl:encode(Desc, Record, thrift_erl_binary)),
+    ?assertEqual({ok, Record}, thrift_erl:decode(Desc, FromRecord, record)),
+    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_erl:decode(Desc, FromRecord, map)),
+    Struct = #{'__struct__' => point, x => 1, y => 2},
+    ?assertEqual({ok, Struct}, thrift_erl:decode(Desc, FromRecord, struct)),
+    ok.
+
+facade_strict_decode_test() ->
+    Desc = point_desc(),
+    {ok, Bin} = thrift_erl:encode(Desc, {point, 1, 2}),
+    ?assertEqual({error, trailing}, thrift_erl:decode(Desc, <<Bin/binary, 0>>, record)),
+    ?assertEqual(
+        {error, truncated},
+        thrift_erl:decode(Desc, binary:part(Bin, 0, byte_size(Bin) - 1), record)
+    ),
+    ok.
+
+facade_convert_test() ->
+    TagIndex = #{
+        point => point_desc(),
+        wrap => {struct, {ref, ?FIXTURE, <<"Wrap">>}},
+        loose => {struct, {ref, ?FIXTURE, <<"Loose">>}}
+    },
+    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_erl:convert(TagIndex, {point, 1, 2}, map)),
+    ?assertEqual(
+        {ok, {point, 1, 2}},
+        thrift_erl:convert(TagIndex, #{'__struct__' => point, x => 1, y => 2}, record)
+    ),
+    %% conversion recurses into nested structs
+    {ok, Nested} = thrift_erl:convert(TagIndex, {wrap, {point, 1, 2}}, struct),
+    ?assertEqual(wrap, maps:get('__struct__', Nested)),
+    ?assertEqual(point, maps:get('__struct__', maps:get(p, Nested))),
+    %% a map-mode struct has no record to produce
+    ?assertEqual(
+        {error, {no_record, loose}},
+        thrift_erl:convert(TagIndex, #{'__struct__' => loose, s => <<"v">>}, record)
+    ),
+    ?assertEqual(
+        {error, {unsupported_repr, native}},
+        thrift_erl:convert(TagIndex, {point, 1, 2}, native)
+    ),
+    ok.
+
+%%--------------------------------------------------------------------
+%% Record engine
+
+record_engine_autodetect_test() ->
+    Desc = point_desc(),
+    Wire = #{<<"x">> => 1, <<"y">> => 2},
+    ?assertEqual(Wire, thrift_erl_record:to_wire(Desc, {point, 1, 2})),
+    ?assertEqual(Wire, thrift_erl_record:to_wire(Desc, #{x => 1, y => 2})),
+    ?assertEqual(Wire, thrift_erl_record:to_wire(Desc, #{<<"x">> => 1, <<"y">> => 2})),
+    ?assertEqual(
+        Wire,
+        thrift_erl_record:to_wire(Desc, #{'__struct__' => point, x => 1, y => 2})
+    ),
+    %% undefined fields are dropped, not encoded
+    ?assertEqual(#{<<"x">> => 1}, thrift_erl_record:to_wire(Desc, {point, 1, undefined})),
+    ok.
+
+record_engine_repr_test() ->
+    Wrap = {struct, {ref, ?FIXTURE, <<"Wrap">>}},
+    Wire = #{<<"p">> => #{<<"x">> => 1, <<"y">> => 2}},
+    ?assertEqual({wrap, {point, 1, 2}}, thrift_erl_record:from_wire(Wrap, Wire, record)),
+    ?assertEqual(#{p => #{x => 1, y => 2}}, thrift_erl_record:from_wire(Wrap, Wire, map)),
+    ?assertEqual(
+        #{'__struct__' => wrap, p => #{'__struct__' => point, x => 1, y => 2}},
+        thrift_erl_record:from_wire(Wrap, Wire, struct)
+    ),
+    %% fields missing on the wire decode as undefined, not crash
+    Point = point_desc(),
+    ?assertEqual(
+        {point, 1, undefined},
+        thrift_erl_record:from_wire(Point, #{<<"x">> => 1}, record)
+    ),
+    ok.
+
+record_engine_map_mode_test() ->
+    Bag = {struct, {ref, ?FIXTURE, <<"Bag">>}},
+    %% a record-mode child inside a map-mode parent converts recursively
+    {ok, Bin} = thrift_erl:encode(Bag, #{p => {point, 1, 2}}),
+    ?assertEqual({ok, #{p => #{x => 1, y => 2}}}, thrift_erl:decode(Bag, Bin, map)),
+    ?assertEqual({ok, #{p => {point, 1, 2}}}, thrift_erl:decode(Bag, Bin, record)),
+    %% {map, binary} structs take wire keys on input; the `record` target
+    %% keeps them, the `map` target normalizes to atoms
+    BinKeys = {struct, {ref, ?FIXTURE, <<"BinKeys">>}},
+    {ok, BinKeysBin} = thrift_erl:encode(BinKeys, #{<<"s">> => <<"v">>}),
+    ?assertEqual({ok, #{<<"s">> => <<"v">>}}, thrift_erl:decode(BinKeys, BinKeysBin, record)),
+    ?assertEqual({ok, #{s => <<"v">>}}, thrift_erl:decode(BinKeys, BinKeysBin, map)),
+    ok.
+
+record_engine_wire_passthrough_test() ->
+    %% an inline descriptor carries no identity: values pass through
+    Inline = {struct, {struct, [{1, default, {base, i32}, <<"v">>, undefined}]}},
+    Value = #{<<"v">> => 5},
+    ?assertEqual(Value, thrift_erl_record:to_wire(Inline, Value)),
+    ?assertEqual(Value, thrift_erl_record:from_wire(Inline, Value, record)),
+    %% a ref whose target has no record_fields entry is wire too
+    Plain = {struct, {ref, ?FIXTURE, <<"Unknown">>}},
+    ?assertEqual(Value, thrift_erl_record:to_wire(Plain, Value)),
+    ?assertEqual(Value, thrift_erl_record:from_wire(Plain, Value, struct)),
+    ok.
+
+%%--------------------------------------------------------------------
+%% Frame splitting
+
+extract_message_framed_test() ->
+    Max = 1024,
+    ?assertEqual(
+        {ok, <<"ABCD">>, <<>>},
+        thrift_erl_socket:extract_message(<<4:32, "ABCD">>, framed, thrift_erl_binary, Max)
+    ),
+    ?assertEqual(more, thrift_erl_socket:extract_message(<<4:32, "AB">>, framed, thrift_erl_binary, Max)),
+    ?assertEqual(more, thrift_erl_socket:extract_message(<<4>>, framed, thrift_erl_binary, Max)),
+    %% the size prefix is checked before the payload arrives
+    ?assertEqual(
+        {error, frame_too_large},
+        thrift_erl_socket:extract_message(<<2000:32, "junk">>, framed, thrift_erl_binary, Max)
+    ),
+    %% frames assembled byte by byte, nothing dropped or duplicated
+    Two = <<8:32, "12345678", 2:32, "AB">>,
+    ?assertEqual({[<<"12345678">>, <<"AB">>], <<>>}, drip(Two)),
+    ok.
+
+extract_message_buffered_test() ->
+    Max = 1024,
+    Desc = {struct, {struct, [{1, default, {base, i32}, <<"a">>, undefined}]}},
+    {ok, Payload} = thrift_erl_binary:encode(Desc, #{<<"a">> => 5}),
+    Message = iolist_to_binary(thrift_erl_binary:encode_message(call, <<"f">>, 7, Payload)),
+    ?assertEqual(
+        {ok, Message, <<>>},
+        thrift_erl_socket:extract_message(Message, buffered, thrift_erl_binary, Max)
+    ),
+    %% a truncated but valid encoding is `more`, not an error
+    ?assertEqual(
+        more,
+        thrift_erl_socket:extract_message(
+            binary:part(Message, 0, byte_size(Message) - 1), buffered, thrift_erl_binary, Max
+        )
+    ),
+    %% two messages back to back: one off, one left over
+    ?assertEqual(
+        {ok, Message, Message},
+        thrift_erl_socket:extract_message(
+            <<Message/binary, Message/binary>>, buffered, thrift_erl_binary, Max
+        )
+    ),
+    ?assertMatch(
+        {error, {bad_frame, _}},
+        thrift_erl_socket:extract_message(<<255, 255, 255, 255>>, buffered, thrift_erl_binary, Max)
+    ),
+    ok.
+
+%%--------------------------------------------------------------------
+%% Client behaviors
+
+client_queue_serializes_test() ->
+    with_server(#{}, fun(Port) ->
+        {ok, Client} =
+            thrift_erl_client:start_link(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+        try
+            Parent = self(),
+            [
+                spawn(fun() ->
+                    Parent ! {res, N, thrift_erl_client:call(Client, <<"add">>, [N, N], 5000)}
+                end)
+             || N <- lists:seq(1, 5)
+            ],
+            Results =
+                lists:sort([
+                    receive
+                        {res, N, R} ->
+                            {N, R}
+                    after 5000 ->
+                        erlang:error(queue_reply_timeout)
+                    end
+                 || _ <- lists:seq(1, 5)
+                ]),
+            ?assertEqual([{N, {ok, 2 * N}} || N <- lists:seq(1, 5)], Results)
+        after
+            stop_quietly(Client)
+        end
+    end).
+
+client_start_unlinked_test() ->
+    %% `start/1` is the pool-worker entry: unlinked, same behavior
+    with_server(#{}, fun(Port) ->
+        {ok, Client} = thrift_erl_client:start(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+        try
+            ?assertEqual({ok, 4}, thrift_erl_client:call(Client, <<"add">>, [1, 3], 5000))
+        after
+            stop_quietly(Client)
+        end
+    end).
+
+client_stop_with_pending_test() ->
+    {Port, Peer} = raw_peer(),
+    {ok, Client} = thrift_erl_client:start(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+    wait_peer(),
+    Caller = self(),
+    spawn(fun() -> Caller ! {res, thrift_erl_client:call(Client, <<"add">>, [1, 2], 5000)} end),
+    timer:sleep(100),
+    %% stop answers the pending call instead of leaving it hanging
+    ok = thrift_erl_client:stop(Client),
+    assert_caller_result({error, closed}),
+    Peer ! close,
+    ok.
+
+client_peer_close_fails_pending_test() ->
+    {Port, Peer} = raw_peer(),
+    {ok, Client} = thrift_erl_client:start(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+    wait_peer(),
+    Caller = self(),
+    spawn(fun() -> Caller ! {res, thrift_erl_client:call(Client, <<"add">>, [1, 2], 5000)} end),
+    timer:sleep(100),
+    %% the dead peer reaches the pending caller as a socket close
+    Peer ! close,
+    assert_caller_result({error, closed}),
+    assert_dead(Client),
+    ok.
+
+client_call_timeout_test() ->
+    {Port, Peer} = raw_peer(),
+    {ok, Client} = thrift_erl_client:start(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+    wait_peer(),
+    %% the mute peer never answers: the per-call timer fires
+    ?assertEqual({error, timeout}, thrift_erl_client:call(Client, <<"add">>, [1, 2], 200)),
+    assert_dead(Client),
+    Peer ! close,
+    ok.
+
+%%--------------------------------------------------------------------
+%% Helpers
+
+-spec point_desc() -> thrift_erl_binary:type_desc().
+point_desc() ->
+    {struct, {ref, ?FIXTURE, <<"Point">>}}.
+
+-spec assert_caller_result(term()) -> ok.
+assert_caller_result(Expected) ->
+    ?assertEqual(
+        Expected,
+        receive
+            {res, R} ->
+                R
+        after 2000 ->
+            erlang:error(pending_not_answered)
+        end
+    ),
+    ok.
+
+-spec assert_dead(pid()) -> ok.
+assert_dead(Pid) ->
+    timer:sleep(50),
+    ?assertNot(erlang:is_process_alive(Pid)),
+    ok.
+
+%% Feeds the stream one byte at a time; answers every complete frame in
+%% order plus whatever incomplete tail is left.
+
+-spec drip(binary()) -> {[binary()], binary()}.
+drip(Bytes) ->
+    drip(Bytes, <<>>, []).
+
+-spec drip(binary(), binary(), [binary()]) -> {[binary()], binary()}.
+drip(<<Byte, Rest/binary>>, Buffer, Frames) ->
+    Next = <<Buffer/binary, Byte>>,
+    case thrift_erl_socket:extract_message(Next, framed, thrift_erl_binary, 1024) of
+        {ok, Message, Leftover} ->
+            drip(Rest, Leftover, [Message | Frames]);
+        more ->
+            drip(Rest, Next, Frames)
+    end;
+drip(<<>>, Buffer, Frames) ->
+    {lists:reverse(Frames), Buffer}.
+
+%% The Test fun receives the ephemeral server port; the server owns the
+%% lifecycle, the caller cleans up the client.
+
+-spec with_server(map(), fun((inet:port_number()) -> term())) -> term().
+with_server(Opts, Test) ->
+    Base = #{port => 0, handler => thrift_erl_test_handler, service => ?SERVICE},
+    {ok, Server} = thrift_erl_server:start_link(maps:merge(Base, Opts)),
+    try
+        {ok, Port} = thrift_erl_server:port(Server),
+        Test(Port)
+    after
+        stop_quietly(Server)
+    end.
+
+-spec stop_quietly(pid()) -> ok.
+stop_quietly(Server) ->
+    try thrift_erl_server:stop(Server) of
+        ok ->
+            ok;
+        _Other ->
+            ok
+    catch
+        _:_ ->
+            ok
+    end.
+
+%% A mute TCP endpoint: accepts one connection and never speaks. The
+%% accepted socket stays with the peer process; `close` tears everything
+%% down.
+
+-spec raw_peer() -> {inet:port_number(), pid()}.
+raw_peer() ->
+    {ok, Listen} = gen_tcp:listen(0, [binary, {packet, raw}, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(Listen),
+    Parent = self(),
+    Peer =
+        spawn_link(fun() ->
+            {ok, Socket} = gen_tcp:accept(Listen),
+            Parent ! peer_up,
+            raw_peer_loop(Socket, Listen)
+        end),
+    {Port, Peer}.
+
+-spec raw_peer_loop(gen_tcp:socket(), gen_tcp:socket()) -> ok.
+raw_peer_loop(Socket, Listen) ->
+    receive
+        close ->
+            gen_tcp:close(Socket),
+            gen_tcp:close(Listen),
+            ok;
+        {tcp_closed, Socket} ->
+            gen_tcp:close(Listen),
+            ok;
+        {tcp_error, Socket, _} ->
+            gen_tcp:close(Listen),
+            ok
+    end.
+
+-spec wait_peer() -> ok.
+wait_peer() ->
+    receive
+        peer_up ->
+            ok
+    after 2000 ->
+        erlang:error(peer_not_accepted)
+    end.

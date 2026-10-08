@@ -87,7 +87,8 @@ init(Opts) ->
     case thrift_erl_socket:listen(Opts) of
         {ok, ListenSocket} ->
             ConnectionOpts = maps:with(
-                [handler, service, transport, max_frame_size, timeout, record_api, types], Opts
+                [handler, service, transport, protocol, max_frame_size, timeout, record_api, types],
+                Opts
             ),
             State =
                 #state{
@@ -161,8 +162,18 @@ start_connection(Socket, #state{connections = Connections} = State) ->
     ConnectionOpts = (State#state.connection_opts)#{socket => Socket},
     case thrift_erl_connection:start(ConnectionOpts) of
         {ok, Pid} ->
-            Ref = monitor(process, Pid),
-            State#state{connections = Connections#{Ref => Pid}};
+            %% The socket is still owned here (and passive); hand it to
+            %% the connection, then tell it to start reading.
+            case gen_tcp:controlling_process(Socket, Pid) of
+                ok ->
+                    Pid ! go,
+                    Ref = monitor(process, Pid),
+                    State#state{connections = Connections#{Ref => Pid}};
+                {error, _Reason} ->
+                    %% The connection died before the handover.
+                    gen_tcp:close(Socket),
+                    State
+            end;
         {error, Reason} ->
             ?LOG_ERROR(#{domain => [thrift], msg => "connection start failed", reason => Reason}),
             gen_tcp:close(Socket),

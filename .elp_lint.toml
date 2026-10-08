@@ -11,7 +11,10 @@
 #   suppress compiler warnings / use -dialyzer; generated and upstream
 #   code is not ours to restyle.
 # - W0023 atoms_exhaustion: the generator mints atoms from IDL names it
-#   controls (see AGENTS.md); the vendored app is excluded on the CLI.
+#   controls (see AGENTS.md); thrift_erl_record's field_atom/record_tag
+#   atomize the very names generated record_fields descriptors carry,
+#   so the runtime is covered by the same guarantee. The vendored app
+#   is excluded on the CLI.
 # - W0017 undefined_function: the rebar3 plugin calls the rebar3 API,
 #   which is not a project dependency (xref ignores it the same way).
 
@@ -25,7 +28,7 @@ enabled = false
 enabled = false
 
 [linters.W0023]
-exclude_apps = ["thrift_generator"]
+exclude_apps = ["thrift_generator", "thrift_erl"]
 
 [linters.W0017]
 exclude_apps = ["rebar3_thrift"]
