@@ -45,8 +45,12 @@ both:
 - `transport` — `framed` (default) or `buffered`;
 - `protocol` — `binary` (default), or any `thrift_erl_protocol`
   implementation module (see `thrift_erl:protocol_module/1`);
-- `timeout` — connect and per-call timeout, default 5000 ms;
-- `max_frame_size` — framed guard, default 64 MiB.
+- `timeout` — connect, TLS handshake and per-call timeout, default
+  5000 ms;
+- `max_frame_size` — framed guard, default 64 MiB;
+- `ssl_opts` — a list of `ssl:tls_client_option()`; presence switches
+  the connection to TLS (verify the server with `verify_peer` plus
+  `cacerts`).
 """.
 
 -behaviour(gen_server).
@@ -64,7 +68,8 @@ both:
     transport => thrift_erl_socket:transport(),
     protocol => binary | compact | module(),
     timeout => pos_integer(),
-    max_frame_size => pos_integer()
+    max_frame_size => pos_integer(),
+    ssl_opts => [ssl:tls_client_option()]
 }.
 
 -type call_result() ::
@@ -96,7 +101,7 @@ both:
 }).
 
 -record(state, {
-    socket :: gen_tcp:socket(),
+    socket :: thrift_erl_socket:socket(),
     service :: module(),
     service_info :: thrift_erl_service:service_info(),
     protocol :: module(),
@@ -120,7 +125,28 @@ the connection cannot be made.
 """.
 -spec start_link(options()) -> gen_server:start_ret().
 start_link(Opts) ->
-    gen_server:start_link(?MODULE, Opts, []).
+    %% A failed connect answers {error, Reason} from init and then the
+    %% child exits with the same reason; trapping around the start
+    %% shields the (non-trapping) caller from that exit race, so it
+    %% sees the {error, Reason} answer only.
+    process_flag(trap_exit, true),
+    Result = gen_server:start_link(?MODULE, Opts, []),
+    process_flag(trap_exit, false),
+    case Result of
+        {ok, Pid} ->
+            receive
+                {'EXIT', Pid, Reason} -> {error, Reason}
+            after 0 ->
+                Result
+            end;
+        {error, _Reason} = Error ->
+            receive
+                {'EXIT', _Pid, _} -> ok
+            after 0 ->
+                ok
+            end,
+            Error
+    end.
 
 -doc """
 Connects to the server without linking — for owners that monitor
@@ -157,18 +183,14 @@ oneway(Pid, Function, Args, Timeout) ->
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
-    Connect = gen_tcp:connect(
-        maps:get(host, Opts),
-        maps:get(port, Opts),
-        [
-            binary, {packet, raw}, {active, false}, {nodelay, true}
-        ],
-        Timeout
-    ),
+    Connect =
+        thrift_erl_socket:connect(
+            maps:get(host, Opts), maps:get(port, Opts), maps:get(ssl_opts, Opts, undefined), Timeout
+        ),
     case {Connect, thrift_erl:protocol_module(maps:get(protocol, Opts, binary))} of
         {{ok, Socket}, {ok, Protocol}} ->
             ActiveN = ?DEFAULT_ACTIVE_N,
-            ok = arm_active(Socket, ActiveN),
+            ok = thrift_erl_socket:set_active(Socket, ActiveN),
             Service = maps:get(service, Opts),
             {ok, #state{
                 socket = Socket,
@@ -204,14 +226,23 @@ handle_cast(_Request, State) ->
 
 -doc false.
 -spec handle_info(term(), #state{}) -> {noreply, #state{}} | {stop, term(), #state{}}.
-handle_info({tcp, Socket, Data}, #state{socket = Socket} = State) ->
+handle_info({tcp, Socket, Data}, #state{socket = {tcp, Socket}} = State) ->
     handle_stream(State#state{buffer = <<(State#state.buffer)/binary, Data/binary>>});
-handle_info({tcp_passive, Socket}, #state{socket = Socket} = State) ->
-    ok = arm_active(Socket, State#state.active_n),
+handle_info({ssl, Socket, Data}, #state{socket = {ssl, Socket}} = State) ->
+    handle_stream(State#state{buffer = <<(State#state.buffer)/binary, Data/binary>>});
+handle_info({tcp_passive, Socket}, #state{socket = {tcp, Socket}, active_n = ActiveN} = State) ->
+    ok = thrift_erl_socket:set_active({tcp, Socket}, ActiveN),
+    {noreply, State};
+handle_info({ssl_passive, Socket}, #state{socket = {ssl, Socket}, active_n = ActiveN} = State) ->
+    ok = thrift_erl_socket:set_active({ssl, Socket}, ActiveN),
     {noreply, State};
 handle_info({tcp_closed, _Socket}, State) ->
     abort(closed, State);
 handle_info({tcp_error, _Socket, Reason}, State) ->
+    abort(Reason, State);
+handle_info(ssl_closed, State) ->
+    abort(closed, State);
+handle_info({ssl_error, _Socket, Reason}, State) ->
     abort(Reason, State);
 %% The reply can never be trusted to stay in sync after a timeout:
 %% fail the call and drop the connection.
@@ -234,7 +265,7 @@ terminate(_Reason, #state{socket = Socket} = State) ->
         undefined -> ok
     end,
     fail_queue(closed, State),
-    gen_tcp:close(Socket),
+    thrift_erl_socket:close(Socket),
     ok.
 
 %%--------------------------------------------------------------------
@@ -508,8 +539,3 @@ cancel_call_timer(Timer) ->
     after 0 ->
         ok
     end.
-
--spec arm_active(gen_tcp:socket(), pos_integer()) -> ok.
-arm_active(Socket, ActiveN) ->
-    ok = inet:setopts(Socket, [{active, ActiveN}]),
-    ok.
