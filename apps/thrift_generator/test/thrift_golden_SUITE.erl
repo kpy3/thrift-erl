@@ -53,6 +53,7 @@ connection.
     official_compact_client_our_server_framed/1,
     official_json_client_our_server_buffered/1,
     official_json_client_our_server_framed/1,
+    official_http_client_our_server/1,
     official_multiplexed_client_our_multiplexed_server/1
 ]).
 
@@ -67,6 +68,7 @@ all() ->
         official_compact_client_our_server_framed,
         official_json_client_our_server_buffered,
         official_json_client_our_server_framed,
+        official_http_client_our_server,
         official_multiplexed_client_our_multiplexed_server
     ].
 
@@ -139,6 +141,39 @@ official_json_client_our_server_buffered(_Config) ->
 
 official_json_client_our_server_framed(_Config) ->
     official_client_scenario(framed, json).
+
+%% The official HTTP client (`thrift_http_transport': one POST per
+%% message through httpc, the binary protocol in the body) <-> our HTTP
+%% server. The full assertion battery, including the oneway — whose
+%% (empty) HTTP response the official side never reads, which must not
+%% desync the next call.
+
+official_http_client_our_server(_Config) ->
+    {ok, _} = application:ensure_all_started(inets),
+    {ok, Server} =
+        'ThriftTest_server':start_link(#{
+            port => 0, handler => thrift_golden_our_handler, transport => http
+        }),
+    {ok, Port} = 'ThriftTest_server':port(Server),
+    {ok, HttpTransport} = thrift_http_transport:new(
+        "127.0.0.1:" ++ integer_to_list(Port),
+        "/thrift/test",
+        [{http_options, [{timeout, ?CLIENT_TIMEOUT}]}]
+    ),
+    {ok, Protocol0} = thrift_binary_protocol:new(HttpTransport),
+    {ok, Client0} = thrift_client:new(Protocol0, thrift_test_thrift),
+    try
+        true = register(thrift_golden_oneway_sink, self()),
+        run_official_client_assertions(Client0)
+    after
+        unregister(thrift_golden_oneway_sink),
+        try
+            thrift_client:close(Client0)
+        catch
+            _:_ -> ok
+        end,
+        ok = 'ThriftTest_server':stop(Server)
+    end.
 
 %% The official multiplexed client (`thrift_multiplexed_protocol' wraps
 %% the binary protocol and prefixes every outgoing message name with

@@ -130,7 +130,7 @@ ok = 'Ping_server':stop(Server).
 
 `start_link` options (a map at creation time, not app env):
 
-- `transport` — `framed` (the default) or `buffered`;
+- `transport` — `framed` (the default), `buffered`, or `http`;
 - `protocol` — `binary` (the default), `compact`, `json`, or any
   module implementing the `thrift_erl_protocol` behaviour;
 - server: `port`, `handler`, `max_frame_size`, `max_connections`,
@@ -248,6 +248,33 @@ directions: the golden suite runs the official JSON client
 (`thrift_client_util:new(..., [{protocol, json}])`) against our JSON
 server on both transports, and the benchmark proves the official reader
 accepts our JSON messages struct by struct.
+
+## The HTTP transport
+
+`transport => http` turns every Thrift exchange into one HTTP/1.1
+request-response pair: the client POSTs the encoded message to
+`http_path` (default `"/"`), the server answers with the reply in the
+response body, and the connection stays open for the next call
+(keep-alive). The protocol axis is untouched — binary, compact and
+json all ride in the body:
+
+```erlang
+{ok, Server} = 'Ping_server':start_link(#{
+    port => 9090, handler => ping_handler, transport => http
+}),
+{ok, Client} = 'Ping_client':start_link(#{
+    host => "127.0.0.1", port => 9090, transport => http, http_path => <<"/thrift">>
+}),
+```
+
+HTTP is request/response even where Thrift is not: a oneway gets an
+(empty) response, and the client consumes it before the next call.
+`max_frame_size` bounds the body on both ends; an unparseable request
+is answered 400 (405 for a non-POST method) before the connection
+closes, and a well-formed request carrying a bad Thrift payload gets
+400 while the connection continues. Interop is covered in the golden
+suite: the official HTTP client (`thrift_http_transport` over `httpc`)
+runs the full ThriftTest battery against our HTTP server.
 
 ## Pooling
 
@@ -477,9 +504,9 @@ Only the speedup ratios on the same machine are meaningful; run
 ## Roadmap
 
 Done through M9 (SSL, the reconnecting client, multiplexed services)
-plus the compact and JSON protocols off schedule. Remaining off
-schedule (the axis/option slots are reserved): an HTTP transport,
-native EEP-79 records.
+plus the compact protocol, the JSON protocol and the HTTP transport
+off schedule. Remaining off schedule (the axis/option slot is
+reserved): native EEP-79 records.
 
 ## License
 

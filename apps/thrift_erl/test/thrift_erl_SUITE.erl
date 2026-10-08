@@ -29,6 +29,7 @@
     compact_buffered_calls/1,
     json_framed_calls/1,
     json_buffered_calls/1,
+    http_calls/1,
     declared_exception/1,
     application_exception/1,
     oneway_delivery/1,
@@ -48,6 +49,7 @@ all() ->
         compact_buffered_calls,
         json_framed_calls,
         json_buffered_calls,
+        http_calls,
         declared_exception,
         application_exception,
         oneway_delivery,
@@ -105,6 +107,15 @@ json_framed_calls(_Config) ->
 
 json_buffered_calls(_Config) ->
     protocol_calls(#{transport => buffered, protocol => json}).
+
+%% The HTTP transport is protocol-agnostic: the same call battery rides
+%% one POST per exchange with every built-in protocol in the body. The
+%% oneway scenario proves the client consumes the (empty) response the
+%% server owes even a fire-and-forget call.
+
+http_calls(_Config) ->
+    [protocol_calls(#{transport => http, protocol => P}) || P <- [binary, compact, json]],
+    ok.
 
 declared_exception(_Config) ->
     with_server(#{}, fun(Client) ->

@@ -34,7 +34,14 @@ Configuration comes in at creation time as a map — never from the
 application environment:
 
 - `socket` (required) — the accepted, already handshaken socket;
-- `transport` — `framed` (default) or `buffered`;
+- `transport` — `framed` (default), `buffered`, or `http`: a Thrift
+  message rides as the body of one HTTP/1.1 POST, answered by one
+  response per request over a keep-alive connection. Even a oneway
+  gets an (empty) response — HTTP is request/response. `max_frame_size`
+  bounds the request body; a request that cannot be parsed is answered
+  400 (405 for a non-POST method) before the connection closes, a
+  complete request with a bad Thrift payload inside gets 400 and the
+  connection continues.
 - `protocol` — `binary` (default), or any `thrift_erl_protocol`
   implementation module (see `thrift_erl:protocol_module/1`);
 - `max_frame_size` — framed mode guard, default 64 MiB;
@@ -244,6 +251,21 @@ terminate(_Reason, #state{socket = Socket}) ->
 %% re-arms the silence timer.
 
 -spec handle_stream(#state{}) -> {noreply, #state{}} | {stop, normal | {error, term()}, #state{}}.
+%% The HTTP direction parses whole requests (the body is the Thrift
+%% message); a request that cannot be parsed gets a status code before
+%% the connection closes.
+
+handle_stream(#state{buffer = Buffer, transport = http, max_frame_size = Max} = State) ->
+    case thrift_erl_http:extract_request(Buffer, Max) of
+        {ok, #{body := Message}, Leftover} ->
+            handle_stream(process_message(Message, State#state{buffer = Leftover}));
+        more ->
+            {noreply, arm_idle_timer(State)};
+        {error, Reason} ->
+            respond_http_error(Reason, State),
+            ?LOG_WARNING(#{domain => [thrift], msg => "bad stream", reason => Reason}),
+            {stop, {error, Reason}, State}
+    end;
 handle_stream(#state{buffer = Buffer} = State) ->
     case
         thrift_erl_socket:extract_message(
@@ -271,7 +293,7 @@ process_message(Message, #state{} = State) ->
         {ok, call, Name, SeqId, Tail} ->
             handle_call_message(Name, SeqId, Tail, State);
         {ok, oneway, Name, _SeqId, Tail} ->
-            handle_oneway_message(Name, Tail, State);
+            handle_oneway_message(Name, Tail, acknowledge_oneway(State));
         {ok, _Type, Name, _SeqId, _Tail} ->
             ?LOG_WARNING(#{domain => [thrift], msg => "unexpected message type", name => Name}),
             reply_application_exception(
@@ -279,7 +301,12 @@ process_message(Message, #state{} = State) ->
             );
         {error, Reason} ->
             ?LOG_WARNING(#{domain => [thrift], msg => "bad message", reason => Reason}),
-            State
+            case State#state.transport of
+                %% HTTP framing still holds: answer and keep the
+                %% connection for the next request.
+                http -> send_http(400, <<>>, State);
+                _ -> State
+            end
     end.
 
 -spec handle_call_message(binary(), non_neg_integer(), binary(), #state{}) -> #state{}.
@@ -545,9 +572,37 @@ send_message(Type, Name, SeqId, Payload, #state{} = State) ->
     Bytes =
         case State#state.transport of
             framed -> [<<(iolist_size(Message)):32/big-unsigned>>, Message];
-            buffered -> Message
+            buffered -> Message;
+            http -> thrift_erl_http:response(200, [], Message)
         end,
     case thrift_erl_socket:send(State#state.socket, Bytes) of
+        ok ->
+            State;
+        {error, Reason} ->
+            ?LOG_WARNING(#{domain => [thrift], msg => "send failed", reason => Reason}),
+            State
+    end.
+
+%% HTTP is request/response even where Thrift is not: oneways and
+%% undecodable messages still owe the client a response.
+
+-spec acknowledge_oneway(#state{}) -> #state{}.
+acknowledge_oneway(#state{transport = http} = State) ->
+    send_http(200, <<>>, State);
+acknowledge_oneway(State) ->
+    State.
+
+-spec respond_http_error(term(), #state{}) -> ok.
+respond_http_error(not_post, #state{} = State) ->
+    _ = send_http(405, <<>>, State),
+    ok;
+respond_http_error(_, #state{} = State) ->
+    _ = send_http(400, <<>>, State),
+    ok.
+
+-spec send_http(200 | 400 | 405, iodata(), #state{}) -> #state{}.
+send_http(Code, Body, #state{} = State) ->
+    case thrift_erl_socket:send(State#state.socket, thrift_erl_http:response(Code, [], Body)) of
         ok ->
             State;
         {error, Reason} ->
