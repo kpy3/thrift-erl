@@ -17,6 +17,13 @@
 -moduledoc """
 Socket plumbing shared by the client and the server connection.
 
+Sockets are tagged — `{tcp, gen_tcp:socket()}` or
+`{ssl, ssl:sslsocket()}` — so every helper dispatches on the tag and
+the rest of the runtime carries one socket type. Plain TCP is the
+default; passing `ssl_opts` (a list of `ssl:tls_server_option()` on
+the server, `ssl:tls_client_option()` on the client) switches the
+listen/connect path to TLS.
+
 Two framing modes, mirroring the classic Thrift transports:
 
 - `framed` — every message is prefixed with its big-endian i32 length;
@@ -28,20 +35,24 @@ Two framing modes, mirroring the classic Thrift transports:
 
 Socket reads happen in the owning processes via `{active, N}` delivery
 — this module only provides the pure frame splitter over accumulated
-buffers plus send/listen/accept helpers.
+buffers plus the send/listen/accept/connect helpers.
 """.
 
 -export([
     send/2,
     extract_message/4,
     listen/1,
-    accept/1
+    accept/3,
+    connect/4,
+    set_active/2,
+    controlling_process/2,
+    close/1
 ]).
 
 -export_type([transport/0, socket/0]).
 
 -type transport() :: buffered | framed.
--type socket() :: gen_tcp:socket().
+-type socket() :: {tcp, gen_tcp:socket()} | {ssl, ssl:sslsocket()}.
 
 %%--------------------------------------------------------------------
 %% Writes
@@ -49,8 +60,10 @@ buffers plus send/listen/accept helpers.
 
 -doc "Sends iodata over the socket.".
 -spec send(socket(), iodata()) -> ok | {error, term()}.
-send(Socket, Data) ->
-    gen_tcp:send(Socket, Data).
+send({tcp, Socket}, Data) ->
+    gen_tcp:send(Socket, Data);
+send({ssl, Socket}, Data) ->
+    ssl:send(Socket, Data).
 
 %%--------------------------------------------------------------------
 %% Frame splitting
@@ -105,29 +118,124 @@ extract_message(Buffer, buffered, ProtocolMod, _MaxFrameSize) ->
     end.
 
 %%--------------------------------------------------------------------
-%% Listening
+%% Listening and connecting
 %%--------------------------------------------------------------------
 
 -doc """
 Listens with the standard socket options (binary, passive, raw) plus
 `backlog` from `Opts`.
 
-The listen socket stays passive; accepted connections switch
-themselves to `{active, N}` delivery after taking ownership.
+With `ssl_opts` in `Opts` (a list of `ssl:tls_server_option()`) the
+listener is TLS. The listen socket stays passive; accepted connections
+switch themselves to `{active, N}` delivery after taking ownership.
 """.
 -spec listen(map()) -> {ok, socket()} | {error, term()}.
 listen(#{port := Port} = Opts) ->
     Backlog = maps:get(backlog, Opts, 1024),
-    gen_tcp:listen(Port, [
+    Base = [
         binary,
         {packet, raw},
         {active, false},
         {reuseaddr, true},
         {nodelay, true},
         {backlog, Backlog}
-    ]).
+    ],
+    case maps:get(ssl_opts, Opts, undefined) of
+        undefined ->
+            case gen_tcp:listen(Port, Base) of
+                {ok, Socket} -> {ok, {tcp, Socket}};
+                {error, Reason} -> {error, Reason}
+            end;
+        SslOpts when is_list(SslOpts) ->
+            case ssl:listen(Port, Base ++ SslOpts) of
+                {ok, Socket} -> {ok, {ssl, Socket}};
+                {error, Reason} -> {error, Reason}
+            end
+    end.
 
--doc "Accepts one connection.".
--spec accept(socket()) -> {ok, socket()} | {error, term()}.
-accept(ListenSocket) ->
-    gen_tcp:accept(ListenSocket, infinity).
+-doc """
+Accepts one connection from the listen socket.
+
+`AcceptTimeout` slices the wait so the caller (the acceptor) stays
+responsive between accepts; on TLS the subsequent handshake gets
+`HandshakeTimeout` of silence before failing.
+""".
+-spec accept(socket(), AcceptTimeout :: timeout(), HandshakeTimeout :: timeout()) ->
+    {ok, socket()} | {error, term()}.
+accept({tcp, ListenSocket}, AcceptTimeout, _HandshakeTimeout) ->
+    case gen_tcp:accept(ListenSocket, AcceptTimeout) of
+        {ok, Socket} -> {ok, {tcp, Socket}};
+        {error, Reason} -> {error, Reason}
+    end;
+accept({ssl, ListenSocket}, AcceptTimeout, HandshakeTimeout) ->
+    case ssl:transport_accept(ListenSocket, AcceptTimeout) of
+        {ok, TransportSocket} ->
+            case ssl:handshake(TransportSocket, HandshakeTimeout) of
+                {ok, SslSocket} ->
+                    {ok, {ssl, SslSocket}};
+                {error, Reason} ->
+                    close({ssl, TransportSocket}),
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-doc """
+Connects to `Host:Port`; with `SslOpts` (a list of
+`ssl:tls_client_option()`) the connection is TLS, otherwise plain TCP.
+""".
+-spec connect(
+    inet:socket_address() | inet:hostname(),
+    inet:port_number(),
+    SslOpts :: [term()] | undefined,
+    timeout()
+) -> {ok, socket()} | {error, term()}.
+connect(Host, Port, SslOpts, Timeout) ->
+    Base = [binary, {packet, raw}, {active, false}, {nodelay, true}],
+    case SslOpts of
+        undefined ->
+            case gen_tcp:connect(Host, Port, Base, Timeout) of
+                {ok, Socket} -> {ok, {tcp, Socket}};
+                {error, Reason} -> {error, Reason}
+            end;
+        Opts when is_list(Opts) ->
+            case ssl:connect(Host, Port, Base ++ Opts, Timeout) of
+                {ok, Socket} -> {ok, {ssl, Socket}};
+                {error, Reason} -> {error, Reason}
+            end
+    end.
+
+%%--------------------------------------------------------------------
+%% Shared dispatchers
+%%--------------------------------------------------------------------
+
+-doc """
+Arms `{active, N}` delivery on the socket.
+
+The passive->active flow is what the connections re-arm on
+`tcp_passive`/`ssl_passive` after each consumed batch.
+""".
+-spec set_active(socket(), pos_integer()) -> ok.
+set_active({tcp, Socket}, N) ->
+    ok = inet:setopts(Socket, [{active, N}]),
+    ok;
+set_active({ssl, Socket}, N) ->
+    ok = ssl:setopts(Socket, [{active, N}]),
+    ok.
+
+-doc "Hands the socket to `Pid`, which becomes its controlling process.".
+-spec controlling_process(socket(), pid()) -> ok | {error, term()}.
+controlling_process({tcp, Socket}, Pid) ->
+    gen_tcp:controlling_process(Socket, Pid);
+controlling_process({ssl, Socket}, Pid) ->
+    ssl:controlling_process(Socket, Pid).
+
+-doc "Closes the socket.".
+-spec close(socket()) -> ok.
+close({tcp, Socket}) ->
+    gen_tcp:close(Socket),
+    ok;
+close({ssl, Socket}) ->
+    ssl:close(Socket),
+    ok.

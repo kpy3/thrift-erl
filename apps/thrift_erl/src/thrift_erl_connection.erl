@@ -18,10 +18,11 @@
 One server-side connection: read message, dispatch, answer, repeat.
 
 Runs as a gen_server owning the accepted socket in `{active, N}`
-delivery mode: incoming bytes arrive as `tcp` messages, complete
+delivery mode: incoming bytes arrive as `tcp`/`ssl` messages, complete
 messages are split off the buffer by `thrift_erl_socket:extract_message/4`
-and dispatched; the socket re-arms itself on `tcp_passive`. A peer
-closing the connection is seen as `tcp_closed` even while idle.
+and dispatched; the socket re-arms itself on `tcp_passive`/`ssl_passive`.
+A peer closing the connection is seen as `tcp_closed`/`ssl_closed`
+even while idle.
 
 Timeouts: one timer guards the stream between messages (idle with an
 empty buffer, or a partial message mid-parse) — when it fires the
@@ -34,7 +35,7 @@ application environment:
 
 - `handler` (required) — module implementing the service;
 - `service` (required) — module implementing `thrift_erl_service`;
-- `socket` (required) — the accepted socket;
+- `socket` (required) — the accepted, already handshaken socket;
 - `transport` — `framed` (default) or `buffered`;
 - `protocol` — `binary` (default), or any `thrift_erl_protocol`
   implementation module (see `thrift_erl:protocol_module/1`);
@@ -54,7 +55,7 @@ application environment:
 -include_lib("kernel/include/logger.hrl").
 
 -type options() :: #{
-    socket := gen_tcp:socket(),
+    socket := thrift_erl_socket:socket(),
     handler := module(),
     service := module(),
     transport => thrift_erl_socket:transport(),
@@ -69,7 +70,7 @@ application environment:
 }.
 
 -record(state, {
-    socket :: gen_tcp:socket(),
+    socket :: thrift_erl_socket:socket(),
     handler :: module(),
     service :: module(),
     service_info :: thrift_erl_service:service_info(),
@@ -161,17 +162,27 @@ handle_cast(_Request, State) ->
 %% buffered by the passive socket, nothing is lost.
 
 handle_info(go, #state{socket = Socket, active_n = ActiveN} = State) ->
-    ok = arm_active(Socket, ActiveN),
+    ok = thrift_erl_socket:set_active(Socket, ActiveN),
     {noreply, arm_idle_timer(State)};
-handle_info({tcp, Socket, Data}, #state{socket = Socket} = State) ->
+handle_info({tcp, Socket, Data}, #state{socket = {tcp, Socket}} = State) ->
     State1 = cancel_idle_timer(State),
     handle_stream(State1#state{buffer = <<(State#state.buffer)/binary, Data/binary>>});
-handle_info({tcp_passive, Socket}, #state{socket = Socket} = State) ->
-    ok = arm_active(Socket, State#state.active_n),
+handle_info({ssl, Socket, Data}, #state{socket = {ssl, Socket}} = State) ->
+    State1 = cancel_idle_timer(State),
+    handle_stream(State1#state{buffer = <<(State#state.buffer)/binary, Data/binary>>});
+handle_info({tcp_passive, Socket}, #state{socket = {tcp, Socket}, active_n = ActiveN} = State) ->
+    ok = thrift_erl_socket:set_active({tcp, Socket}, ActiveN),
+    {noreply, State};
+handle_info({ssl_passive, Socket}, #state{socket = {ssl, Socket}, active_n = ActiveN} = State) ->
+    ok = thrift_erl_socket:set_active({ssl, Socket}, ActiveN),
     {noreply, State};
 handle_info({tcp_closed, _Socket}, State) ->
     {stop, normal, State};
 handle_info({tcp_error, _Socket, Reason}, State) ->
+    {stop, {error, Reason}, State};
+handle_info(ssl_closed, State) ->
+    {stop, normal, State};
+handle_info({ssl_error, _Socket, Reason}, State) ->
     {stop, {error, Reason}, State};
 handle_info({timeout, Timer, idle}, #state{idle_timer = Timer} = State) ->
     %% Same consequence for an idle peer and a stalled partial message:
@@ -183,7 +194,7 @@ handle_info(_Info, State) ->
 -doc false.
 -spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{socket = Socket}) ->
-    gen_tcp:close(Socket),
+    thrift_erl_socket:close(Socket),
     ok.
 
 %%--------------------------------------------------------------------
@@ -506,8 +517,3 @@ drain_timer(Timer) ->
     after 0 ->
         ok
     end.
-
--spec arm_active(gen_tcp:socket(), pos_integer()) -> ok.
-arm_active(Socket, ActiveN) ->
-    ok = inet:setopts(Socket, [{active, ActiveN}]),
-    ok.

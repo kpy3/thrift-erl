@@ -45,6 +45,9 @@ mechanism.
     record_api => boolean(),
     types => module(),
     backlog => pos_integer(),
+    %% presence switches the listener to TLS; the handshake consumes
+    %% `timeout` ms of silence before failing
+    ssl_opts => [ssl:tls_server_option()],
     %% 0 binds an ephemeral port; read it back with port/1.
     port := inet:port_number(),
     %% registration name for the server supervisor (optional)
@@ -52,13 +55,15 @@ mechanism.
 }.
 
 -record(state, {
-    listen_socket :: gen_tcp:socket(),
+    listen_socket :: thrift_erl_socket:socket(),
     connection_opts :: map(),
     max_connections :: pos_integer(),
     %% exactly one accept is in flight whenever below the cap
     accepting = false :: boolean(),
     connections = #{} :: #{reference() := pid()}
 }).
+
+-define(DEFAULT_TIMEOUT, 5000).
 
 -doc """
 Starts the listener.
@@ -104,8 +109,11 @@ init(Opts) ->
 
 -doc false.
 -spec handle_call(term(), {pid(), reference()}, #state{}) -> {reply, term(), #state{}}.
-handle_call(port, _From, #state{listen_socket = ListenSocket} = State) ->
+handle_call(port, _From, #state{listen_socket = {tcp, ListenSocket}} = State) ->
     {reply, inet:port(ListenSocket), State};
+handle_call(port, _From, #state{listen_socket = {ssl, ListenSocket}} = State) ->
+    {ok, {_Ip, Port}} = ssl:sockname(ListenSocket),
+    {reply, {ok, Port}, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported}, State}.
 
@@ -121,7 +129,10 @@ handle_info(accept, #state{} = State) ->
     State0 = State#state{accepting = false},
     %% Sliced accept keeps this process responsive to calls (port/1)
     %% between waits; a plain infinity accept would swallow them.
-    case gen_tcp:accept(State#state.listen_socket, 250) of
+    %% On TLS the handshake then blocks up to `timeout` — accepted but
+    %% silent peers cannot pin the acceptor forever.
+    HandshakeTimeout = maps:get(timeout, State#state.connection_opts, ?DEFAULT_TIMEOUT),
+    case thrift_erl_socket:accept(State#state.listen_socket, 250, HandshakeTimeout) of
         {ok, Socket} ->
             State1 = start_connection(Socket, State0),
             {noreply, schedule_accept(State1)};
@@ -147,7 +158,7 @@ handle_info(_Info, State) ->
 -doc false.
 -spec terminate(term(), #state{}) -> term().
 terminate(_Reason, #state{listen_socket = ListenSocket, connections = Connections}) ->
-    gen_tcp:close(ListenSocket),
+    thrift_erl_socket:close(ListenSocket),
     lists:foreach(fun thrift_erl_connection:stop/1, maps:values(Connections)),
     ok.
 
@@ -155,7 +166,7 @@ terminate(_Reason, #state{listen_socket = ListenSocket, connections = Connection
 %% Connections
 %%--------------------------------------------------------------------
 
--spec start_connection(gen_tcp:socket(), #state{}) -> #state{}.
+-spec start_connection(thrift_erl_socket:socket(), #state{}) -> #state{}.
 start_connection(Socket, #state{connections = Connections} = State) ->
     %% start (not start_link): connections are monitored only, so a
     %% crashing connection cannot take the listener with it.
@@ -164,19 +175,19 @@ start_connection(Socket, #state{connections = Connections} = State) ->
         {ok, Pid} ->
             %% The socket is still owned here (and passive); hand it to
             %% the connection, then tell it to start reading.
-            case gen_tcp:controlling_process(Socket, Pid) of
+            case thrift_erl_socket:controlling_process(Socket, Pid) of
                 ok ->
                     Pid ! go,
                     Ref = monitor(process, Pid),
                     State#state{connections = Connections#{Ref => Pid}};
                 {error, _Reason} ->
                     %% The connection died before the handover.
-                    gen_tcp:close(Socket),
+                    thrift_erl_socket:close(Socket),
                     State
             end;
         {error, Reason} ->
             ?LOG_ERROR(#{domain => [thrift], msg => "connection start failed", reason => Reason}),
-            gen_tcp:close(Socket),
+            thrift_erl_socket:close(Socket),
             State
     end.
 

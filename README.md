@@ -217,6 +217,40 @@ hanging. Sockets run in `{active, N}` delivery mode, so a dead peer is
 noticed even on an idle connection. Calls are serialized per
 connection; concurrent callers queue in order.
 
+## TLS
+
+Add `ssl_opts` to the server or the client and the connection becomes
+TLS; without it everything stays plain TCP. The same `ssl_opts` list
+is passed straight to `ssl:listen`/`ssl:connect`, so every standard
+option (`certs_keys`, `verify`, `cacerts`, ...) applies:
+
+```erlang
+%% server: present a certificate
+{ok, Server} = thrift_erl_server:start_link(#{
+    port => 9090, handler => PingHandler, service => 'Ping_thrift',
+    ssl_opts => [{certs_keys, [#{certfile => "cert.pem", keyfile => "key.pem"}]}]
+}),
+
+%% client: verify the server
+{ok, Client} = thrift_erl_client:start_link(#{
+    host => "localhost", port => 9090, service => 'Ping_thrift',
+    ssl_opts => [{verify, verify_peer}, {cacerts, CaDer},
+                 {server_name_indication, "localhost"}]
+})
+```
+
+The TLS handshake runs where the connection is established: on the
+server between the transport accept and the handover to the connection
+process (capped by the `timeout` option, so a silent peer cannot pin
+the acceptor), on the client inside `start_link` (its connect
+timeout). A failed handshake closes the connection: the client's
+`start_link` answers `{error, Reason}`, the server logs and keeps
+accepting. After the handshake nothing changes — framing, protocols,
+representations and the `{active, N}` I/O are transport-agnostic.
+Serve mutual TLS by adding client-certificate verification to the
+server's `ssl_opts` (`{verify, verify_peer}, {fail_if_no_peer_cert,
+true}`); the client presents `certs_keys` the same way.
+
 ## Namespaces
 
 A `namespace erl` (or the `namespace *` fallback) does two things:
@@ -287,8 +321,6 @@ Only the speedup ratios on the same machine are meaningful; run
 
 ## Roadmap
 
-- **M7 — SSL sockets**: `ssl_opts` in client/server (reserved option
-  slot already in place), self-signed loopback tests.
 - **M8 — Reconnecting client + statistics**: a wrapper with backoff and
   call/error counters for pool health checks.
 - **M9 — Multiplexed services**: several services over one connection
