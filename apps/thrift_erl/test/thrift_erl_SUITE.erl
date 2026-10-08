@@ -25,6 +25,8 @@
 -export([
     framed_calls/1,
     buffered_calls/1,
+    compact_framed_calls/1,
+    compact_buffered_calls/1,
     declared_exception/1,
     application_exception/1,
     oneway_delivery/1,
@@ -40,6 +42,8 @@ all() ->
     [
         framed_calls,
         buffered_calls,
+        compact_framed_calls,
+        compact_buffered_calls,
         declared_exception,
         application_exception,
         oneway_delivery,
@@ -76,6 +80,17 @@ buffered_calls(_Config) ->
             {ok, #{<<"x">> => 9, <<"y">> => 8}}, call(Client, <<"deep">>, [#{<<"x">> => 8, <<"y">> => 9}])
         )
     end).
+
+%% The compact protocol over both transports: the framed path is pure
+%% codec, the buffered path additionally exercises the probe-decode in
+%% extract_message, which skips the payload by wire type. Reply, void
+%% and both exception shapes go over the wire in one scenario.
+
+compact_framed_calls(_Config) ->
+    compact_calls(#{transport => framed}).
+
+compact_buffered_calls(_Config) ->
+    compact_calls(#{transport => buffered}).
 
 declared_exception(_Config) ->
     with_server(#{}, fun(Client) ->
@@ -226,6 +241,26 @@ prefixed_name_to_plain_server(_Config) ->
 
 %%--------------------------------------------------------------------
 %% Helpers
+
+compact_calls(Overrides) ->
+    with_server(Overrides#{protocol => compact}, fun(Client) ->
+        ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
+        ?assertEqual({ok, <<"hello">>}, call(Client, <<"echo">>, [<<"hello">>])),
+        ?assertEqual({ok, 3}, call(Client, <<"size">>, [[<<"a">>, <<"b">>, <<"c">>]])),
+        ?assertEqual({ok, undefined}, call(Client, <<"ping">>, [])),
+        ?assertEqual(
+            {ok, #{<<"x">> => 2, <<"y">> => 1}}, call(Client, <<"deep">>, [#{<<"x">> => 1, <<"y">> => 2}])
+        ),
+        ?assertEqual(
+            {error, {exception, <<"boom">>, #{<<"message">> => <<"as declared">>}}},
+            call(Client, <<"boom">>, [])
+        ),
+        ?assertMatch(
+            {error, {application_exception, <<"internal error">>, 6, <<"INTERNAL_ERROR">>}},
+            call(Client, <<"boomInternal">>, [])
+        ),
+        ?assertEqual({ok, 1}, call(Client, <<"add">>, [1, 0]))
+    end).
 
 call(Client, Function, Args) ->
     thrift_erl_client:call(Client, Function, Args, 5000).

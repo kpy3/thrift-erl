@@ -49,6 +49,8 @@ connection.
     our_client_official_server/1,
     official_client_our_server_buffered/1,
     official_client_our_server_framed/1,
+    official_compact_client_our_server_buffered/1,
+    official_compact_client_our_server_framed/1,
     official_multiplexed_client_our_multiplexed_server/1
 ]).
 
@@ -59,6 +61,8 @@ all() ->
         our_client_official_server,
         official_client_our_server_buffered,
         official_client_our_server_framed,
+        official_compact_client_our_server_buffered,
+        official_compact_client_our_server_framed,
         official_multiplexed_client_our_multiplexed_server
     ].
 
@@ -108,6 +112,17 @@ official_client_our_server_buffered(_Config) ->
 %% The official client <-> our server, framed.
 official_client_our_server_framed(_Config) ->
     official_client_scenario(framed).
+
+%% The official compact client (`thrift_compact_protocol': zigzag
+%% varints, delta field headers, nibble-packed collections) <-> our
+%% compact server, on both transports. Full assertion battery: scalars,
+%% doubles, nested structs, maps/sets/lists, an exception and a oneway.
+
+official_compact_client_our_server_buffered(_Config) ->
+    official_client_scenario(buffered, compact).
+
+official_compact_client_our_server_framed(_Config) ->
+    official_client_scenario(framed, compact).
 
 %% The official multiplexed client (`thrift_multiplexed_protocol' wraps
 %% the binary protocol and prefixes every outgoing message name with
@@ -238,12 +253,17 @@ run_our_client_assertions(Client) ->
 %%--------------------------------------------------------------------
 
 official_client_scenario(Transport) ->
+    official_client_scenario(Transport, binary).
+
+official_client_scenario(Transport, Protocol) ->
     {ok, Server} =
-        'ThriftTest_server':start_link(#{port => 0, handler => thrift_golden_our_handler, transport => Transport}),
+        'ThriftTest_server':start_link(#{
+            port => 0, handler => thrift_golden_our_handler, transport => Transport, protocol => Protocol
+        }),
     {ok, Port} = 'ThriftTest_server':port(Server),
     {ok, Client0} =
         thrift_client_util:new("127.0.0.1", Port, thrift_test_thrift, [
-            {framed, Transport =:= framed}, {recv_timeout, ?CLIENT_TIMEOUT}
+            {protocol, Protocol}, {framed, Transport =:= framed}, {recv_timeout, ?CLIENT_TIMEOUT}
         ]),
     try
         true = register(thrift_golden_oneway_sink, self()),

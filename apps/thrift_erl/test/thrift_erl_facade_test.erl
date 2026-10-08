@@ -48,10 +48,10 @@
 
 protocol_module_axis_test() ->
     ?assertEqual({ok, thrift_erl_binary}, thrift_erl:protocol_module(binary)),
-    %% reserved, not implemented yet
-    ?assertEqual({error, {unsupported_protocol, compact}}, thrift_erl:protocol_module(compact)),
+    ?assertEqual({ok, thrift_erl_compact}, thrift_erl:protocol_module(compact)),
     %% the module axis verifies the callback set
     ?assertEqual({ok, thrift_erl_binary}, thrift_erl:protocol_module(thrift_erl_binary)),
+    ?assertEqual({ok, thrift_erl_compact}, thrift_erl:protocol_module(thrift_erl_compact)),
     ?assertMatch({error, {bad_protocol, ?MODULE, _}}, thrift_erl:protocol_module(?MODULE)),
     ?assertMatch(
         {error, {bad_protocol, no_such_protocol_xyz, _}},
