@@ -444,6 +444,20 @@ generated_map_mode(Config) ->
         {ok, #{'__struct__' => point, x => 1, y => 2}},
         mapmode_types:decode_mapmode_point(PointBin, struct)
     ),
+    %% native records (EEP-79, OTP 29+): the generated codec forwards the
+    %% axis to the runtime engine untouched
+    case native_supported() of
+        true ->
+            {ok, PointNative} = mapmode_types:decode_mapmode_point(PointBin, native),
+            ?assertEqual(mapmode_types, records:get_module(PointNative)),
+            ?assertEqual(point, records:get_name(PointNative)),
+            ?assertEqual({ok, PointBin}, mapmode_types:encode_mapmode_point(PointNative));
+        false ->
+            ?assertEqual(
+                {error, {unsupported_repr, native}},
+                mapmode_types:decode_mapmode_point(PointBin, native)
+            )
+    end,
     ?assertEqual(
         {error, {no_record, point}},
         mapmode_types:convert(#{'__struct__' => point, x => 1, y => 2}, record)
@@ -500,6 +514,10 @@ generate_modules(MainPath) ->
     ok.
 
 %% Helpers
+
+%% Native records (EEP-79) exist from OTP 29 on; the CI matrix runs 28 too.
+native_supported() ->
+    list_to_integer(erlang:system_info(otp_release)) >= 29.
 
 parse_data_file(Config, Name) ->
     File = filename:join(proplists:get_value(data_dir, Config), Name),

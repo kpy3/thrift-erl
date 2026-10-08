@@ -29,7 +29,11 @@ of struct values:
 - `struct` — `#{__struct__ => Tag, Field => Value, ...}`, the
   Elixir-style tagged map that survives round-trips without the record
   definitions in scope;
-- `native` — EEP-79 native records (OTP 29): reserved, not implemented.
+- `native` — EEP-79 native records (OTP 29+): values minted by
+  `thrift_erl_native` from the descriptor, fields readable through the
+  `records` module without any compiled definitions. Releases older
+  than 29 answer `{error, {unsupported_repr, native}}` from `decode`
+  and `convert`.
 
 `encode/2,3` accepts any representation on input and auto-detects it;
 `decode/3,4` produces the requested one. `convert/3` reshapes typed
@@ -53,7 +57,8 @@ and `thrift_erl_server`.
 -export_type([repr/0, protocol/0, tag_index/0]).
 
 %% Struct representations. `record` requires the generated record
-%% definitions in scope; `map` and `struct` work without them.
+%% definitions in scope; `map` and `struct` work without them; `native`
+%% (EEP-79) exists on OTP 29+ only.
 -type repr() :: record | map | struct | native.
 
 %% Wire protocols: named ones known here, or any module implementing
@@ -109,21 +114,35 @@ decode(Desc, Binary, Repr) ->
 -spec decode(thrift_erl_binary:type_desc(), binary(), repr(), protocol()) ->
     {ok, term()} | {error, term()}.
 decode(Desc, Binary, Repr, Protocol) ->
-    case protocol_module(Protocol) of
-        {ok, Mod} ->
-            case Mod:decode(Desc, Binary) of
-                {ok, Value, <<>>} ->
-                    {ok, thrift_erl_record:from_wire(Desc, Value, Repr)};
-                {ok, _Value, _Rest} ->
-                    {error, trailing};
-                more ->
-                    {error, truncated};
+    case repr_supported(Repr) of
+        true ->
+            case protocol_module(Protocol) of
+                {ok, Mod} ->
+                    case Mod:decode(Desc, Binary) of
+                        {ok, Value, <<>>} ->
+                            {ok, thrift_erl_record:from_wire(Desc, Value, Repr)};
+                        {ok, _Value, _Rest} ->
+                            {error, trailing};
+                        more ->
+                            {error, truncated};
+                        {error, Reason} ->
+                            {error, Reason}
+                    end;
                 {error, Reason} ->
                     {error, Reason}
             end;
-        {error, Reason} ->
-            {error, Reason}
+        false ->
+            {error, {unsupported_repr, native}}
     end.
+
+%% The one representation with an OTP floor: native records need the
+%% `records` module (OTP 29), everything else is release-independent.
+
+-spec repr_supported(repr()) -> boolean().
+repr_supported(native) ->
+    thrift_erl_native:supported();
+repr_supported(_Repr) ->
+    true.
 
 -doc """
 Reshapes a typed value (record or struct-map, nested structures
@@ -154,7 +173,10 @@ convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
         struct ->
             {ok, thrift_erl_record:from_wire(Desc, Wire, struct)};
         native ->
-            {error, {unsupported_repr, native}}
+            case thrift_erl_native:supported() of
+                true -> {ok, thrift_erl_record:from_wire(Desc, Wire, native)};
+                false -> {error, {unsupported_repr, native}}
+            end
     end.
 
 -doc """
