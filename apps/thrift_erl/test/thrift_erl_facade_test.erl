@@ -31,6 +31,7 @@
     record_engine_repr_test/0,
     record_engine_map_mode_test/0,
     record_engine_wire_passthrough_test/0,
+    native_repr_test/0,
     extract_message_framed_test/0,
     extract_message_buffered_test/0,
     client_queue_serializes_test/0,
@@ -82,6 +83,18 @@ facade_roundtrip_test() ->
     ?assertEqual({ok, #{x => 1, y => 2}}, thrift_erl:decode(Desc, FromRecord, map)),
     Struct = #{'__struct__' => point, x => 1, y => 2},
     ?assertEqual({ok, Struct}, thrift_erl:decode(Desc, FromRecord, struct)),
+    case otp_release() >= 29 of
+        true ->
+            {ok, Native} = thrift_erl:decode(Desc, FromRecord, native),
+            ?assert(thrift_erl_native:is_native(Native)),
+            %% a native record encodes back to the same bytes
+            ?assertEqual({ok, FromRecord}, thrift_erl:encode(Desc, Native));
+        false ->
+            ?assertEqual(
+                {error, {unsupported_repr, native}},
+                thrift_erl:decode(Desc, FromRecord, native)
+            )
+    end,
     ok.
 
 facade_strict_decode_test() ->
@@ -114,10 +127,16 @@ facade_convert_test() ->
         {error, {no_record, loose}},
         thrift_erl:convert(TagIndex, #{'__struct__' => loose, s => <<"v">>}, record)
     ),
-    ?assertEqual(
-        {error, {unsupported_repr, native}},
-        thrift_erl:convert(TagIndex, {point, 1, 2}, native)
-    ),
+    case otp_release() >= 29 of
+        true ->
+            {ok, Native} = thrift_erl:convert(TagIndex, {point, 1, 2}, native),
+            ?assertEqual(1, records:get(x, Native));
+        false ->
+            ?assertEqual(
+                {error, {unsupported_repr, native}},
+                thrift_erl:convert(TagIndex, {point, 1, 2}, native)
+            )
+    end,
     ok.
 
 %%--------------------------------------------------------------------
@@ -152,6 +171,17 @@ record_engine_repr_test() ->
         {point, 1, undefined},
         thrift_erl_record:from_wire(Point, #{<<"x">> => 1}, record)
     ),
+    case otp_release() >= 29 of
+        true ->
+            %% native nests the same way: every record-mode struct on the
+            %% path becomes a native record of its own
+            WrapNative = thrift_erl_record:from_wire(Wrap, Wire, native),
+            {_, _, Fields} = thrift_erl_native:fields(WrapNative),
+            ?assertEqual(wrap, records:get_name(WrapNative)),
+            ?assertEqual(1, records:get(x, maps:get(p, Fields)));
+        false ->
+            ok
+    end,
     ok.
 
 record_engine_map_mode_test() ->
@@ -178,6 +208,52 @@ record_engine_wire_passthrough_test() ->
     Plain = {struct, {ref, ?FIXTURE, <<"Unknown">>}},
     ?assertEqual(Value, thrift_erl_record:to_wire(Plain, Value)),
     ?assertEqual(Value, thrift_erl_record:from_wire(Plain, Value, struct)),
+    ok.
+
+%% The EEP-79 axis: native records minted from the descriptor, read
+%% through the `records` module, and accepted back by the auto-detector.
+
+native_repr_test() ->
+    case otp_release() >= 29 of
+        false ->
+            ?assertEqual(false, thrift_erl_native:supported());
+        true ->
+            Desc = point_desc(),
+            {ok, Bin} = thrift_erl:encode(Desc, {point, 1, 2}),
+            {ok, Native} = thrift_erl:decode(Desc, Bin, native),
+            %% identity: the descriptor's module, the record tag
+            ?assertEqual(?FIXTURE, records:get_module(Native)),
+            ?assertEqual(point, records:get_name(Native)),
+            {_, _, FieldMap} = thrift_erl_native:fields(Native),
+            ?assertEqual(#{x => 1, y => 2}, FieldMap),
+            %% fields missing on the wire decode as undefined
+            {ok, PartialBin} = thrift_erl:encode(Desc, #{x => 1}),
+            {ok, Partial} = thrift_erl:decode(Desc, PartialBin, native),
+            ?assertEqual(#{x => 1, y => undefined}, element(3, thrift_erl_native:fields(Partial))),
+            %% auto-detection: the native record normalizes to wire
+            Wire = #{<<"x">> => 1, <<"y">> => 2},
+            ?assertEqual(Wire, thrift_erl_record:to_wire(Desc, Native)),
+            %% version drift: a newer definition's extra field is ignored,
+            %% a declared field missing from the record is skipped
+            Newer = thrift_erl_native:create(?FIXTURE, point, [{x, 1}, {y, 2}, {z, <<"extra">>}]),
+            ?assertEqual(Wire, thrift_erl_record:to_wire(Desc, Newer)),
+            Older = thrift_erl_native:create(?FIXTURE, point, [{x, 7}]),
+            ?assertEqual(#{<<"x">> => 7}, thrift_erl_record:to_wire(Desc, Older)),
+            %% a native record of another struct is a badrecord, as with tuples
+            Wrap = {struct, {ref, ?FIXTURE, <<"Wrap">>}},
+            ?assertError({badrecord, _}, thrift_erl:encode(Wrap, Native)),
+            %% map-mode structs mint native records too
+            Bag = {struct, {ref, ?FIXTURE, <<"Bag">>}},
+            {ok, BagBin} = thrift_erl:encode(Bag, #{p => {point, 5, 6}}),
+            {ok, BagNative} = thrift_erl:decode(Bag, BagBin, native),
+            ?assertEqual(bag, records:get_name(BagNative)),
+            %% the axis is protocol-independent
+            {ok, JsonBin} = thrift_erl:encode(Desc, {point, 3, 4}, json),
+            {ok, JsonNative} = thrift_erl:decode(Desc, JsonBin, native, json),
+            ?assertEqual(4, records:get(y, JsonNative)),
+            %% tuple records stay tuples
+            ?assertNot(thrift_erl_native:is_native({point, 1, 2}))
+    end,
     ok.
 
 %%--------------------------------------------------------------------
@@ -314,6 +390,14 @@ client_call_timeout_test() ->
 -spec point_desc() -> thrift_erl_binary:type_desc().
 point_desc() ->
     {struct, {ref, ?FIXTURE, <<"Point">>}}.
+
+%% Native records (EEP-79) and their `records` module exist from OTP 29
+%% on; every native assertion is gated on the running release so the
+%% suite stays green across the CI matrix.
+
+-spec otp_release() -> non_neg_integer().
+otp_release() ->
+    list_to_integer(erlang:system_info(otp_release)).
 
 -spec assert_caller_result(term()) -> ok.
 assert_caller_result(Expected) ->

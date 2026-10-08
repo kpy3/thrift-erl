@@ -142,14 +142,17 @@ ok = 'Ping_server':stop(Server).
 
 Structs live in two independent axes. The **protocol** axis picks the
 wire format (`binary`, `compact` and `json` are built in; any
-`thrift_erl_protocol` module plugs in; `native`-style EEP-79 records
-are reserved for a future milestone). The **representation** axis
+`thrift_erl_protocol` module plugs in). The **representation** axis
 (`thrift_erl:repr()`) picks the in-process shape:
 
 - `record` — the generated record (the default for plain structs);
 - `map` — plain atom-key maps matching the IDL field names;
 - `struct` — `#{__struct__ => Tag, Field => Value, ...}`, the tagged
-  map that survives round-trips without record definitions in scope.
+  map that survives round-trips without record definitions in scope;
+- `native` — EEP-79 native records (OTP 29+): a real datatype minted
+  from the struct descriptor, no compiled definitions needed to read
+  it (`records:get/2`, `records:get_name/1`, ...). Older releases
+  answer `{error, {unsupported_repr, native}}`.
 
 `encode/2` accepts any representation and auto-detects it; `decode/3`
 produces the requested one. Every struct in `<mod>_types.erl` gets a
@@ -182,6 +185,19 @@ The representation of a struct can also be pinned in the IDL with
 `erl.struct_type = "map"` — values become maps at the wire boundary in
 clients, servers and codecs (keys are atoms by default;
 `erl.struct_type.map.key_type = "binary"` keeps wire keys).
+
+Native records keep the representation uniform all the way down: a
+nested struct decodes into a native record of its own, and a native
+record encodes back to the same bytes as the tuple record would. The
+runtime mints values dynamically (no `-record #` declarations are
+emitted), so pattern matching one requires declaring `-record #name{}`
+in the consumer — reading through the `records` module needs nothing:
+
+```erlang
+{ok, Req} = ping_api_types:decode_pingrequest(Bin, native),
+<<"john">> = records:get(name, Req),
+{ok, Bin} = ping_api_types:encode_pingrequest(Req).   %% auto-detected
+```
 
 Enums get `color_to_int/1` / `color_from_int/1` helpers, constants get
 zero-argument functions plus `-define` macros for scalars, and the
@@ -504,9 +520,8 @@ Only the speedup ratios on the same machine are meaningful; run
 ## Roadmap
 
 Done through M9 (SSL, the reconnecting client, multiplexed services)
-plus the compact protocol, the JSON protocol and the HTTP transport
-off schedule. Remaining off schedule (the axis/option slot is
-reserved): native EEP-79 records.
+plus the off-schedule axis items: the compact protocol, the JSON
+protocol, the HTTP transport and native EEP-79 records.
 
 ## License
 

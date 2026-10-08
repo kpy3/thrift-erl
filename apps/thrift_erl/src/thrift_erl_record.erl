@@ -29,10 +29,11 @@ representation through `Module:record_fields(Name)`:
 - `none`, or no `record_fields` export at all — hand-written
   descriptors: values pass through unchanged, assumed already wire.
 
-Input values are auto-detected in `to_wire/2`: a tuple record, a plain
-map with atom keys (the generated record field atoms), a plain map
-with binary keys (already the wire shape) or an Elixir-style tagged
-map (`#{__struct__ => Tag, ...}`) all normalize to the wire map.
+Input values are auto-detected in `to_wire/2`: a native record (EEP-79,
+OTP 29+, see `thrift_erl_native`), a tuple record, a plain map with
+atom keys (the generated record field atoms), a plain map with binary
+keys (already the wire shape) or an Elixir-style tagged map
+(`#{__struct__ => Tag, ...}`) all normalize to the wire map.
 `from_wire/2` produces the struct's default representation;
 `from_wire/3` produces the requested one (see `thrift_erl:repr/0`).
 
@@ -173,10 +174,15 @@ struct-map) to the wire representation.
 """.
 -spec to_wire(type_desc(), term()) -> term().
 to_wire({struct, {ref, Module, Name}}, Value) ->
-    case struct_mode(Module, Name) of
-        {record, Tag, FieldAtoms} -> record_to_wire(Module, Name, Tag, FieldAtoms, Value);
-        {map, KeyType} -> map_mode_to_wire(Module, Name, KeyType, Value);
-        wire -> Value
+    case thrift_erl_native:is_native(Value) of
+        true ->
+            native_to_wire(Module, Name, Value);
+        false ->
+            case struct_mode(Module, Name) of
+                {record, Tag, FieldAtoms} -> record_to_wire(Module, Name, Tag, FieldAtoms, Value);
+                {map, KeyType} -> map_mode_to_wire(Module, Name, KeyType, Value);
+                wire -> Value
+            end
     end;
 to_wire({struct, {_Kind, _Fields}}, Value) ->
     %% Inline descriptors carry no identity: the value is already in
@@ -216,6 +222,26 @@ from_wire(Desc, Value) ->
 
 -doc "Converts a wire value to the given representation.".
 -spec from_wire(type_desc(), term(), thrift_erl:repr()) -> term().
+%% Native records keep the representation uniform all the way down: a
+%% wire-passthrough target has no identity to stamp, so its value stays
+%% the wire map.
+from_wire({struct, {ref, Module, Name}}, Value, native) when is_map(Value) ->
+    case struct_mode(Module, Name) of
+        wire ->
+            Value;
+        _Mode ->
+            FieldValues = [
+                {
+                    field_atom(NameBin),
+                    case Value of
+                        #{NameBin := FieldValue} -> from_wire(Type, FieldValue, native);
+                        _ -> undefined
+                    end
+                }
+             || {_, _, Type, NameBin, _} <- struct_fields(Module, Name)
+            ],
+            thrift_erl_native:create(Module, record_tag(Name), FieldValues)
+    end;
 from_wire({struct, {ref, Module, Name}}, Value, Repr) when is_map(Value) ->
     case struct_mode(Module, Name) of
         {record, Tag, _FieldAtoms} ->
@@ -299,6 +325,34 @@ struct_to_wire(Fields, Record) ->
         NameBin => to_wire(Type, V)
      || {V, {_, _, Type, NameBin, _}} <- lists:zip(Values, Fields), V =/= undefined
     }.
+
+%% A native record encodes through its declaration, not its fields'
+%% positions: the identity (module and lowercased struct name) must match
+%% the descriptor, declared fields are taken when defined, `undefined`
+%% is skipped exactly as for tuple records, and fields the descriptor
+%% does not declare (a newer definition than the descriptor) are ignored.
+
+-spec native_to_wire(module(), binary(), term()) -> map().
+native_to_wire(Module, Name, Record) ->
+    {RecordModule, RecordName, FieldMap} = thrift_erl_native:fields(Record),
+    case RecordModule =:= Module andalso RecordName =:= record_tag(Name) of
+        true ->
+            maps:from_list([
+                {NameBin, to_wire(Type, V)}
+             || {_, _, Type, NameBin, _} <- struct_fields(Module, Name),
+                {ok, V} <- [native_lookup(field_atom(NameBin), FieldMap)]
+            ]);
+        false ->
+            erlang:error({badrecord, Record})
+    end.
+
+-spec native_lookup(atom(), #{atom() => term()}) -> {ok, term()} | none.
+native_lookup(Atom, FieldMap) ->
+    case FieldMap of
+        #{Atom := undefined} -> none;
+        #{Atom := V} -> {ok, V};
+        _ -> none
+    end.
 
 %% Walks the declared fields, accepting either the binary field name or
 %% its generated field atom as the input key.
