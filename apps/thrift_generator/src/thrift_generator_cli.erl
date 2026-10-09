@@ -18,15 +18,18 @@
 Command-line front end (escript entry point).
 
 ```
-thrift_generator <file.thrift> [-o <out_dir>]
-thrift_generator generate <file.thrift> [-o <out_dir>]
+thrift_generator <file.thrift> [-o <out_dir>] [--repr record|map|native]
+thrift_generator generate <file.thrift> [-o <out_dir>] [--repr record|map|native]
 ```
 
 Argument parsing rides on the stdlib `argparse` module (usage/help
 included); `generate` stays accepted as an optional subcommand — the
 file operand selects the action. Runs the full pipeline (load with
 includes, semantic analysis, emit) and writes the generated Erlang
-sources to `out_dir` (default: the current directory).
+sources to `out_dir` (default: the current directory). `--repr` picks
+the value representation generated for definitions without an explicit
+`erl.struct_type` annotation (`record`, the default, `map` or
+`native`).
 """.
 
 -export([main/1]).
@@ -52,7 +55,7 @@ main(RawArgs) ->
                 false ->
                     case Parsed of
                         #{file := File} ->
-                            run(File, maps:get(out_dir, Parsed, <<".">>));
+                            run(File, maps:get(out_dir, Parsed, <<".">>), maps:get(repr, Parsed, record));
                         _ ->
                             parse_error("missing <file.thrift> operand", Options)
                     end
@@ -93,12 +96,23 @@ command() ->
                 type => binary,
                 default => <<".">>,
                 help => {"[-o <out_dir>]", ["directory for generated .erl files (default: .)"]}
+            },
+            #{
+                name => repr,
+                long => "-repr",
+                type => {atom, [record, map, native]},
+                default => record,
+                help =>
+                    {"[--repr record|map|native]", [
+                        "representation for definitions without an explicit"
+                        " erl.struct_type annotation (default: record)"
+                    ]}
             }
         ]
     }.
 
-run(File, OutDir) ->
-    case thrift_generator:generate(File, OutDir, #{}) of
+run(File, OutDir, Repr) ->
+    case thrift_generator:generate(File, OutDir, #{repr => Repr}) of
         {ok, Generated} ->
             io:format("Generated ~b module(s) in ~ts:~n", [
                 length(Generated), unicode:characters_to_list(OutDir)

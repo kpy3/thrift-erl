@@ -40,6 +40,8 @@
     sum_union_test/0,
     namespace_set_default_test/0,
     namespace_prefix_test/0,
+    native_representation_test/0,
+    repr_option_test/0,
     doc_pipeline_test/0
 ]).
 
@@ -393,6 +395,103 @@ sum_union_test() ->
     %% An unknown tag and a malformed wire union are tagged errors.
     ?assertMatch({error, {value_does_not_match_type, _}}, t_types:encode_value({bogus, 1})),
     ?assertMatch({error, {invalid_union, _}}, t_types:decode_value(<<0>>)),
+    ok.
+
+%% `--repr native' (analyze/2 `#{repr => native}') materializes onto
+%% unannotated structs and exceptions: no record anywhere (module or
+%% hrl), record_fields carries {native, Tag}, the codec defaults to
+%% runtime-minted native records (OTP 29), the `record' axis answers
+%% {error, {no_record, Tag}} on every release, and unions keep their
+%% own axis.
+
+native_representation_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        "struct P { 1: i32 x = 5, 2: string label }\n"
+        "exception Oops { 1: string why }\n"
+        "union V { 1: i32 n }\n"
+    ),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded, #{repr => native}),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+
+    ?assertEqual({native, p}, t_types:record_fields(<<"P">>)),
+    ?assertEqual({native, oops}, t_types:record_fields(<<"Oops">>)),
+    ?assertEqual({v, [n]}, t_types:record_fields(<<"V">>)),
+    ?assertEqual(false, erlang:function_exported(t_types, p_from_map, 1)),
+    #{p := _} = t_types:tag_index(),
+
+    Hrl = entry_hrl(t_types, thrift_generator_emitter:sources(Model)),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(p,">>)),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-type p\\(\\)">>)),
+
+    {ok, Bin} = t_types:encode_p(#{x => 7, label => <<"hi">>}),
+    {ok, #{x := 7, label := <<"hi">>}} = t_types:decode_p(Bin, map),
+    ?assertEqual({error, {no_record, p}}, t_types:decode_p(Bin, record)),
+    case thrift_erl_native:supported() of
+        true ->
+            {ok, Native} = t_types:decode_p(Bin),
+            ?assertEqual(t_types, records:get_module(Native)),
+            ?assertEqual(p, records:get_name(Native)),
+            ?assertEqual(7, records:get(x, Native)),
+            ?assertEqual({ok, Bin}, t_types:encode_p(Native)),
+            ?assertEqual(
+                {ok, #{x => 7, label => <<"hi">>}},
+                t_types:convert(Native, map)
+            ),
+            ?assertEqual({error, {no_record, p}}, t_types:convert(Native, record));
+        false ->
+            ?assertEqual({error, {unsupported_repr, native}}, t_types:decode_p(Bin))
+    end,
+    ok.
+
+%% The repr option materializes onto unannotated structs and exceptions
+%% only: an explicit erl.struct_type wins, unions never take the
+%% injection, and `record' (the default) injects nothing.
+
+repr_option_test() ->
+    Snippet =
+        "struct Plain { 1: i32 x }\n"
+        "struct Ann { 1: i32 x } (erl.struct_type = \"record\")\n"
+        "union U { 1: i32 n }\n"
+        "exception E { 1: string m }\n",
+    Loaded = fun() ->
+        {ok, Doc} = thrift_generator:parse_string(Snippet),
+        [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}]
+    end,
+    Annotations = fun(Model) ->
+        [Mod] = Model#tg_model.modules,
+        maps:from_list([
+            {S#tg_struct.name, S#tg_struct.erl}
+         || S <- Mod#tg_module.structs
+        ])
+    end,
+
+    {ok, RecordModel} = thrift_generator_semantic:analyze(Loaded()),
+    #{<<"Plain">> := RecordPlain, <<"Ann">> := RecordAnn, <<"U">> := RecordU} = Annotations(
+        RecordModel
+    ),
+    ?assertEqual(false, maps:is_key(struct_type, RecordPlain)),
+    ?assertEqual(<<"record">>, maps:get(struct_type, RecordAnn)),
+    ?assertEqual(false, maps:is_key(struct_type, RecordU)),
+
+    {ok, MapModel} = thrift_generator_semantic:analyze(Loaded(), #{repr => map}),
+    #{<<"Plain">> := MapPlain, <<"Ann">> := MapAnn, <<"E">> := MapE, <<"U">> := MapU} = Annotations(
+        MapModel
+    ),
+    ?assertEqual(<<"map">>, maps:get(struct_type, MapPlain)),
+    ?assertEqual(<<"record">>, maps:get(struct_type, MapAnn)),
+    ?assertEqual(<<"map">>, maps:get(struct_type, MapE)),
+    ?assertEqual(false, maps:is_key(struct_type, MapU)),
+
+    {ok, NativeModel} = thrift_generator_semantic:analyze(Loaded(), #{repr => native}),
+    #{<<"Plain">> := NativePlain} = Annotations(NativeModel),
+    ?assertEqual(<<"native">>, maps:get(struct_type, NativePlain)),
     ok.
 
 namespace_set_default_test() ->

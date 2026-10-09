@@ -27,7 +27,7 @@ mismatches. All errors are collected as `{File, Line, Message}`
 triples before failing.
 """.
 
--export([analyze/1]).
+-export([analyze/1, analyze/2]).
 
 -export_type([sem_error/0]).
 
@@ -56,6 +56,10 @@ triples before failing.
     %% the file-wide union representation from the namespace's
     %% erl.union_type (record by default, tagged-tuple sums via "sum")
     union_default = record :: record | sum,
+    %% the invocation-wide representation for definitions without an
+    %% explicit erl.struct_type (the generator's --repr option; unions
+    %% keep their own axis and never take this injection)
+    repr_default = record :: record | map | native,
     all_defs = #{} :: #{binary() => #{binary() => def_kind()}},
     all_const_values = #{} :: #{binary() => #{binary() => const_value()}},
     all_enum_members = #{} :: #{binary() => #{binary() => [binary()]}},
@@ -69,12 +73,23 @@ Analyzes loaded documents (root first, as returned by the loader) into
 a model, or returns every validation error found.
 """.
 -spec analyze([#tg_loaded{}]) -> {ok, #tg_model{}} | {error, [sem_error()]}.
-analyze([Root | _] = Loaded) ->
+analyze(Loaded) ->
+    analyze(Loaded, #{}).
+
+-doc """
+Analyzes with invocation-wide options: `repr` (`record`, the default,
+`map` or `native`) is the representation generated for definitions
+without an explicit `erl.struct_type` annotation.
+""".
+-spec analyze([#tg_loaded{}], #{repr => record | map | native}) ->
+    {ok, #tg_model{}} | {error, [sem_error()]}.
+analyze([Root | _] = Loaded, Opts) ->
     Ctx0 = #ctx{
         all_defs = index_defs(Loaded, fun def_kind/1),
         all_const_values = index_defs(Loaded, fun const_value_of/1),
         all_enum_members = index_defs(Loaded, fun enum_members_of/1),
         all_typedefs = index_defs(Loaded, fun typedef_type_of/1),
+        repr_default = maps:get(repr, Opts, record),
         analyzed = #{}
     },
     {ModuleMap, Ctx} =
@@ -310,7 +325,7 @@ build_struct(Node, Kind, Acc, Ctx0) ->
         end,
     Line = Node#thrift_generator_node.line,
     {Fields, Ctx} = analyze_fields(FieldsRaw, Kind, Ctx0),
-    Erl = union_default_annotation(Node, Kind, Ctx),
+    Erl = struct_type_default(Kind, union_default_annotation(Node, Kind, Ctx), Ctx),
     Struct =
         #tg_struct{
             kind = Kind,
@@ -335,6 +350,27 @@ union_default_annotation(Node, Kind, Ctx) ->
         false -> Erl
     end.
 
+%% The invocation-wide representation (--repr) materializes onto every
+%% struct and exception without an explicit annotation, so the emitter
+%% keeps reading the plain annotation; `record' injects nothing — the
+%% annotation-free default stays the tuple record. Unions keep their own
+%% axis (erl.union_type) and never take this injection.
+
+-spec struct_type_default(struct | union | exception, erl_annotations(), #ctx{}) ->
+    erl_annotations().
+struct_type_default(union, Erl, _Ctx) ->
+    Erl;
+struct_type_default(_Kind, Erl, Ctx) ->
+    case Ctx#ctx.repr_default of
+        record ->
+            Erl;
+        Repr when Repr =:= map; Repr =:= native ->
+            case maps:is_key(struct_type, Erl) of
+                true -> Erl;
+                false -> Erl#{struct_type => atom_to_binary(Repr, utf8)}
+            end
+    end.
+
 %% The erl.* struct annotations drive the representation axis in the
 %% generated code; an unrecognized value would silently change meaning,
 %% so analysis rejects it. erl.union_type is a union-only annotation.
@@ -353,6 +389,7 @@ check_struct_annotations(S, Ctx0) ->
             undefined -> Ctx0;
             <<"map">> -> Ctx0;
             <<"record">> -> Ctx0;
+            <<"native">> -> Ctx0;
             Value -> err(S#tg_struct.line, "unknown erl.struct_type ~ts", [Value], Ctx0)
         end,
     Ctx2 =

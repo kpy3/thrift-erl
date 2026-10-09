@@ -37,7 +37,11 @@ paths the loader tracks.
 
 -export_type([generate_opts/0]).
 
--type generate_opts() :: #{}.
+%% The default value representation for definitions without an explicit
+%% `erl.struct_type' annotation (`record' injects nothing — the
+%% annotation-free default stays the tuple record). Unions keep their
+%% own axis (`erl.union_type').
+-type generate_opts() :: #{repr => record | map | native}.
 
 -doc """
 Full pipeline: load (with includes), semantic analysis, code emission,
@@ -45,23 +49,35 @@ write to `OutDir`.
 
 Writes one `<module>.erl` per generated module (types, and
 client/server/handler per service) and a `<mod>_types.hrl` next to
-every types module. `Opts` is reserved for future tuning; pass `#{}`.
+every types module. `Opts` understands `repr` — the representation
+generated for definitions without an explicit `erl.struct_type`
+annotation (`record`, the default, injects nothing; `map` and `native`
+inject their annotation the same way an explicit one would).
 Returns the generated modules with their paths (and the include path
 when one was written).
 """.
 -spec generate(file:filename_all(), file:filename_all(), generate_opts()) ->
     {ok, [#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]}
     | {error, term()}.
-generate(ThriftFile, OutDir, _Opts) ->
+generate(ThriftFile, OutDir, Opts) ->
     maybe
+        Repr ?= repr_opt(Opts),
         {ok, Loaded} ?= thrift_generator_loader:load(ThriftFile),
-        {ok, Model} ?= thrift_generator_semantic:analyze(Loaded),
+        {ok, Model} ?= thrift_generator_semantic:analyze(Loaded, #{repr => Repr}),
         ok ?= filelib:ensure_dir(filename:join(OutDir, "x")),
         write_all(thrift_generator_emitter:sources(Model), OutDir, [])
     else
         {error, Reason} -> {error, Reason};
         Other -> {error, Other}
     end.
+
+-spec repr_opt(term()) -> record | map | native.
+repr_opt(#{repr := Repr}) when Repr =:= record; Repr =:= map; Repr =:= native ->
+    Repr;
+repr_opt(#{} = Opts) when map_size(Opts) =:= 0 ->
+    record;
+repr_opt(Opts) ->
+    erlang:error({badarg, Opts}).
 
 write_all([#{module := Module, source := Source} = Entry | Rest], OutDir, Acc) ->
     Base = atom_to_list(Module),

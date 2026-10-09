@@ -159,8 +159,9 @@ Decodes the whole binary into a record with the binary protocol.
 
 Unlike the streaming `thrift_erl_binary:decode/2`, this is strict: a
 truncated input fails with `{error, truncated}`, trailing bytes with
-`{error, trailing}`. The `record` representation of a
-map-representation struct is its atom-keyed map.
+`{error, trailing}`. A map-representation or native-representation
+struct has no record to produce: `record` fails with
+`{error, {no_record, Name}}`.
 """.
 -spec decode(thrift_erl_binary:type_desc(), binary(), repr()) -> {ok, term()} | {error, term()}.
 decode(Desc, Binary, Repr) ->
@@ -191,17 +192,19 @@ decode(Desc, Binary, Repr, Protocol) ->
             Error
     end.
 
-%% A map-representation struct has no record to produce — `convert/3`
-%% answers `{error, {no_record, Tag}}` for the same input, so `decode`
-%% does too instead of silently returning an atom-keyed map. A sum
-%% union decodes into its tagged tuple under `record`; a malformed
-%% union on the wire (zero or several fields) is a data error, not a
-%% crash.
+%% A map-representation or native-representation struct has no record
+%% to produce — `convert/3' answers `{error, {no_record, Tag}}` for the
+%% same input, so `decode' does too instead of silently returning an
+%% atom-keyed map. A sum union decodes into its tagged tuple under
+%% `record'; a malformed union on the wire (zero or several fields) is a
+%% data error, not a crash.
 
 -spec decode_repr(thrift_erl_binary:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
 decode_repr(Desc, Value, record) ->
     case thrift_erl_record:repr_mode(Desc) of
         {map, _} ->
+            {error, {no_record, struct_tag(Desc)}};
+        {native, _} ->
             {error, {no_record, struct_tag(Desc)}};
         _Mode ->
             from_wire_repr(Desc, Value, record)
@@ -243,15 +246,16 @@ repr_supported(Repr) ->
     {error, {bad_repr, Repr}}.
 
 -doc """
-Reshapes a typed value (record or struct-map, nested structures
-included) into `Repr`, without encoding bytes.
+Reshapes a typed value (record, struct-map or native record, nested
+structures included) into `Repr`, without encoding bytes.
 
-`Value` carries its own identity — a record tag or the `__struct__`
-key — which is looked up in `TagIndex` (the `TagIndex/0` export of
-generated types modules). Unknown tags and values without identity
-crash: this function is for values the caller knows to be service
-structs. The `record` representation of a map-representation struct
-answers `{error, {no_record, Tag}}` — there is no record to produce.
+`Value` carries its own identity — a record tag, the `__struct__` key
+or the native record's module/name — which is looked up in `TagIndex`
+(the `TagIndex/0` export of generated types modules). Unknown tags and
+values without identity crash: this function is for values the caller
+knows to be service structs. The `record` representation of a
+map-representation or native-representation struct answers
+`{error, {no_record, Tag}}` — there is no record to produce.
 """.
 -spec convert(tag_index(), term(), repr()) -> {ok, term()} | {error, term()}.
 convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
@@ -314,7 +318,21 @@ protocol_module(Other) ->
 %% the __struct__ key of an Elixir-style map.
 
 -spec value_tag(term()) -> atom().
-value_tag(Value) when is_tuple(Value), is_atom(element(1, Value)) ->
+value_tag(Value) ->
+    %% A native record carries its identity inside (module and name),
+    %% not in element(1); its tag is the record name — the same
+    %% snake-cased struct name `tag_index/0' keys native-representation
+    %% structs by.
+    case thrift_erl_native:is_native(Value) of
+        true ->
+            {_, Name, _} = thrift_erl_native:fields(Value),
+            Name;
+        false ->
+            tuple_or_struct_tag(Value)
+    end.
+
+-spec tuple_or_struct_tag(term()) -> atom().
+tuple_or_struct_tag(Value) when is_tuple(Value), is_atom(element(1, Value)) ->
     element(1, Value);
-value_tag(#{'__struct__' := Tag}) when is_atom(Tag) ->
+tuple_or_struct_tag(#{'__struct__' := Tag}) when is_atom(Tag) ->
     Tag.

@@ -80,6 +80,7 @@ the codecs answer with.
     {record, atom(), [atom()]}
     | {map, atom() | binary()}
     | {sum, [atom()]}
+    | {native, atom()}
     | wire.
 
 %%--------------------------------------------------------------------
@@ -161,15 +162,17 @@ exception_type(Name, Exceptions) ->
 -doc """
 The representation of a struct descriptor's values: `record` for
 tuple records, `{map, KeyType}` for map-representation structs, `sum`
-for tagged-tuple unions, `wire` when values pass through unchanged
-(inline descriptors and hand-written modules without `record_fields/1`).
+for tagged-tuple unions, `{native, Tag}` for native-record structs,
+`wire` when values pass through unchanged (inline descriptors and
+hand-written modules without `record_fields/1`).
 """.
--spec repr_mode(type_desc()) -> record | {map, atom | binary} | sum | wire.
+-spec repr_mode(type_desc()) -> record | {map, atom | binary} | {native, atom} | sum | wire.
 repr_mode({struct, {ref, Module, Name}}) ->
     case struct_mode(Module, Name) of
         {record, _, _} -> record;
         {map, KeyType} -> {map, KeyType};
         {sum, _} -> sum;
+        {native, Tag} -> {native, Tag};
         wire -> wire
     end;
 repr_mode(_) ->
@@ -197,6 +200,14 @@ unknown_fields({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
                 none,
                 [NameBin || {_, _, _, NameBin, _} <- Fields] ++
                     [field_atom(NameBin) || {_, _, _, NameBin, _} <- Fields, KeyType =:= atom]
+            );
+        {native, _Tag} ->
+            Fields = struct_fields(Module, Name),
+            dropped_keys(
+                maps:remove('__struct__', Value),
+                none,
+                [NameBin || {_, _, _, NameBin, _} <- Fields] ++
+                    [field_atom(NameBin) || {_, _, _, NameBin, _} <- Fields]
             );
         wire ->
             none;
@@ -236,6 +247,7 @@ to_wire({struct, {ref, Module, Name}}, Value) ->
                 {record, Tag, FieldAtoms} -> record_to_wire(Module, Name, Tag, FieldAtoms, Value);
                 {map, KeyType} -> map_mode_to_wire(Module, Name, KeyType, Value);
                 {sum, _FieldAtoms} -> sum_to_wire(struct_fields(Module, Name), Value);
+                {native, _Tag} -> native_map_to_wire(Module, Name, Value);
                 wire -> Value
             end
     end;
@@ -315,6 +327,15 @@ from_wire({struct, {ref, Module, Name}}, Value, Repr) when is_map(Value) ->
             end;
         {sum, _FieldAtoms} ->
             sum_from_wire(struct_fields(Module, Name), Value, Repr);
+        {native, Tag} ->
+            case Repr of
+                %% No tuple record exists for a native-mode struct: the
+                %% `record' axis answers its atom-keyed map (the facade
+                %% reports {error, {no_record, _}} before reaching here).
+                record -> map_mode_from_wire(struct_fields(Module, Name), atom, Value);
+                map -> wire_to_atom_map(struct_fields(Module, Name), Value);
+                struct -> wire_to_struct_map(Tag, struct_fields(Module, Name), Value)
+            end;
         wire ->
             Value
     end;
@@ -351,6 +372,7 @@ struct_mode(Module, Name) ->
         {sum, Fields} when is_list(Fields) -> {sum, Fields};
         {Tag, Fields} when is_atom(Tag), is_list(Fields) -> {record, Tag, Fields};
         {map, KeyType} when KeyType =:= atom; KeyType =:= binary -> {map, KeyType};
+        {native, Tag} when is_atom(Tag) -> {native, Tag};
         none -> wire
     catch
         %% Hand-written descriptor targets may not export record_fields
@@ -415,6 +437,20 @@ native_lookup(Atom, FieldMap) ->
         #{Atom := V} -> {ok, V};
         _ -> none
     end.
+
+%% A native-mode struct declares no tuple record, so the map input is
+%% the only non-native shape: field atoms and wire names both normalize
+%% (the `__struct__' key is identity metadata, same as record mode).
+
+-spec native_map_to_wire(module(), binary(), term()) -> map().
+native_map_to_wire(Module, Name, Value) when is_map(Value) ->
+    Fields = struct_fields(Module, Name),
+    declared_to_wire(
+        [{Field, field_atom(NameBin)} || Field = {_, _, _, NameBin, _} <- Fields],
+        maps:remove('__struct__', Value)
+    );
+native_map_to_wire(_Module, _Name, Value) ->
+    erlang:error({value_does_not_match_type, Value}).
 
 %% Walks the declared fields, accepting either the binary field name or
 %% its generated field atom as the input key.
