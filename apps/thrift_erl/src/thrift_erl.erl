@@ -71,7 +71,9 @@ and `thrift_erl_server`.
 -type tag_index() :: #{atom() => thrift_erl_protocol:type_desc()}.
 
 %% The thrift_erl_protocol callback set a custom protocol module must
-%% export.
+%% export. Kept by hand in sync with the -callback attributes of
+%% thrift_erl_protocol — there is no cheap way to derive one list from
+%% the other at compile time.
 -define(PROTOCOL_CALLBACKS, [
     {encode, 2},
     {decode, 2},
