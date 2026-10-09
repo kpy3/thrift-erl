@@ -37,6 +37,7 @@
     struct_codec_test/0,
     enum_and_const_helpers_test/0,
     set_annotation_test/0,
+    sum_union_test/0,
     namespace_set_default_test/0,
     namespace_prefix_test/0,
     doc_pipeline_test/0
@@ -63,6 +64,13 @@
     "const i32 BASE = 10\n"
     "const string GREETING = \"hi\"\n"
     "service Svc { void ping() }\n"
+).
+
+-define(SUM_SNIPPET,
+    "namespace erl t (erl.union_type = \"sum\")\n"
+    "union Value { 1: i64 int_val, 2: string str_val, 3: Inner nested }\n"
+    "union Legacy { 1: i64 n } (erl.union_type = \"record\")\n"
+    "struct Inner { 1: string name }\n"
 ).
 
 -define(DOC_SNIPPET,
@@ -345,6 +353,47 @@ set_annotation_test() ->
 %% sets compile to the default impl, an explicit type-level annotation
 %% wins, and a set field's record default builds the declared
 %% collection instead of the wire-shaped literal.
+
+%% erl.union_type = "sum" turns unions into tagged-tuple sums: no
+%% record, the hrl alias is the type, record_fields carries {sum, Atoms}
+%% and convert/2 indexes the union by its field atoms. The wire stays
+%% the standard single-field struct.
+
+sum_union_test() ->
+    {ok, Doc} = thrift_generator:parse_string(?SUM_SNIPPET),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+
+    ?assertEqual({sum, [int_val, str_val, nested]}, t_types:record_fields(<<"Value">>)),
+    ?assertEqual({legacy, [n]}, t_types:record_fields(<<"Legacy">>)),
+    #{int_val := {struct, {ref, t_types, <<"Value">>}}} = t_types:tag_index(),
+
+    Hrl = entry_hrl(t_types, thrift_generator_emitter:sources(Model)),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-type value\\(\\) ::">>)),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(value,">>)),
+
+    {ok, Bin} = t_types:encode_value({str_val, <<"hi">>}),
+    {ok, {str_val, <<"hi">>}} = t_types:decode_value(Bin),
+    {ok, NestedBin} = t_types:encode_value({nested, {inner, <<"n">>}}),
+    {ok, {nested, {inner, <<"n">>}}} = t_types:decode_value(NestedBin),
+
+    %% convert/2 reshapes the payload; the tagged tuple survives every
+    %% representation axis.
+    ?assertEqual({ok, {int_val, 7}}, t_types:convert({int_val, 7}, record)),
+    {ok, {nested, Payload}} = t_types:convert({nested, {inner, <<"n">>}}, map),
+    ?assertEqual(#{name => <<"n">>}, Payload),
+
+    %% An unknown tag and a malformed wire union are tagged errors.
+    ?assertMatch({error, {value_does_not_match_type, _}}, t_types:encode_value({bogus, 1})),
+    ?assertMatch({error, {invalid_union, _}}, t_types:decode_value(<<0>>)),
+    ok.
 
 namespace_set_default_test() ->
     {ok, Doc} = thrift_generator:parse_string(

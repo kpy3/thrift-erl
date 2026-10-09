@@ -26,6 +26,9 @@ representation through `Module:record_fields(Name)`:
   the definitions generated into `<mod>_types.erl`;
 - `{map, KeyType}` — maps with `KeyType` (`atom` | `binary`) keys, the
   `erl.struct_type = "map"` representation;
+- `{sum, [FieldAtoms]}` — sum unions (`erl.union_type = "sum"`):
+  `{FieldAtom, Value}` tagged tuples, exactly one variant by
+  construction;
 - `none`, or no `record_fields` export at all — hand-written
   descriptors: values pass through unchanged, assumed already wire.
 
@@ -73,7 +76,11 @@ the codecs answer with.
 -type exception_field() :: field_desc().
 
 %% How a struct-ref descriptor target represents its values.
--type mode() :: {record, atom(), [atom()]} | {map, atom() | binary()} | wire.
+-type mode() ::
+    {record, atom(), [atom()]}
+    | {map, atom() | binary()}
+    | {sum, [atom()]}
+    | wire.
 
 %%--------------------------------------------------------------------
 %% Argument lists (client → wire, wire → server handler)
@@ -153,15 +160,16 @@ exception_type(Name, Exceptions) ->
 
 -doc """
 The representation of a struct descriptor's values: `record` for
-tuple records, `{map, KeyType}` for map-representation structs,
-`wire` when values pass through unchanged (inline descriptors and
-hand-written modules without `record_fields/1`).
+tuple records, `{map, KeyType}` for map-representation structs, `sum`
+for tagged-tuple unions, `wire` when values pass through unchanged
+(inline descriptors and hand-written modules without `record_fields/1`).
 """.
--spec repr_mode(type_desc()) -> record | {map, atom | binary} | wire.
+-spec repr_mode(type_desc()) -> record | {map, atom | binary} | sum | wire.
 repr_mode({struct, {ref, Module, Name}}) ->
     case struct_mode(Module, Name) of
         {record, _, _} -> record;
         {map, KeyType} -> {map, KeyType};
+        {sum, _} -> sum;
         wire -> wire
     end;
 repr_mode(_) ->
@@ -191,6 +199,8 @@ unknown_fields({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
                     [field_atom(NameBin) || {_, _, _, NameBin, _} <- Fields, KeyType =:= atom]
             );
         wire ->
+            none;
+        _Mode ->
             none
     end;
 unknown_fields(_Desc, _Value) ->
@@ -225,6 +235,7 @@ to_wire({struct, {ref, Module, Name}}, Value) ->
             case struct_mode(Module, Name) of
                 {record, Tag, FieldAtoms} -> record_to_wire(Module, Name, Tag, FieldAtoms, Value);
                 {map, KeyType} -> map_mode_to_wire(Module, Name, KeyType, Value);
+                {sum, _FieldAtoms} -> sum_to_wire(struct_fields(Module, Name), Value);
                 wire -> Value
             end
     end;
@@ -273,6 +284,8 @@ from_wire({struct, {ref, Module, Name}}, Value, native) when is_map(Value) ->
     case struct_mode(Module, Name) of
         wire ->
             Value;
+        {sum, _FieldAtoms} ->
+            sum_from_wire(struct_fields(Module, Name), Value, native);
         _Mode ->
             FieldValues = [
                 {
@@ -300,6 +313,8 @@ from_wire({struct, {ref, Module, Name}}, Value, Repr) when is_map(Value) ->
                 map -> wire_to_atom_map(struct_fields(Module, Name), Value);
                 struct -> wire_to_struct_map(record_tag(Name), struct_fields(Module, Name), Value)
             end;
+        {sum, _FieldAtoms} ->
+            sum_from_wire(struct_fields(Module, Name), Value, Repr);
         wire ->
             Value
     end;
@@ -333,6 +348,7 @@ from_wire(_Type, Value, _Repr) ->
 -spec struct_mode(module(), binary()) -> mode().
 struct_mode(Module, Name) ->
     try Module:record_fields(Name) of
+        {sum, Fields} when is_list(Fields) -> {sum, Fields};
         {Tag, Fields} when is_atom(Tag), is_list(Fields) -> {record, Tag, Fields};
         {map, KeyType} when KeyType =:= atom; KeyType =:= binary -> {map, KeyType};
         none -> wire
@@ -444,6 +460,47 @@ map_mode_to_wire(Module, Name, KeyType, Value) when is_map(Value) ->
     declared_to_wire(FieldsZip, Value);
 map_mode_to_wire(_Module, _Name, _KeyType, Value) ->
     erlang:error({value_does_not_match_type, Value}).
+
+%%--------------------------------------------------------------------
+%% sum unions: {FieldAtom, Value} -> wire, wire -> {FieldAtom, Value}
+%%--------------------------------------------------------------------
+
+%% The tagged tuple IS the whole invariant: the input is a two-tuple
+%% whose tag names a declared field, so a union value can never be
+%% empty or carry two variants. The wire form is the same single-field
+%% struct map every representation shares.
+
+-spec sum_to_wire([field_desc()], term()) -> map().
+sum_to_wire(Fields, {Tag, Value}) when is_atom(Tag) ->
+    sum_field(Fields, Tag, Value);
+sum_to_wire(_Fields, Value) ->
+    erlang:error({value_does_not_match_type, Value}).
+
+-spec sum_field([field_desc()], atom(), term()) -> map().
+sum_field([], Tag, _Value) ->
+    erlang:error({value_does_not_match_type, Tag});
+sum_field([{_, _, Type, NameBin, _} | RestFields], Tag, Value) ->
+    case field_atom(NameBin) =:= Tag of
+        true -> #{NameBin => to_wire(Type, Value)};
+        false -> sum_field(RestFields, Tag, Value)
+    end.
+
+%% The wire of a sum union must carry exactly one declared field: zero
+%% or several, or a key matching nothing, is a malformed union — the
+%% representation cannot express it, so it is a hard error (the facade
+%% turns it into `{error, {invalid_union, Map}}').
+
+-spec sum_from_wire([field_desc()], map(), thrift_erl:repr()) -> {atom(), term()}.
+sum_from_wire(Fields, WireMap, Repr) when map_size(WireMap) =:= 1 ->
+    [NameBin] = maps:keys(WireMap),
+    case lists:keyfind(NameBin, 4, Fields) of
+        {_, _, Type, NameBin, _} ->
+            {field_atom(NameBin), from_wire(Type, maps:get(NameBin, WireMap), Repr)};
+        false ->
+            erlang:error({invalid_union, WireMap})
+    end;
+sum_from_wire(_Fields, WireMap, _Repr) ->
+    erlang:error({invalid_union, WireMap}).
 
 %%--------------------------------------------------------------------
 %% wire -> record | map | struct

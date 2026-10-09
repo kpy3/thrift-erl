@@ -35,6 +35,12 @@ of struct values:
   than 29 answer `{error, {unsupported_repr, native}}` from `decode`
   and `convert`.
 
+Sum unions (`erl.union_type = "sum"`) are their own representation:
+the value is a `{FieldAtom, Value}` tuple — one variant by
+construction — unchanged across all four axes (only the nested
+payloads convert). A wire union with zero or several set fields is
+malformed and answers `{error, {invalid_union, Map}}`.
+
 `encode/2,3` accepts any representation on input and auto-detects it;
 `decode/3,4` produces the requested one. `convert/3` reshapes typed
 values without touching bytes: pass the tag index emitted by the
@@ -187,18 +193,29 @@ decode(Desc, Binary, Repr, Protocol) ->
 
 %% A map-representation struct has no record to produce — `convert/3`
 %% answers `{error, {no_record, Tag}}` for the same input, so `decode`
-%% does too instead of silently returning an atom-keyed map.
+%% does too instead of silently returning an atom-keyed map. A sum
+%% union decodes into its tagged tuple under `record`; a malformed
+%% union on the wire (zero or several fields) is a data error, not a
+%% crash.
 
 -spec decode_repr(thrift_erl_binary:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
 decode_repr(Desc, Value, record) ->
     case thrift_erl_record:repr_mode(Desc) of
         {map, _} ->
             {error, {no_record, struct_tag(Desc)}};
-        _ ->
-            {ok, thrift_erl_record:from_wire(Desc, Value, record)}
+        _Mode ->
+            from_wire_repr(Desc, Value, record)
     end;
 decode_repr(Desc, Value, Repr) ->
-    {ok, thrift_erl_record:from_wire(Desc, Value, Repr)}.
+    from_wire_repr(Desc, Value, Repr).
+
+-spec from_wire_repr(thrift_erl_binary:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
+from_wire_repr(Desc, Value, Repr) ->
+    try
+        {ok, thrift_erl_record:from_wire(Desc, Value, Repr)}
+    catch
+        error:{invalid_union, Map} -> {error, {invalid_union, Map}}
+    end.
 
 %% The tag a struct value carries for this descriptor: the snake-cased
 %% wire name of map-mode structs (the same rule `tag_index/0` follows).
@@ -246,16 +263,18 @@ convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
     case Repr of
         record ->
             case thrift_erl_record:repr_mode(Desc) of
-                record -> {ok, thrift_erl_record:from_wire(Desc, Wire, record)};
-                _ -> {error, {no_record, Tag}}
+                Record when Record =:= record; Record =:= sum ->
+                    from_wire_repr(Desc, Wire, record);
+                _ ->
+                    {error, {no_record, Tag}}
             end;
         map ->
-            {ok, thrift_erl_record:from_wire(Desc, Wire, map)};
+            from_wire_repr(Desc, Wire, map);
         struct ->
-            {ok, thrift_erl_record:from_wire(Desc, Wire, struct)};
+            from_wire_repr(Desc, Wire, struct);
         native ->
             case thrift_erl_native:supported() of
-                true -> {ok, thrift_erl_record:from_wire(Desc, Wire, native)};
+                true -> from_wire_repr(Desc, Wire, native);
                 false -> {error, {unsupported_repr, native}}
             end
     end.

@@ -53,6 +53,9 @@ triples before failing.
     file = undefined :: binary() | undefined,
     %% the file-wide set implementation from the namespace's erl.set
     set_default = list :: list | sets | ordset,
+    %% the file-wide union representation from the namespace's
+    %% erl.union_type (record by default, tagged-tuple sums via "sum")
+    union_default = record :: record | sum,
     all_defs = #{} :: #{binary() => #{binary() => def_kind()}},
     all_const_values = #{} :: #{binary() => #{binary() => const_value()}},
     all_enum_members = #{} :: #{binary() => #{binary() => [binary()]}},
@@ -157,7 +160,7 @@ typedef_type_of(_) -> skip.
 
 -spec analyze_module(#tg_loaded{}, #ctx{}) -> {#tg_module{}, #ctx{}}.
 analyze_module(Loaded, Ctx00) ->
-    Ctx0 = namespace_set_default(Loaded, Ctx00),
+    Ctx0 = namespace_union_default(Loaded, namespace_set_default(Loaded, Ctx00)),
     Defs = definitions(Loaded),
     Ctx1 = check_duplicates(Defs, Ctx0),
     {Structs, Ctx2} = lists:foldl(fun analyze_struct/2, {[], Ctx1}, Defs),
@@ -191,7 +194,17 @@ check_generated_names(Module, Ctx) ->
     EnumPrefixes = [{thrift_generator_names:snake(E#tg_enum.name), E#tg_enum.line} || E <- Module#tg_module.enums],
     Ctx1 = check_flat_clashes(StructTags, "record tag", Ctx),
     Ctx2 = check_flat_clashes(EnumPrefixes, "enum helper prefix", Ctx1),
-    check_const_clashes(Module, Ctx2).
+    %% Sum unions index convert/2 by their field atoms; two unions
+    %% claiming one atom would make the lookup ambiguous.
+    SumFields = [
+        {F#tg_field.name, S#tg_struct.line}
+     || S <- Module#tg_module.structs,
+        S#tg_struct.kind =:= union,
+        maps:get(union_type, S#tg_struct.erl, <<"record">>) =:= <<"sum">>,
+        F <- S#tg_struct.fields
+    ],
+    Ctx3 = check_flat_clashes(SumFields, "sum union field", Ctx2),
+    check_const_clashes(Module, Ctx3).
 
 -spec check_flat_clashes([{binary(), non_neg_integer()}], string(), #ctx{}) -> #ctx{}.
 check_flat_clashes(Pairs, What, Ctx) ->
@@ -297,21 +310,40 @@ build_struct(Node, Kind, Acc, Ctx0) ->
         end,
     Line = Node#thrift_generator_node.line,
     {Fields, Ctx} = analyze_fields(FieldsRaw, Kind, Ctx0),
+    Erl = union_default_annotation(Node, Kind, Ctx),
     Struct =
         #tg_struct{
             kind = Kind,
             name = Name,
             fields = Fields,
-            erl = Node#thrift_generator_node.annotations,
+            erl = Erl,
             doc = Node#thrift_generator_node.doc,
             line = Line
         },
     Ctx1 = check_struct_annotations(Struct, Ctx),
     {[Struct | Acc], Ctx1}.
 
+%% The file-wide union representation (the namespace header's
+%% erl.union_type) is materialized onto every union without an explicit
+%% annotation, so the emitter keeps reading the plain annotation.
+
+-spec union_default_annotation(ast_node(), struct | union | exception, #ctx{}) -> erl_annotations().
+union_default_annotation(Node, Kind, Ctx) ->
+    Erl = Node#thrift_generator_node.annotations,
+    case Kind =:= union andalso Ctx#ctx.union_default =:= sum andalso not maps:is_key(union_type, Erl) of
+        true -> Erl#{union_type => <<"sum">>};
+        false -> Erl
+    end.
+
 %% The erl.* struct annotations drive the representation axis in the
 %% generated code; an unrecognized value would silently change meaning,
-%% so analysis rejects it.
+%% so analysis rejects it. erl.union_type is a union-only annotation.
+
+-spec union_type_kind(#tg_struct{}, #ctx{}) -> #ctx{}.
+union_type_kind(#tg_struct{kind = union}, Ctx) ->
+    Ctx;
+union_type_kind(S, Ctx) ->
+    err(S#tg_struct.line, "erl.union_type belongs on a union", [], Ctx).
 
 -spec check_struct_annotations(#tg_struct{}, #ctx{}) -> #ctx{}.
 check_struct_annotations(S, Ctx0) ->
@@ -323,23 +355,37 @@ check_struct_annotations(S, Ctx0) ->
             <<"record">> -> Ctx0;
             Value -> err(S#tg_struct.line, "unknown erl.struct_type ~ts", [Value], Ctx0)
         end,
+    Ctx2 =
+        case maps:get(union_type, Erl, undefined) of
+            undefined ->
+                Ctx1;
+            UnionType when UnionType =:= <<"sum">>; UnionType =:= <<"record">> ->
+                union_type_kind(S, Ctx1);
+            UnionType ->
+                err(
+                    S#tg_struct.line,
+                    "unknown erl.union_type ~ts (expected \"record\" or \"sum\")",
+                    [UnionType],
+                    Ctx1
+                )
+        end,
     case maps:get('struct_type.map.key_type', Erl, undefined) of
         undefined ->
-            Ctx1;
+            Ctx2;
         KeyType when KeyType =:= <<"atom">>; KeyType =:= <<"binary">> ->
             case maps:get(struct_type, Erl, undefined) of
                 <<"map">> ->
-                    Ctx1;
+                    Ctx2;
                 _ ->
                     err(
                         S#tg_struct.line,
                         "erl.struct_type.map.key_type requires erl.struct_type = \"map\"",
                         [],
-                        Ctx1
+                        Ctx2
                     )
             end;
         KeyType ->
-            err(S#tg_struct.line, "unknown erl.struct_type.map.key_type ~ts", [KeyType], Ctx1)
+            err(S#tg_struct.line, "unknown erl.struct_type.map.key_type ~ts", [KeyType], Ctx2)
     end.
 
 %% Field conversion shared by structs/unions/exceptions and function
@@ -923,18 +969,40 @@ namespace_set_default(Loaded, Ctx) ->
             apply_namespace_set_default(Found, Ctx)
     end.
 
--spec namespace_set_annotation([ast_node()], binary()) -> {ast_node(), binary()} | undefined.
-namespace_set_annotation(Headers, Scope) ->
+%% The erl.union_type annotation on the namespace header is the
+%% file-wide union representation ("record", the default, or "sum" —
+%% tagged tuples instead of records); explicit per-union annotations
+%% win, everything else mirrors erl.set.
+
+-spec namespace_union_default(#tg_loaded{}, #ctx{}) -> #ctx{}.
+namespace_union_default(Loaded, Ctx) ->
+    Headers = (Loaded#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.headers,
+    case namespace_annotation(Headers, <<"erl">>, union_type) of
+        undefined ->
+            case namespace_annotation(Headers, <<"*">>, union_type) of
+                undefined -> Ctx;
+                Found -> apply_namespace_union_default(Found, Ctx)
+            end;
+        Found ->
+            apply_namespace_union_default(Found, Ctx)
+    end.
+
+-spec namespace_annotation([ast_node()], binary(), atom()) -> {ast_node(), binary()} | undefined.
+namespace_annotation(Headers, Scope, Key) ->
     Candidates = [
-        {Node, maps:get(set, Node#thrift_generator_node.annotations)}
+        {Node, maps:get(Key, Node#thrift_generator_node.annotations)}
      || Node <- Headers,
         namespace_scope_is(Node, Scope),
-        maps:is_key(set, Node#thrift_generator_node.annotations)
+        maps:is_key(Key, Node#thrift_generator_node.annotations)
     ],
     case Candidates of
         [Found | _] -> Found;
         [] -> undefined
     end.
+
+-spec namespace_set_annotation([ast_node()], binary()) -> {ast_node(), binary()} | undefined.
+namespace_set_annotation(Headers, Scope) ->
+    namespace_annotation(Headers, Scope, set).
 
 -spec namespace_scope_is(ast_node(), binary()) -> boolean().
 namespace_scope_is(Node, Scope) ->
@@ -952,6 +1020,19 @@ apply_namespace_set_default({Node, Other}, Ctx) ->
     err(
         Node#thrift_generator_node.line,
         "unknown erl.set ~ts (expected \"sets\" or \"ordset\")",
+        [Other],
+        Ctx
+    ).
+
+-spec apply_namespace_union_default({ast_node(), binary()}, #ctx{}) -> #ctx{}.
+apply_namespace_union_default({_Node, <<"record">>}, Ctx) ->
+    Ctx#ctx{union_default = record};
+apply_namespace_union_default({_Node, <<"sum">>}, Ctx) ->
+    Ctx#ctx{union_default = sum};
+apply_namespace_union_default({Node, Other}, Ctx) ->
+    err(
+        Node#thrift_generator_node.line,
+        "unknown erl.union_type ~ts (expected \"record\" or \"sum\")",
         [Other],
         Ctx
     ).

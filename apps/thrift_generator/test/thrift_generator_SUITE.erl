@@ -168,7 +168,7 @@ parse_erlang_thrift_test_idl(Config) ->
     ?assertEqual(<<"atom">>, maps:get('struct_type.map.key_type', Bonk#thrift_generator_node.annotations)),
 
     SomeUnion = find_definition(Definitions, thrift_generator_union, <<"SomeUnion">>),
-    ?assertEqual(#{union_type => <<"union">>}, SomeUnion#thrift_generator_node.annotations),
+    ?assertEqual(#{union_type => <<"sum">>}, SomeUnion#thrift_generator_node.annotations),
 
     ok.
 
