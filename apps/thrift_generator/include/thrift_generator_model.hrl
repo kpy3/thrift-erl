@@ -130,6 +130,21 @@
     modules :: [#tg_module{}]
 }).
 
+%% The emitter's cross-module resolution context: the loaded modules by
+%% name, the emitted types-module atoms, and the module whose
+%% definitions are being emitted (reference resolution scope). Shared by
+%% the core emitter and the service emitter.
+
+-type module_key() :: binary().
+
+-record(ectx, {
+    %% binary module name -> #tg_module{}
+    modules :: #{module_key() => #tg_module{}},
+    %% binary module name -> emitted types module atom
+    type_modules :: #{module_key() => module()},
+    current :: undefined | module_key()
+}).
+
 %% One entry handed from the loader to the semantic pass.
 -record(tg_loaded, {
     name :: binary(),
