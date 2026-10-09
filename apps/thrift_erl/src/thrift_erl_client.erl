@@ -261,7 +261,7 @@ handle_info({tcp_closed, _Socket}, State) ->
     abort(closed, State);
 handle_info({tcp_error, _Socket, Reason}, State) ->
     abort(Reason, State);
-handle_info(ssl_closed, State) ->
+handle_info({ssl_closed, _Socket}, State) ->
     abort(closed, State);
 handle_info({ssl_error, _Socket, Reason}, State) ->
     abort(Reason, State);

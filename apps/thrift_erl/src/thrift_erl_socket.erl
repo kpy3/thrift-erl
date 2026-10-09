@@ -31,7 +31,9 @@ Two framing modes, mirroring the classic Thrift transports:
 - `buffered` — raw byte stream; message boundaries come from the
   protocol itself: `extract_message/4` probes the envelope and payload
   struct with the protocol module's decode functions, which answer
-  `more` while the input is a truncated but valid encoding.
+  `more` while the input is a truncated but valid encoding; a
+  truncated message that grows past `max_frame_size` is rejected, the
+  same bound framed mode applies to the length prefix.
 - `http` — each Thrift message rides as the body of one HTTP/1.1
   exchange; `thrift_erl_http` provides the framing (requests on the
   server, responses on the client) with the same `more` semantics, and
@@ -102,7 +104,7 @@ extract_message(Buffer, framed, _ProtocolMod, MaxFrameSize) ->
         _ ->
             more
     end;
-extract_message(Buffer, buffered, ProtocolMod, _MaxFrameSize) ->
+extract_message(Buffer, buffered, ProtocolMod, MaxFrameSize) ->
     case ProtocolMod:decode_message(Buffer) of
         {ok, _Type, _Name, _SeqId, Tail} ->
             %% Decoding a descriptor with no fields makes every wire
@@ -111,17 +113,34 @@ extract_message(Buffer, buffered, ProtocolMod, _MaxFrameSize) ->
             case ProtocolMod:decode({struct, {struct, []}}, Tail) of
                 {ok, _Skipped, Leftover} ->
                     Consumed = byte_size(Buffer) - byte_size(Leftover),
-                    {ok, binary:part(Buffer, 0, Consumed), Leftover};
+                    case Consumed =< MaxFrameSize of
+                        true ->
+                            {ok, binary:part(Buffer, 0, Consumed), Leftover};
+                        false ->
+                            {error, frame_too_large}
+                    end;
                 more ->
-                    more;
+                    more_capped(Buffer, MaxFrameSize);
                 {error, Reason} ->
                     {error, {bad_frame, Reason}}
             end;
         more ->
-            more;
+            more_capped(Buffer, MaxFrameSize);
         {error, Reason} ->
             {error, {bad_frame, Reason}}
     end.
+
+%% `more` on an incomplete message: the buffer may only grow up to
+%% max_frame_size — the same bound framed mode applies to the length
+%% prefix. At this point the buffer holds an incomplete head message
+%% (a complete one would have been extracted), so a buffer past the
+%% cap means the message itself never fits.
+
+-spec more_capped(binary(), pos_integer()) -> more | {error, frame_too_large}.
+more_capped(Buffer, MaxFrameSize) when byte_size(Buffer) > MaxFrameSize ->
+    {error, frame_too_large};
+more_capped(_Buffer, _MaxFrameSize) ->
+    more.
 
 %%--------------------------------------------------------------------
 %% Listening and connecting

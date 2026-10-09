@@ -183,7 +183,7 @@ init(Opts) ->
 handle_call({call, _Function, _Args, _Timeout}, _From, #state{child = undefined} = State) ->
     {reply, {error, disconnected}, State#state{calls_failed = State#state.calls_failed + 1}};
 handle_call({call, Function, Args, Timeout}, _From, #state{child = Child} = State) ->
-    case thrift_erl_client:call(Child, Function, Args, Timeout) of
+    case child_call(fun() -> thrift_erl_client:call(Child, Function, Args, Timeout) end) of
         {ok, Reply} ->
             {reply, {ok, Reply}, State#state{calls_ok = State#state.calls_ok + 1}};
         {error, Reason} ->
@@ -192,7 +192,7 @@ handle_call({call, Function, Args, Timeout}, _From, #state{child = Child} = Stat
 handle_call({oneway, _Function, _Args, _Timeout}, _From, #state{child = undefined} = State) ->
     {reply, {error, disconnected}, State#state{calls_failed = State#state.calls_failed + 1}};
 handle_call({oneway, Function, Args, Timeout}, _From, #state{child = Child} = State) ->
-    case thrift_erl_client:oneway(Child, Function, Args, Timeout) of
+    case child_call(fun() -> thrift_erl_client:oneway(Child, Function, Args, Timeout) end) of
         ok ->
             {reply, ok, State#state{calls_ok = State#state.calls_ok + 1}};
         {error, Reason} ->
@@ -246,6 +246,18 @@ terminate(_Reason, #state{child = Child}) ->
 %%--------------------------------------------------------------------
 %% Connect and backoff
 %%--------------------------------------------------------------------
+
+%% A child dying mid-call exits the gen_server:call in this process
+%% (the monitor inside the call sees the death first); the wrapper must
+%% outlive it and answer the caller — the 'DOWN' handler reconnects.
+
+-spec child_call(fun(() -> R)) -> R | {error, disconnected}.
+child_call(Fun) ->
+    try
+        Fun()
+    catch
+        exit:_Reason:_Stack -> {error, disconnected}
+    end.
 
 -spec connect(#state{}) -> #state{}.
 connect(#state{protocol = Protocol} = State) ->

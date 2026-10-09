@@ -226,7 +226,7 @@ handle_info({tcp_closed, _Socket}, State) ->
     {stop, normal, State};
 handle_info({tcp_error, _Socket, Reason}, State) ->
     {stop, {error, Reason}, State};
-handle_info(ssl_closed, State) ->
+handle_info({ssl_closed, _Socket}, State) ->
     {stop, normal, State};
 handle_info({ssl_error, _Socket, Reason}, State) ->
     {stop, {error, Reason}, State};

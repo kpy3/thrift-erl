@@ -304,6 +304,36 @@ extract_message_buffered_test() ->
         {error, {bad_frame, _}},
         thrift_erl_socket:extract_message(<<255, 255, 255, 255>>, buffered, thrift_erl_binary, Max)
     ),
+    %% max_frame_size bounds a buffered message the same way it bounds
+    %% the framed length prefix: truncated growth past the cap and a
+    %% complete message over the cap are both rejected
+    Truncated = binary:part(Message, 0, byte_size(Message) - 1),
+    ?assertEqual(
+        {error, frame_too_large},
+        thrift_erl_socket:extract_message(
+            Truncated, buffered, thrift_erl_binary, byte_size(Truncated) - 1
+        )
+    ),
+    ?assertEqual(
+        more,
+        thrift_erl_socket:extract_message(
+            Truncated, buffered, thrift_erl_binary, byte_size(Truncated)
+        )
+    ),
+    ?assertEqual(
+        {error, frame_too_large},
+        thrift_erl_socket:extract_message(
+            Message, buffered, thrift_erl_binary, byte_size(Message) - 1
+        )
+    ),
+    %% a complete message extracts from an over-cap buffer (the leftover
+    %% is then judged on its own)
+    ?assertEqual(
+        {ok, Message, Message},
+        thrift_erl_socket:extract_message(
+            <<Message/binary, Message/binary>>, buffered, thrift_erl_binary, byte_size(Message)
+        )
+    ),
     ok.
 
 %%--------------------------------------------------------------------
