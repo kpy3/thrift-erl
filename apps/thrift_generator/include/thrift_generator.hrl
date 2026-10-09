@@ -103,11 +103,11 @@
 %% --------------------------------------------------------------------
 %% AST nodes. Every parsed construct travels inside the
 %% #thrift_generator_node{} envelope: `payload` is the kind-specific
-%% record, `type_module` names the module that built it
-%% (thrift_generator_<kind>), `annotations` holds the filtered `erl.*`
-%% annotations and `doc` the attached doc comment. One module per
-%% definition kind builds its payload record; see
-%% thrift_generator_<kind>:build_node/N.
+%% record, `type_module` is the kind atom that built it
+%% (thrift_generator_<kind> — the semantic pass dispatches on it),
+%% `annotations` holds the filtered `erl.*` annotations and `doc` the
+%% attached doc comment. One builder builds every payload: see
+%% thrift_generator_node:build/2 and the ?NODE_BUILDERS table below.
 %% --------------------------------------------------------------------
 
 -record(thrift_generator_node, {
@@ -119,6 +119,29 @@
 }).
 
 -type ast_node() :: #thrift_generator_node{}.
+
+%% kind atom -> {payload record tag, payload fields in constructor
+%% order}. The parser calls thrift_generator_node:build/2 with this
+%% table; the semantic pass keeps dispatching on the kind atom. Colocated
+%% with the payload records so a record field reorder and this table
+%% move together.
+
+-define(NODE_BUILDERS, #{
+    thrift_generator_document => {thrift_generator_document, [filename, headers, definitions]},
+    thrift_generator_include => {thrift_generator_include, [path]},
+    thrift_generator_cpp_include => {thrift_generator_cpp_include, [path]},
+    thrift_generator_namespace => {thrift_generator_namespace, [scope, name]},
+    thrift_generator_constant => {thrift_generator_constant, [name, type, value]},
+    thrift_generator_typedef => {thrift_generator_typedef, [name, type]},
+    thrift_generator_enum => {thrift_generator_enum, [name, values]},
+    thrift_generator_struct => {thrift_generator_struct, [name, fields]},
+    thrift_generator_union => {thrift_generator_union, [name, fields]},
+    thrift_generator_exception => {thrift_generator_exception, [name, fields]},
+    thrift_generator_field => {thrift_generator_field, [id, required, type, name, default]},
+    thrift_generator_function =>
+        {thrift_generator_function, [oneway, return_type, name, fields, throws]},
+    thrift_generator_service => {thrift_generator_service, [name, extends, functions]}
+}).
 
 -nominal file_name() :: binary().
 

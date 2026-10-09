@@ -246,15 +246,16 @@ Erlang code.
 
 -include("thrift_generator.hrl").
 
-% Construct a build_node AST node of the requested Type. Args are passed to
-% the node module's `build_node` function and, if provided, a line number and
-% annotations are assigned to the resulting node. Annotations are filtered
-% down to the `erl.*` namespace before being stored on the node.
+% Construct a build_node AST node of the requested kind. Args build the
+% kind's payload record through the shared ?NODE_BUILDERS table, and, if
+% provided, a line number and annotations are assigned to the resulting
+% node. Annotations are filtered down to the `erl.*` namespace before
+% being stored on the node.
 
-build_node(TypeModule, Args) when is_list(Args) ->
+build_node(Kind, Args) when is_list(Args) ->
     #thrift_generator_node{
-        payload = erlang:apply(TypeModule, build_node, Args),
-        type_module = TypeModule
+        payload = thrift_generator_node:build(Kind, Args),
+        type_module = Kind
     }.
 
 build_node(TypeModule, Line, Args) when is_integer(Line) ->
