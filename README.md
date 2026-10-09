@@ -459,7 +459,12 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
   the default is records;
 - `erl.set = "sets" | "ordset"` — the in-process set implementation a
   decoded set is built into: `sets` (the v2 `sets` module) or
-  `ordsets`; the default keeps the plain wire list. The annotation sits
+  `ordsets`; the default keeps the plain wire list — deliberately
+  unlike the official Erlang runtime, which decodes every set into
+  `sets:set()`: parity with Apache is on the wire, not in the
+  in-process term. The passthrough costs nothing and keeps hand-written
+  2-tuple descriptors intact, while `erl.set = "sets"` reproduces the
+  official representation where wanted. The annotation sits
   after the whole `set<...>` type (on the field or the typedef —
   inside the angle brackets it would annotate the element). The wire
   encoding is identical for all three; records in the generated hrl get
