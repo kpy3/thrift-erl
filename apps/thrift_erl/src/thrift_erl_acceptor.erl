@@ -39,20 +39,24 @@ mechanism.
     service => module(),
     services => #{binary() => #{handler := module(), service := module()}},
     transport => thrift_erl_socket:transport(),
+    protocol => binary | compact | module(),
     max_frame_size => pos_integer(),
     max_connections => pos_integer(),
-    timeout => pos_integer(),
+    %% the umbrella; `handshake_timeout` and `idle_timeout` name the
+    %% two server-side meanings specifically
+    timeout => pos_integer() | infinity,
+    handshake_timeout => pos_integer() | infinity,
+    idle_timeout => pos_integer() | infinity,
+    active_n => pos_integer(),
     %% record representation bridge for handlers (see thrift_erl_record)
     record_api => boolean(),
     types => module(),
     backlog => pos_integer(),
     %% presence switches the listener to TLS; the handshake consumes
-    %% `timeout` ms of silence before failing
+    %% `handshake_timeout` ms of silence before failing
     ssl_opts => [ssl:tls_server_option()],
     %% 0 binds an ephemeral port; read it back with port/1.
-    port := inet:port_number(),
-    %% registration name for the server supervisor (optional)
-    name => atom()
+    port := inet:port_number()
 }.
 
 -record(state, {
@@ -63,8 +67,6 @@ mechanism.
     accepting = false :: boolean(),
     connections = #{} :: #{reference() := pid()}
 }).
-
--define(DEFAULT_TIMEOUT, 5000).
 
 -doc """
 Starts the listener.
@@ -106,6 +108,8 @@ init(Opts) ->
                     protocol,
                     max_frame_size,
                     timeout,
+                    idle_timeout,
+                    active_n,
                     record_api,
                     types
                 ],
@@ -115,7 +119,7 @@ init(Opts) ->
                 #state{
                     listen_socket = ListenSocket,
                     connection_opts = ConnectionOpts,
-                    max_connections = maps:get(max_connections, Opts, 1024)
+                    max_connections = thrift_erl_options:max_connections(Opts)
                 },
             self() ! accept,
             {ok, State#state{accepting = true}};
@@ -145,9 +149,9 @@ handle_info(accept, #state{} = State) ->
     State0 = State#state{accepting = false},
     %% Sliced accept keeps this process responsive to calls (port/1)
     %% between waits; a plain infinity accept would swallow them.
-    %% On TLS the handshake then blocks up to `timeout` — accepted but
-    %% silent peers cannot pin the acceptor forever.
-    HandshakeTimeout = maps:get(timeout, State#state.connection_opts, ?DEFAULT_TIMEOUT),
+    %% On TLS the handshake then blocks up to the handshake timeout —
+    %% accepted but silent peers cannot pin the acceptor forever.
+    HandshakeTimeout = thrift_erl_options:handshake_timeout(State#state.connection_opts),
     case thrift_erl_socket:accept(State#state.listen_socket, 250, HandshakeTimeout) of
         {ok, Socket} ->
             State1 = start_connection(Socket, State0),

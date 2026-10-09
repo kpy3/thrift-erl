@@ -48,6 +48,7 @@ and `thrift_erl_server`.
 -export([
     encode/2,
     encode/3,
+    encode/4,
     decode/3,
     decode/4,
     convert/3,
@@ -88,14 +89,61 @@ encode(Desc, Value) ->
 -doc "Encodes a value in any representation with the given protocol.".
 -spec encode(thrift_erl_binary:type_desc(), term(), protocol()) -> {ok, binary()} | {error, term()}.
 encode(Desc, Value, Protocol) ->
+    encode(Desc, Value, Protocol, #{}).
+
+-doc """
+Encodes a value with the given protocol and encode options.
+
+`strict => true` checks the top-level map/struct-map input against the
+struct's declared fields and fails with `{error, {unknown_fields,
+Keys}}` instead of silently dropping the keys that match nothing (the
+default). Every other value shape the codecs reject on their own with
+`{error, {value_does_not_match_type, Value}}`.
+""".
+-spec encode(thrift_erl_binary:type_desc(), term(), protocol(), map()) ->
+    {ok, binary()} | {error, term()}.
+encode(Desc, Value, Protocol, Opts) ->
     case protocol_module(Protocol) of
         {ok, Mod} ->
-            case Mod:encode(Desc, thrift_erl_record:to_wire(Desc, Value)) of
-                {ok, IoData} -> {ok, iolist_to_binary(IoData)};
-                {error, Reason} -> {error, Reason}
+            case strict_check(Desc, Value, Opts) of
+                ok ->
+                    case encode_wire(Desc, Value, Mod) of
+                        {ok, IoData} -> {ok, iolist_to_binary(IoData)};
+                        {error, Reason} -> {error, Reason}
+                    end;
+                {error, _} = Error ->
+                    Error
             end;
         {error, Reason} ->
             {error, Reason}
+    end.
+
+-spec strict_check(thrift_erl_binary:type_desc(), term(), map()) -> ok | {error, term()}.
+strict_check(Desc, Value, Opts) ->
+    case maps:get(strict, Opts, false) of
+        true ->
+            case thrift_erl_record:unknown_fields(Desc, Value) of
+                [] -> ok;
+                none -> ok;
+                Unknown -> {error, {unknown_fields, Unknown}}
+            end;
+        false ->
+            ok
+    end.
+
+%% The record engine raises `value_does_not_match_type` for a value
+%% that matches no representation; the facade turns it into the same
+%% tagged error the codecs answer with.
+
+-spec encode_wire(thrift_erl_binary:type_desc(), term(), module()) ->
+    {ok, iodata()} | {error, term()}.
+encode_wire(Desc, Value, Mod) ->
+    try thrift_erl_record:to_wire(Desc, Value) of
+        Wire ->
+            Mod:encode(Desc, Wire)
+    catch
+        error:{value_does_not_match_type, V} ->
+            {error, {value_does_not_match_type, V}}
     end.
 
 -doc """
@@ -115,12 +163,12 @@ decode(Desc, Binary, Repr) ->
     {ok, term()} | {error, term()}.
 decode(Desc, Binary, Repr, Protocol) ->
     case repr_supported(Repr) of
-        true ->
+        ok ->
             case protocol_module(Protocol) of
                 {ok, Mod} ->
                     case Mod:decode(Desc, Binary) of
                         {ok, Value, <<>>} ->
-                            {ok, thrift_erl_record:from_wire(Desc, Value, Repr)};
+                            decode_repr(Desc, Value, Repr);
                         {ok, _Value, _Rest} ->
                             {error, trailing};
                         more ->
@@ -131,18 +179,50 @@ decode(Desc, Binary, Repr, Protocol) ->
                 {error, Reason} ->
                     {error, Reason}
             end;
-        false ->
-            {error, {unsupported_repr, native}}
+        {error, _} = Error ->
+            Error
     end.
 
-%% The one representation with an OTP floor: native records need the
-%% `records` module (OTP 29), everything else is release-independent.
+%% A map-representation struct has no record to produce — `convert/3`
+%% answers `{error, {no_record, Tag}}` for the same input, so `decode`
+%% does too instead of silently returning an atom-keyed map.
 
--spec repr_supported(repr()) -> boolean().
+-spec decode_repr(thrift_erl_binary:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
+decode_repr(Desc, Value, record) ->
+    case thrift_erl_record:repr_mode(Desc) of
+        {map, _} ->
+            {error, {no_record, struct_tag(Desc)}};
+        _ ->
+            {ok, thrift_erl_record:from_wire(Desc, Value, record)}
+    end;
+decode_repr(Desc, Value, Repr) ->
+    {ok, thrift_erl_record:from_wire(Desc, Value, Repr)}.
+
+%% The tag a struct value carries for this descriptor: the record tag
+%% for record-mode structs, the lowercased wire name for map-mode ones
+%% (the same rule `tag_index/0` follows).
+
+-spec struct_tag({struct, {ref, module(), binary()}}) -> atom().
+struct_tag({struct, {ref, _Module, Name}}) ->
+    binary_to_atom(string:lowercase(Name), utf8).
+%% `decode_repr/3` reaches `struct_tag/1` only for map-mode structs, and
+%% those are always ref descriptors — an inline descriptor has no
+%% representation to mis-decode into.
+
+%% The one representation with an OTP floor plus membership: native
+%% records need the `records` module (OTP 29), and a repr outside the
+%% axis vocabulary is a caller typo, not a decode condition.
+
+-spec repr_supported(repr()) -> ok | {error, {unsupported_repr, native} | {bad_repr, repr()}}.
 repr_supported(native) ->
-    thrift_erl_native:supported();
-repr_supported(_Repr) ->
-    true.
+    case thrift_erl_native:supported() of
+        true -> ok;
+        false -> {error, {unsupported_repr, native}}
+    end;
+repr_supported(Repr) when Repr =:= record; Repr =:= map; Repr =:= struct ->
+    ok;
+repr_supported(Repr) ->
+    {error, {bad_repr, Repr}}.
 
 -doc """
 Reshapes a typed value (record or struct-map, nested structures
