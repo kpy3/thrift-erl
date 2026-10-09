@@ -416,6 +416,7 @@ struct_codec_one(S, Ctx) ->
             false -> map
         end,
     Desc = struct_ref(S, Ctx),
+    Doc = S#tg_struct.doc,
     Anno = erl_anno:new(0),
     ResultType = fun(Ok) -> ok_error_type(Anno, Ok, error_term_type(Anno)) end,
     EncodeSpec = fun(Arity) ->
@@ -437,12 +438,16 @@ struct_codec_one(S, Ctx) ->
                 )
             ]}}
     end,
-    fn_form(Encode, [
-        fn_clause(
-            [erl_syntax:variable("Value")],
-            application(thrift_erl, encode, [abstract(Desc), erl_syntax:variable("Value")])
-        )
-    ]) ++
+    doc_form(Doc, <<"Encodes `Value` in any representation with the binary protocol.">>) ++
+        [EncodeSpec(1)] ++
+        fn_form(Encode, [
+            fn_clause(
+                [erl_syntax:variable("Value")],
+                application(thrift_erl, encode, [abstract(Desc), erl_syntax:variable("Value")])
+            )
+        ]) ++
+        doc_form(Doc, <<"Encodes `Value` in any representation with the given protocol.">>) ++
+        [EncodeSpec(2)] ++
         fn_form(Encode, [
             fn_clause(
                 [erl_syntax:variable("Value"), erl_syntax:variable("Protocol")],
@@ -451,7 +456,15 @@ struct_codec_one(S, Ctx) ->
                 ])
             )
         ]) ++
-        [EncodeSpec(1), EncodeSpec(2)] ++
+        doc_form(
+            Doc,
+            <<
+                "Decodes the whole binary into the default representation"
+                " (record for record-mode structs, map otherwise); trailing"
+                " bytes or truncation fail the decode."
+            >>
+        ) ++
+        [DecodeSpec(1)] ++
         fn_form(Decode, [
             fn_clause(
                 [erl_syntax:variable("Binary")],
@@ -460,6 +473,8 @@ struct_codec_one(S, Ctx) ->
                 ])
             )
         ]) ++
+        doc_form(Doc, <<"Decodes the whole binary into the given `thrift_erl:repr()`.">>) ++
+        [DecodeSpec(2)] ++
         fn_form(Decode, [
             fn_clause(
                 [erl_syntax:variable("Binary"), erl_syntax:variable("Repr")],
@@ -468,6 +483,14 @@ struct_codec_one(S, Ctx) ->
                 ])
             )
         ]) ++
+        doc_form(
+            Doc,
+            <<
+                "Decodes the whole binary into the given representation"
+                " with the given protocol."
+            >>
+        ) ++
+        [DecodeSpec(3)] ++
         fn_form(Decode, [
             fn_clause(
                 [
@@ -483,16 +506,16 @@ struct_codec_one(S, Ctx) ->
                 ])
             )
         ]) ++
-        [DecodeSpec(1), DecodeSpec(2), DecodeSpec(3)] ++
         case record_mode(S) of
             true ->
                 FromMap = binary_to_atom(<<Prefix/binary, "_from_map">>, utf8),
-                [
-                    {attribute, Anno, spec,
-                        {{FromMap, 1}, [
-                            fun_type([raw_type(map)], term_type())
-                        ]}}
-                ] ++
+                doc_form(Doc, <<"Builds the record from a map keyed by field atoms or wire names.">>) ++
+                    [
+                        {attribute, Anno, spec,
+                            {{FromMap, 1}, [
+                                fun_type([raw_type(map)], term_type())
+                            ]}}
+                    ] ++
                     fn_form(FromMap, [
                         fn_clause(
                             [erl_syntax:variable("Map")],
@@ -612,7 +635,22 @@ tag_index_forms(Mod, Ctx) ->
                 )
             ]}}
     ] ++
+        doc_form(
+            undefined,
+            <<
+                "The struct tag -> descriptor map `thrift_erl:convert/3` takes:"
+                " record tags for record-mode structs, wire names for"
+                " map-mode ones."
+            >>
+        ) ++
         fn_form(tag_index, [fn_clause([], abstract(maps:from_list(Pairs)))]) ++
+        doc_form(
+            undefined,
+            <<
+                "Reshapes a typed value (record or struct map, nested"
+                " structures included) into `Repr` without touching bytes."
+            >>
+        ) ++
         fn_form(convert, [
             fn_clause(
                 [erl_syntax:variable("Value"), erl_syntax:variable("Repr")],
@@ -683,22 +721,39 @@ enum_helper_one(E, Prefix) ->
         ])
     end,
     Union = fun(OkType) -> ok_error_type(Anno, OkType, {atom, Anno, error}) end,
-    [
-        {attribute, Anno, spec,
-            {{ToInt, 1}, [
-                fun_type([{type, Anno, union, [raw_type(atom), raw_type(integer)]}], Union(raw_type(integer)))
-            ]}},
-        {attribute, Anno, spec,
-            {{FromInt, 1}, [
-                fun_type([raw_type(integer)], Union(raw_type(atom)))
-            ]}}
-    ] ++
+    Doc = E#tg_enum.doc,
+    doc_form(
+        Doc,
+        <<
+            "Maps an enum member atom to its integer value; integers pass"
+            " through, anything else answers `error`."
+        >>
+    ) ++
+        [
+            {attribute, Anno, spec,
+                {{ToInt, 1}, [
+                    fun_type([{type, Anno, union, [raw_type(atom), raw_type(integer)]}], Union(raw_type(integer)))
+                ]}}
+        ] ++
         fn_form(ToInt, [
             erl_syntax:clause([V], Guard(is_atom), [
                 erl_syntax:case_expr(Keyfind(V, 2), [MatchClause(ToIntPair, Int), MissClause])
             ]),
             erl_syntax:clause([V], Guard(is_integer), [OkTuple(V)])
         ]) ++
+        doc_form(
+            Doc,
+            <<
+                "Maps an integer to the enum member atom; unknown values"
+                " answer `error`."
+            >>
+        ) ++
+        [
+            {attribute, Anno, spec,
+                {{FromInt, 1}, [
+                    fun_type([raw_type(integer)], Union(raw_type(atom)))
+                ]}}
+        ] ++
         fn_form(FromInt, [
             erl_syntax:clause([V], none, [
                 erl_syntax:case_expr(Keyfind(V, 1), [MatchClause(FromIntPair, Atom), MissClause])
@@ -719,12 +774,13 @@ const_entries(Mod) ->
 -spec const_forms(#tg_module{}) -> erl_syntax:forms().
 const_forms(Mod) ->
     lists:append([
-        [
-            {attribute, erl_anno:new(0), spec,
-                {{binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), 0}, [
-                    fun_type([], const_spec_type(C#tg_const.type))
-                ]}}
-        ] ++
+        doc_form(C#tg_const.doc, <<"The constant's value as declared in the IDL.">>) ++
+            [
+                {attribute, erl_anno:new(0), spec,
+                    {{binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), 0}, [
+                        fun_type([], const_spec_type(C#tg_const.type))
+                    ]}}
+            ] ++
             fn_form(binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), [
                 fn_clause([], const_literal(C#tg_const.value))
             ])
@@ -1155,6 +1211,17 @@ service_sources(Svc, Mod, Ctx) ->
 service_module(Name, Kind) ->
     binary_to_atom(<<(sanitize(Name))/binary, (kind_suffix(Kind))/binary>>, utf8).
 
+%% The service's IDL doc comment appended to a generated module doc.
+
+-spec service_doc_suffix(#tg_service{}) -> binary().
+service_doc_suffix(Svc) ->
+    case Svc#tg_service.doc of
+        undefined ->
+            <<>>;
+        Doc ->
+            <<"\n\n", Doc/binary>>
+    end.
+
 -spec kind_suffix(handler | server | client) -> binary().
 kind_suffix(handler) ->
     <<"_handler">>;
@@ -1166,14 +1233,15 @@ kind_suffix(client) ->
 -spec handler_forms(#tg_service{}, #tg_module{}, module(), #ctx{}) -> erl_syntax:forms().
 handler_forms(Svc, Mod, HandlerMod, Ctx) ->
     Doc =
-        unicode:characters_to_binary(
+        unicode:characters_to_binary([
             io_lib:format(
                 "Handler behaviour for the ~ts service. Implement every"
                 " callback and pass the module as `handler` when starting"
                 " the server; struct arguments arrive as records.",
                 [Svc#tg_service.name]
-            )
-        ),
+            ),
+            service_doc_suffix(Svc)
+        ]),
     %% Callback specs mention record types for struct-typed params, so
     %% the handler declares the records of every struct the service's
     %% signatures can reach (transitively through struct fields) — and
@@ -1254,7 +1322,32 @@ callback_form(F, Ctx) ->
     ParamTypes = [erlang_type(Field#tg_field.type, Ctx) || Field <- F#tg_function.params],
     RetType = remote_type(thrift_erl_service, handler_result),
     FunType = fun_type(ParamTypes, RetType),
-    callback_attribute(F#tg_function.name, length(ParamTypes), FunType).
+    doc_form(F#tg_function.doc, callback_doc(F)) ++
+        callback_attribute(F#tg_function.name, length(ParamTypes), FunType).
+
+-spec callback_doc(#tg_function{}) -> binary().
+callback_doc(F) ->
+    Name = F#tg_function.name,
+    case F#tg_function.oneway of
+        true ->
+            unicode:characters_to_binary(
+                io_lib:format(
+                    "Handler callback for the oneway ~ts: called as"
+                    " `Handler:~ts(Args...)` in declaration order; the"
+                    " answer is discarded.",
+                    [Name, Name]
+                )
+            );
+        false ->
+            unicode:characters_to_binary(
+                io_lib:format(
+                    "Handler callback for ~ts: called as"
+                    " `Handler:~ts(Args...)` in declaration order; answers"
+                    " a `thrift_erl_service:handler_result()`.",
+                    [Name, Name]
+                )
+            )
+    end.
 
 %% -callback Name/Arity :: FunType — the payload mixes a tree with a
 %% name/arity pair, so it is assembled by hand rather than abstracted.
@@ -1266,14 +1359,15 @@ callback_attribute(Name, Arity, FunType) ->
 -spec server_forms(#tg_service{}, module(), module()) -> erl_syntax:forms().
 server_forms(Svc, TypesMod, ServerMod) ->
     Doc =
-        unicode:characters_to_binary(
+        unicode:characters_to_binary([
             io_lib:format(
                 "Server entry points for the ~ts service. `start_link/1`"
                 " takes the same options map as `thrift_erl_server`"
                 " (minus `service`).",
                 [Svc#tg_service.name]
-            )
-        ),
+            ),
+            service_doc_suffix(Svc)
+        ]),
     V = var_fun(),
     MapUpdate =
         erl_syntax:map_expr(
@@ -1301,16 +1395,25 @@ server_forms(Svc, TypesMod, ServerMod) ->
                 ])
             ])
         ]) ++
+        doc_form(
+            undefined,
+            <<
+                "Starts the server supervisor with the given options (the"
+                " same map as `thrift_erl_server`, minus `service`)."
+            >>
+        ) ++
         fn_form(start_link, [
             erl_syntax:clause(
                 [V("Opts")], none, [application(thrift_erl_server, start_link, [MapUpdate])]
             )
         ]) ++
+        doc_form(undefined, <<"Stops the server and every connection it accepted.">>) ++
         fn_form(stop, [
             erl_syntax:clause(
                 [V("Pid")], none, [application(thrift_erl_server, stop, [V("Pid")])]
             )
         ]) ++
+        doc_form(undefined, <<"The port the server listens on.">>) ++
         fn_form(port, [
             erl_syntax:clause(
                 [V("Pid")], none, [application(thrift_erl_server, port, [V("Pid")])]
@@ -1320,15 +1423,16 @@ server_forms(Svc, TypesMod, ServerMod) ->
 -spec client_forms(#tg_service{}, module(), module(), module()) -> erl_syntax:forms().
 client_forms(Svc, TypesMod, ServerMod, ClientMod) ->
     Doc =
-        unicode:characters_to_binary(
+        unicode:characters_to_binary([
             io_lib:format(
                 "Typed client for the ~ts service. `start_link/1` takes the"
                 " same options map as `thrift_erl_client` (minus `service`)."
                 " Struct arguments and results are converted to records at"
                 " the boundary.",
                 [Svc#tg_service.name]
-            )
-        ),
+            ),
+            service_doc_suffix(Svc)
+        ]),
     ClientFns = [client_fn(F, TypesMod) || F <- Svc#tg_service.functions],
     header(ClientMod, Doc) ++
         [
@@ -1390,14 +1494,17 @@ client_fn(F, TypesMod) ->
     LongClause = erl_syntax:clause(LongArgs, none, LongBody),
     Exports = [{Name, NParams + 1}, {Name, NParams + 2}],
     Forms =
-        fn_form(Name, [ShortClause]) ++
-            fn_form(Name, [LongClause]) ++
+        doc_form(F#tg_function.doc, short_client_doc(F)) ++
             spec_form(F, NParams + 1, oneway_ret(F)) ++
-            spec_form(F, NParams + 2, call_ret()),
+            fn_form(Name, [ShortClause]) ++
+            doc_form(F#tg_function.doc, long_client_doc(F)) ++
+            spec_form(F, NParams + 2, call_ret()) ++
+            fn_form(Name, [LongClause]),
     {Exports, Forms}.
 
 %% The long-form wrapper delegates to `thrift_erl_client` either the
 %% oneway or the request/response call; both take the same shape.
+
 -spec client_bridge_call(oneway | call, erl_syntax:syntaxTree(), erl_syntax:syntaxTree()) ->
     erl_syntax:syntaxTree().
 client_bridge_call(Method, FunName, WireArgs) ->
@@ -1411,6 +1518,49 @@ client_bridge_call(Method, FunName, WireArgs) ->
             erl_syntax:variable("Timeout")
         ]
     ).
+
+%% Built-in client method docs; the IDL doc comment of the function
+%% (when present) is prepended by doc_form/2.
+
+-spec short_client_doc(#tg_function{}) -> binary().
+short_client_doc(F) ->
+    Name = F#tg_function.name,
+    case F#tg_function.oneway of
+        true ->
+            unicode:characters_to_binary(
+                io_lib:format(
+                    "Sends the oneway ~ts; answers `ok` once the bytes are"
+                    " on the wire.",
+                    [Name]
+                )
+            );
+        false ->
+            unicode:characters_to_binary(
+                io_lib:format(
+                    "Calls ~ts and waits for the reply with the default"
+                    " 5000 ms timeout.",
+                    [Name]
+                )
+            )
+    end.
+
+-spec long_client_doc(#tg_function{}) -> binary().
+long_client_doc(F) ->
+    Name = F#tg_function.name,
+    case F#tg_function.oneway of
+        true ->
+            unicode:characters_to_binary(
+                io_lib:format("Sends the oneway ~ts, giving up after `Timeout` ms.", [Name])
+            );
+        false ->
+            unicode:characters_to_binary(
+                io_lib:format(
+                    "Calls ~ts and waits for the reply, failing after"
+                    " `Timeout` ms.",
+                    [Name]
+                )
+            )
+    end.
 
 -spec param_vars(pos_integer()) -> [erl_syntax:syntaxTree()].
 param_vars(N) ->
@@ -1446,35 +1596,49 @@ start_link_form(ServerMod) ->
             erl_syntax:variable("Opts"),
             [map_field(service, abstract(ServerMod))]
         ),
-    fn_form(start_link, [
-        erl_syntax:clause(
-            [erl_syntax:variable("Opts")],
-            none,
-            [
-                erl_syntax:application(
-                    erl_syntax:atom(thrift_erl_client),
-                    erl_syntax:atom(start_link),
-                    [MapUpdate]
-                )
-            ]
-        )
-    ]).
+    doc_form(
+        undefined,
+        <<
+            "Connects to the server and links the client to the caller;"
+            " the options map is `thrift_erl_client`'s, minus `service`."
+        >>
+    ) ++
+        fn_form(start_link, [
+            erl_syntax:clause(
+                [erl_syntax:variable("Opts")],
+                none,
+                [
+                    erl_syntax:application(
+                        erl_syntax:atom(thrift_erl_client),
+                        erl_syntax:atom(start_link),
+                        [MapUpdate]
+                    )
+                ]
+            )
+        ]).
 
 -spec stop_form() -> erl_syntax:forms().
 stop_form() ->
-    fn_form(stop, [
-        erl_syntax:clause(
-            [erl_syntax:variable("Pid")],
-            none,
-            [
-                erl_syntax:application(
-                    erl_syntax:atom(thrift_erl_client),
-                    erl_syntax:atom(stop),
-                    [erl_syntax:variable("Pid")]
-                )
-            ]
-        )
-    ]).
+    doc_form(
+        undefined,
+        <<
+            "Closes the connection; outstanding calls answer"
+            " `{error, closed}`."
+        >>
+    ) ++
+        fn_form(stop, [
+            erl_syntax:clause(
+                [erl_syntax:variable("Pid")],
+                none,
+                [
+                    erl_syntax:application(
+                        erl_syntax:atom(thrift_erl_client),
+                        erl_syntax:atom(stop),
+                        [erl_syntax:variable("Pid")]
+                    )
+                ]
+            )
+        ]).
 
 %%--------------------------------------------------------------------
 %% Erlang type mapping (specs and callbacks)
@@ -1624,6 +1788,21 @@ export_form(Entries) ->
 fn_form(Name, Clauses) ->
     [erl_syntax:function(erl_syntax:atom(Name), Clauses)].
 
+%% The -doc attribute of a generated function: the definition's IDL doc
+%% comment (when it carries one) followed by the built-in explanation of
+%% the generated contract. Docs land in the docs chunk, so shell_docs
+%% can explain the overloaded arities (encode/2 = protocol, decode/2 =
+%% representation) without the consumer reading this emitter.
+
+-spec doc_form(binary() | undefined, binary()) -> erl_syntax:forms().
+doc_form(IdlDoc, BuiltIn) ->
+    Text =
+        case IdlDoc of
+            undefined -> BuiltIn;
+            Doc -> <<Doc/binary, "\n\n", BuiltIn/binary>>
+        end,
+    [erl_syntax:attribute(erl_syntax:atom(doc), [erl_syntax:string(unicode:characters_to_list(Text))])].
+
 -spec fn_clause([erl_syntax:syntaxTree()], erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
 fn_clause(Patterns, Body) ->
     erl_syntax:clause(Patterns, none, [Body]).
@@ -1700,7 +1879,10 @@ format_form(RawForm) ->
 
 -spec compile_one(module(), erl_syntax:forms()) -> compiled().
 compile_one(Name, Forms) ->
-    case compile:forms(erl_syntax:revert_forms(Forms), [return, binary]) of
+    %% warnings_as_errors: the emitter is the first consumer of its own
+    %% output — a generated warning (a misplaced -doc, an unused
+    %% variable) fails here instead of at the code generator's user.
+    case compile:forms(erl_syntax:revert_forms(Forms), [return, binary, warnings_as_errors]) of
         {ok, Name, Beam, _Warnings} ->
             {ok, Name, Beam};
         {error, Errors, _Warnings} ->

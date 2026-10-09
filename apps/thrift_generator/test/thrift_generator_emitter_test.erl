@@ -37,7 +37,8 @@
     struct_codec_test/0,
     enum_and_const_helpers_test/0,
     set_annotation_test/0,
-    namespace_prefix_test/0
+    namespace_prefix_test/0,
+    doc_pipeline_test/0
 ]).
 
 -define(SNIPPET,
@@ -61,6 +62,21 @@
     "const i32 BASE = 10\n"
     "const string GREETING = \"hi\"\n"
     "service Svc { void ping() }\n"
+).
+
+-define(DOC_SNIPPET,
+    "/// The request payload.\n"
+    "struct Inner { /** Shape it. */ 1: string name }\n"
+    "/** Color codes. */\n"
+    "enum Color { RED, GREEN = 10 }\n"
+    "const i32 BASE = 10\n"
+    "/** Waves at the caller. */\n"
+    "service Svc {\n"
+    "  /** Ping it. */\n"
+    "  void ping(),\n"
+    "  /** Fire it. */\n"
+    "  oneway void fire(1: i32 code)\n"
+    "}\n"
 ).
 
 -spec generate() -> [thrift_generator_emitter:compiled()].
@@ -395,6 +411,69 @@ namespace_prefix_test() ->
         re:run(Hrl, <<"-type demo_widgets_color\\(\\) :: 'RED' \\| 'GREEN'\\.">>)
     ),
     ?assertMatch({match, _}, re:run(Hrl, <<"-define\\(DEMO_WIDGETS_BASE, 10\\)\\.">>)),
+    ok.
+
+%% IDL doc comments (/** */, ///) reach the generated code: as -doc on
+%% the entity's functions (struct codecs, enum helpers, the constant)
+%% and on service callbacks/methods, plus the service doc in the
+%% generated module docs; every generated function carries a built-in
+%% -doc explaining its contract.
+
+doc_pipeline_test() ->
+    {ok, Doc} = thrift_generator:parse_string(?DOC_SNIPPET),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Results = thrift_generator_emitter:compile_sources(Model),
+    %% the -doc attributes compile warning-free (warnings_as_errors is
+    %% on inside compile_sources)
+    lists:foreach(
+        fun
+            ({ok, _Name, _Beam}) -> ok;
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        Results
+    ),
+    Sources = thrift_generator_emitter:sources(Model),
+    TypesSrc = entry_source(t_types, Sources),
+    %% the IDL struct doc is prepended to every codec function's doc
+    ?assertMatch(
+        {match, _},
+        re:run(TypesSrc, <<"-doc\\(\"The request payload\\.\\\\n\\\\nEncodes ">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(TypesSrc, <<"-doc\\(\"The request payload\\.\\\\n\\\\nDecodes ">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(TypesSrc, <<"-doc\\(\"The request payload\\.\\\\n\\\\nBuilds the record ">>)
+    ),
+    %% the built-in arity explanations are there too
+    ?assertMatch(
+        {match, _},
+        re:run(TypesSrc, <<"in any representation with the given ">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(TypesSrc, <<"whole binary into the given `thrift_erl:repr\\(\\)`">>)
+    ),
+    %% enum and constant docs
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"Color codes\\.\\\\n\\\\nMaps an enum member">>)),
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"-doc\\(\"The constant's value as declared">>)),
+    %% introspection docs
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"The struct tag -> descriptor map">>)),
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"Reshapes a typed value \\(record or struct">>)),
+    %% client methods and handler callbacks carry the function's IDL doc
+    ClientSrc = entry_source('Svc_client', Sources),
+    ?assertMatch({match, _}, re:run(ClientSrc, <<"Ping it\\.\\\\n\\\\nCalls ping and waits for">>)),
+    ?assertMatch({match, _}, re:run(ClientSrc, <<"Sends the oneway fire">>)),
+    HandlerSrc = entry_source('Svc_handler', Sources),
+    ?assertMatch({match, _}, re:run(HandlerSrc, <<"Ping it\\.\\\\n\\\\nHandler callback for ping">>)),
+    ?assertMatch({match, _}, re:run(HandlerSrc, <<"oneway fire: called as">>)),
+    %% the service doc lands in the generated module docs
+    ?assertMatch({match, _}, re:run(ClientSrc, <<"Waves at the caller\\.">>)),
+    ServerSrc = entry_source('Svc_server', Sources),
+    ?assertMatch({match, _}, re:run(ServerSrc, <<"Waves at the caller\\.">>)),
     ok.
 
 %%--------------------------------------------------------------------
