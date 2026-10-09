@@ -51,6 +51,8 @@ triples before failing.
 -record(ctx, {
     module = undefined :: binary() | undefined,
     file = undefined :: binary() | undefined,
+    %% the file-wide set implementation from the namespace's erl.set
+    set_default = list :: list | sets | ordset,
     all_defs = #{} :: #{binary() => #{binary() => def_kind()}},
     all_const_values = #{} :: #{binary() => #{binary() => const_value()}},
     all_enum_members = #{} :: #{binary() => #{binary() => [binary()]}},
@@ -154,7 +156,8 @@ typedef_type_of(_) -> skip.
 %%--------------------------------------------------------------------
 
 -spec analyze_module(#tg_loaded{}, #ctx{}) -> {#tg_module{}, #ctx{}}.
-analyze_module(Loaded, Ctx0) ->
+analyze_module(Loaded, Ctx00) ->
+    Ctx0 = namespace_set_default(Loaded, Ctx00),
     Defs = definitions(Loaded),
     Ctx1 = check_duplicates(Defs, Ctx0),
     {Structs, Ctx2} = lists:foldl(fun analyze_struct/2, {[], Ctx1}, Defs),
@@ -388,6 +391,7 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
                 Ctx1
         end,
     Ctx3 = validate_type(Type, Line, Ctx2),
+    Type1 = apply_set_default(Type, Ctx3),
     Ctx4 = reject_misplaced_set_impl(FieldNode#thrift_generator_node.annotations, Line, Ctx3),
     {DefaultResolved, Ctx5} =
         case Default of
@@ -405,7 +409,7 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
         #tg_field{
             id = Id,
             required = Required,
-            type = Type,
+            type = Type1,
             name = FieldName,
             default = DefaultResolved,
             erl = FieldNode#thrift_generator_node.annotations,
@@ -490,7 +494,7 @@ analyze_typedef(Node, {Acc, Ctx}) ->
             Typedef =
                 #tg_typedef{
                     name = Name,
-                    type = Type,
+                    type = apply_set_default(Type, Ctx1),
                     erl = Node#thrift_generator_node.annotations,
                     doc = Node#thrift_generator_node.doc,
                     line = Line
@@ -548,7 +552,7 @@ analyze_const(Node, {Acc, Ctx}) ->
                     Const =
                         #tg_const{
                             name = Name,
-                            type = Type,
+                            type = apply_set_default(Type, Ctx1),
                             value = Resolved,
                             erl = Node#thrift_generator_node.annotations,
                             doc = Node#thrift_generator_node.doc,
@@ -807,7 +811,7 @@ analyze_functions(Nodes, Ctx) ->
                     #tg_function{
                         name = Name,
                         oneway = Oneway,
-                        return_type = ReturnType,
+                        return_type = apply_set_default(ReturnType, C1),
                         params = ParamsResolved,
                         throws = ThrowsResolved,
                         doc = Node#thrift_generator_node.doc
@@ -897,6 +901,78 @@ reject_misplaced_set_impl(Ann, Line, Ctx) ->
         false ->
             Ctx
     end.
+
+%% The erl.set annotation on the `namespace erl` (or `*`) header is the
+%% file-wide set implementation: every set type of the module without
+%% an explicit annotation gets it injected during analysis, so the
+%% emitter keeps reading the plain type annotation. The namespace pick
+%% mirrors the loader: the erl scope wins over the wildcard one.
+
+-spec namespace_set_default(#tg_loaded{}, #ctx{}) -> #ctx{}.
+namespace_set_default(Loaded, Ctx) ->
+    Headers = (Loaded#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.headers,
+    case namespace_set_annotation(Headers, <<"erl">>) of
+        undefined ->
+            case namespace_set_annotation(Headers, <<"*">>) of
+                undefined -> Ctx;
+                Found -> apply_namespace_set_default(Found, Ctx)
+            end;
+        Found ->
+            apply_namespace_set_default(Found, Ctx)
+    end.
+
+-spec namespace_set_annotation([ast_node()], binary()) -> {ast_node(), binary()} | undefined.
+namespace_set_annotation(Headers, Scope) ->
+    Candidates = [
+        {Node, maps:get(set, Node#thrift_generator_node.annotations)}
+     || Node <- Headers,
+        namespace_scope_is(Node, Scope),
+        maps:is_key(set, Node#thrift_generator_node.annotations)
+    ],
+    case Candidates of
+        [Found | _] -> Found;
+        [] -> undefined
+    end.
+
+-spec namespace_scope_is(ast_node(), binary()) -> boolean().
+namespace_scope_is(Node, Scope) ->
+    case Node#thrift_generator_node.payload of
+        #thrift_generator_namespace{scope = NamespaceScope} -> NamespaceScope =:= Scope;
+        _ -> false
+    end.
+
+-spec apply_namespace_set_default({ast_node(), binary()}, #ctx{}) -> #ctx{}.
+apply_namespace_set_default({_Node, <<"sets">>}, Ctx) ->
+    Ctx#ctx{set_default = sets};
+apply_namespace_set_default({_Node, <<"ordset">>}, Ctx) ->
+    Ctx#ctx{set_default = ordset};
+apply_namespace_set_default({Node, Other}, Ctx) ->
+    err(
+        Node#thrift_generator_node.line,
+        "unknown erl.set ~ts (expected \"sets\" or \"ordset\")",
+        [Other],
+        Ctx
+    ).
+
+%% Rewrites every set type without an explicit annotation into the
+%% file-wide default; explicit annotations and the no-namespace case
+%% leave the type untouched. Container shapes are preserved.
+
+-spec apply_set_default(thrift_type(), #ctx{}) -> thrift_type().
+apply_set_default({set, Elem, Ann}, Ctx) ->
+    Elem1 = apply_set_default(Elem, Ctx),
+    case maps:is_key(<<"erl.set">>, Ann) orelse Ctx#ctx.set_default =:= list of
+        true ->
+            {set, Elem1, Ann};
+        false ->
+            {set, Elem1, Ann#{<<"erl.set">> => atom_to_binary(Ctx#ctx.set_default, utf8)}}
+    end;
+apply_set_default({list, Elem, Ann}, Ctx) ->
+    {list, apply_set_default(Elem, Ctx), Ann};
+apply_set_default({map, Key, Value, Ann}, Ctx) ->
+    {map, apply_set_default(Key, Ctx), apply_set_default(Value, Ctx), Ann};
+apply_set_default(Type, _Ctx) ->
+    Type.
 
 %% A name without dots resolves locally; a dotted name resolves as
 %% Module.Name across every loaded module.

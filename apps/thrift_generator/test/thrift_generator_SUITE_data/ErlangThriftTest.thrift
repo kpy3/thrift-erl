@@ -21,7 +21,7 @@
  * details.
  */
 
-namespace erl test
+namespace erl test (erl.set = "sets")
 
 /**
  * Docstring!

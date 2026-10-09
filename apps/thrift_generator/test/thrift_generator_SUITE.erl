@@ -132,7 +132,7 @@ parse_erlang_thrift_test_idl(Config) ->
     ?assertEqual(35, length(Definitions)),
 
     ErlNamespace = find_header(Headers, <<"erl">>),
-    ?assertEqual(#{}, ErlNamespace#thrift_generator_node.annotations),
+    ?assertEqual(#{set => <<"sets">>}, ErlNamespace#thrift_generator_node.annotations),
 
     UserId = find_definition(Definitions, thrift_generator_typedef, <<"UserId">>),
     ?assertEqual(#{type => <<"nominal">>}, UserId#thrift_generator_node.annotations),
@@ -536,12 +536,13 @@ generated_set_impl(Config) ->
         end,
         thrift_generator_emitter:compile_sources(Model)
     ),
+    %% the file-wide erl.set default applies to unannotated sets; the
+    %% explicit ordset on set_field wins over it — both in one struct
     {struct, CrazyFields} = test_types:struct_info(<<"CrazyNesting">>),
     {value, {2, optional, {set, {struct, {ref, test_types, <<"Insanity">>}}, ordset}, <<"set_field">>, undefined}} =
         lists:search(fun(F) -> element(4, F) =:= <<"set_field">> end, CrazyFields),
-    %% no annotation, no impl: an unannotated set keeps the wire list
     {struct, VersioningFields} = test_types:struct_info(<<"VersioningTestV2">>),
-    {value, {9, default, {set, {base, i32}, list}, <<"newset">>, undefined}} =
+    {value, {9, default, {set, {base, i32}, sets}, <<"newset">>, undefined}} =
         lists:search(fun(F) -> element(4, F) =:= <<"newset">> end, VersioningFields),
     %% codec roundtrip: duplicates and arbitrary order on the way in, a
     %% real ordset on the way out, map and record representations alike
@@ -574,6 +575,12 @@ generated_set_impl(Config) ->
             }
         ),
     ?assertEqual({ok, NormBin}, test_types:encode_test_crazynesting(Rec)),
+    %% the file-wide sets default: unannotated sets decode as sets
+    %% collections, encode takes them back (a sets input — no coercion)
+    {ok, VBin} = test_types:encode_test_versioningtestv2(#{newset => sets:from_list([3, 1, 2])}),
+    {ok, #{newset := NewSet}} = test_types:decode_test_versioningtestv2(VBin, map),
+    ?assertEqual(sets:from_list([1, 2, 3]), NewSet),
+    ?assertEqual({ok, VBin}, test_types:encode_test_versioningtestv2(#{newset => NewSet})),
     ok.
 
 %% Generates and loads the modules for the semantic fixture. Safe to

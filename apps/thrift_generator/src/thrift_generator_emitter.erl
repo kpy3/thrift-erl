@@ -303,8 +303,8 @@ hrl_struct_forms(S, Ctx) ->
                 undefined ->
                     {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}};
                 Default ->
-                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)},
-                        erl_syntax:revert(const_literal(Default))}
+                    Expr = set_default_expr(F#tg_field.type, const_literal(Default)),
+                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}, erl_syntax:revert(Expr)}
             end,
             erlang_type(F#tg_field.type, Ctx)}
      || F <- S#tg_struct.fields
@@ -846,7 +846,8 @@ record_form(S, Prefix) ->
                 erl_syntax:record_field(erl_syntax:atom(field_atom(F#tg_field.name)));
             Default ->
                 erl_syntax:record_field(
-                    erl_syntax:atom(field_atom(F#tg_field.name)), thrift_generator_emitter_syntax:abstract(Default)
+                    erl_syntax:atom(field_atom(F#tg_field.name)),
+                    set_default_expr(F#tg_field.type, const_literal(Default))
                 )
         end
      || F <- S#tg_struct.fields
@@ -855,6 +856,23 @@ record_form(S, Prefix) ->
         erl_syntax:atom(record),
         [erl_syntax:atom(record_tag(Prefix, S#tg_struct.name)), erl_syntax:tuple(Fields)]
     ).
+
+%% A set field's default literal is wire-shaped (a list); under a
+%% sets/ordset impl the record default builds the declared collection
+%% instead, so a constructed record matches the field's emitted type.
+
+-spec set_default_expr(thrift_type(), erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
+set_default_expr({set, _, Ann}, Default) ->
+    case set_impl(Ann) of
+        list ->
+            Default;
+        sets ->
+            thrift_generator_emitter_syntax:application(sets, from_list, [Default]);
+        ordset ->
+            thrift_generator_emitter_syntax:application(ordsets, from_list, [Default])
+    end;
+set_default_expr(_Type, Default) ->
+    Default.
 
 -spec record_mode(#tg_struct{}) -> boolean().
 record_mode(S) ->
@@ -878,7 +896,25 @@ struct_desc(S, Ctx) ->
 
 -spec field_desc(#tg_field{}, #ectx{}) -> desc().
 field_desc(F, Ctx) ->
-    {F#tg_field.id, F#tg_field.required, type_desc(F#tg_field.type, Ctx), F#tg_field.name, F#tg_field.default}.
+    {
+        F#tg_field.id,
+        F#tg_field.required,
+        type_desc(F#tg_field.type, Ctx),
+        F#tg_field.name,
+        default_term(F#tg_field.default)
+    }.
+
+%% Descriptor defaults are plain Erlang terms: the {list, ...}/{map,
+%% ...} wrappers are an AST shape, introspection carries what the
+%% official generator's struct_info would.
+
+-spec default_term(const_value() | undefined) -> term().
+default_term({list, Values}) ->
+    [default_term(Value) || Value <- Values];
+default_term({map, KVs}) ->
+    #{default_term(K) => default_term(V) || {K, V} <- KVs};
+default_term(Value) ->
+    Value.
 
 -spec enum_info_forms(#tg_module{}) -> erl_syntax:forms().
 enum_info_forms(Mod) ->

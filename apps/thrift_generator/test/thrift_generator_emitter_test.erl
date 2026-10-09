@@ -37,6 +37,7 @@
     struct_codec_test/0,
     enum_and_const_helpers_test/0,
     set_annotation_test/0,
+    namespace_set_default_test/0,
     namespace_prefix_test/0,
     doc_pipeline_test/0
 ]).
@@ -338,6 +339,77 @@ set_annotation_test() ->
     {ok, WireIo} = thrift_erl_binary:encode(WireDesc, [1, 2]),
     WireBin = iolist_to_binary(WireIo),
     ?assertEqual({ok, [1, 2], <<>>}, thrift_erl_binary:decode(WireDesc, WireBin)),
+    ok.
+
+%% The namespace-level erl.set is the file-wide default: unannotated
+%% sets compile to the default impl, an explicit type-level annotation
+%% wins, and a set field's record default builds the declared
+%% collection instead of the wire-shaped literal.
+
+namespace_set_default_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        "namespace erl t (erl.set = \"sets\")\n"
+        "struct Bag {\n"
+        "  1: set<i32> plain,\n"
+        "  2: set<i32> (erl.set = \"ordset\") ords,\n"
+        "  3: optional set<string> with_default = [ \"a\", \"b\" ]\n"
+        "}\n"
+    ),
+    Loaded = [
+        #tg_loaded{name = <<"t">>, prefix = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}
+    ],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Results = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        Results
+    ),
+
+    ?assertEqual(
+        {struct, [
+            {1, default, {set, {base, i32}, sets}, <<"plain">>, undefined},
+            {2, default, {set, {base, i32}, ordset}, <<"ords">>, undefined},
+            {3, optional, {set, {base, string}, sets}, <<"with_default">>, [<<"a">>, <<"b">>]}
+        ]},
+        t_types:struct_info(<<"Bag">>)
+    ),
+
+    %% decode builds sets under the file default, the explicit ordset
+    %% wins for its field; encode under `sets` takes a sets collection
+    %% (no list coercion), list and ordset impls keep taking lists
+    {ok, Bin} = t_types:encode_t_bag(#{plain => sets:from_list([3, 1, 2]), ords => [2, 1]}),
+    {ok, #{plain := Plain, ords := Ords}} = t_types:decode_t_bag(Bin, map),
+    ?assertEqual(sets:from_list([1, 2, 3]), Plain),
+    ?assertEqual([1, 2], Ords),
+
+    %% the hrl and the inline record wrap the record default in the
+    %% impl constructor (the hrl also names the impl type); erl_prettypr
+    %% folds long record fields across lines, so match on
+    %% whitespace-normalised text
+    Sources = thrift_generator_emitter:sources(Model),
+    Flat = fun(Text) -> re:replace(Text, <<"\\s+">>, <<" ">>, [global, {return, binary}]) end,
+    DefaultExprRe = <<"with_default = sets:from_list\\(\\[<<\"a\">>, <<\"b\">>\\]\\)">>,
+    ?assertMatch({match, _}, re:run(Flat(entry_hrl(t_types, Sources)), DefaultExprRe)),
+    ?assertMatch({match, _}, re:run(Flat(entry_source(t_types, Sources)), DefaultExprRe)),
+    ?assertMatch(
+        {match, _},
+        re:run(
+            Flat(entry_hrl(t_types, Sources)),
+            <<"with_default = sets:from_list\\(\\[<<\"a\">>, <<\"b\">>\\]\\) :: sets:set\\(binary\\(\\)\\)">>
+        )
+    ),
+
+    %% a hand-built record encodes under the same contract: the sets
+    %% impl folds back to an element list on the wire. Decode of a
+    %% missing optional field stays undefined — defaults live in the
+    %% record literal, not in decode
+    {ok, Bin2} = t_types:encode_t_bag({t_bag, sets:from_list([1]), [2], undefined}),
+    {ok, #{plain := Plain2, ords := Ords2}} = t_types:decode_t_bag(Bin2, map),
+    ?assertEqual(sets:from_list([1]), Plain2),
+    ?assertEqual([2], Ords2),
     ok.
 
 %% A declared `namespace erl` (or `namespace *`) prefixes every
