@@ -40,7 +40,7 @@ interchangeable behind `thrift_erl:protocol/0`.
 
 The `uuid` base type has no compact encoding (it postdates the format):
 compiling a descriptor containing one succeeds, and encoding or decoding
-through it fails with `{type_not_supported, uuid, compact}`.
+through it fails with `{type_not_supported, {base, uuid}, compact}`.
 
 Like the binary codec, descriptors are compiled before use — compact
 type nibbles precomputed, struct fields indexed by id — with `{ref, ...}`
@@ -77,7 +77,7 @@ process. See `thrift_erl_binary`'s moduledoc for the caching contract.
     | {k_map, nibble(), nibble(), nibble(), k_type(), k_type()}
     | {k_struct, nibble(), k_struct()}
     | {k_ref, nibble(), module(), binary()}
-    | {k_unsupported, thrift_erl_binary:base_type(), compact}.
+    | {k_unsupported, thrift_erl_binary:type_desc(), compact}.
 
 %% A compiled struct: fields in declaration order for encoding, an id
 %% index for decoding, and the required subset for both checks.
@@ -119,13 +119,8 @@ process. See `thrift_erl_binary`'s moduledoc for the caching contract.
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
 -spec encode(thrift_erl_binary:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
-encode({struct, {ref, Module, Name}} = Ref, Value) when is_map(Value) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            encode_struct_k(Compiled, Value);
-        error ->
-            {error, {encode, {unknown_struct, Ref}}}
-    end;
+encode({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
+    encode_resolved(Module, Name, Value);
 encode({struct, {Kind, Fields}} = Desc, Value) when is_atom(Kind), is_list(Fields), is_map(Value) ->
     encode_struct_k(memo_compiled(Desc, Kind, Fields), Value);
 encode({struct, _}, Value) ->
@@ -157,6 +152,17 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
             decode_k(KType, Bin)
     end.
 
+%% The shared resolve-then-encode shape of the top-level ref entry and
+%% the nested `k_ref' encoding.
+-spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
+encode_resolved(Module, Name, Value) ->
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            encode_struct_k(Compiled, Value);
+        error ->
+            {error, {encode, {unknown_struct, {Module, Name}}}}
+    end.
+
 -spec encode_k(k_type(), term()) -> {ok, iodata()} | {error, term()}.
 encode_k({k_base, _N, bool}, true) ->
     {ok, <<?CT_TRUE>>};
@@ -177,7 +183,7 @@ encode_k({k_base, _N, double}, V) when is_number(V) ->
 encode_k({k_base, _N, S}, V) when S =:= string; S =:= binary ->
     encode_binary_k(V);
 encode_k({k_enum, _N, Desc}, V) ->
-    case enum_to_int(Desc, V) of
+    case thrift_erl_protocol:enum_to_int(Desc, V) of
         {ok, Int} -> {ok, zigzag_varint(Int)};
         error -> {error, {encode, {unknown_enum_value, V}}}
     end;
@@ -190,14 +196,9 @@ encode_k({k_map, _N, KKey, KVal, KElem, KVElem}, Value) when is_map(Value) ->
 encode_k({k_struct, _N, Compiled}, Value) when is_map(Value) ->
     encode_struct_k(Compiled, Value);
 encode_k({k_ref, _N, Module, Name}, Value) when is_map(Value) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            encode_struct_k(Compiled, Value);
-        error ->
-            {error, {encode, {unknown_struct, {Module, Name}}}}
-    end;
-encode_k({k_unsupported, Base, compact}, _V) ->
-    {error, {encode, {type_not_supported, Base, compact}}};
+    encode_resolved(Module, Name, Value);
+encode_k({k_unsupported, Desc, compact}, _V) ->
+    {error, {encode, {type_not_supported, Desc, compact}}};
 encode_k(_Type, Value) ->
     {error, {encode, {value_does_not_match_type, Value}}}.
 
@@ -232,7 +233,7 @@ decode_k({k_base, _N, S}, Bin) when S =:= string; S =:= binary ->
 decode_k({k_enum, _N, Desc}, Bin) ->
     case decode_zigzag(Bin) of
         {ok, Int, Rest} ->
-            case enum_from_int(Desc, Int) of
+            case thrift_erl_protocol:enum_from_int(Desc, Int) of
                 {ok, Atom} -> {ok, Atom, Rest};
                 error -> {ok, Int, Rest}
             end;
@@ -257,8 +258,8 @@ decode_k({k_struct, _N, Compiled}, Bin) ->
     decode_struct_k(Compiled, Bin);
 decode_k({k_ref, _N, Module, Name}, Bin) ->
     decode_ref_struct(Module, Name, Bin);
-decode_k({k_unsupported, Base, compact}, _Bin) ->
-    {error, {decode, {type_not_supported, Base, compact}}};
+decode_k({k_unsupported, Desc, compact}, _Bin) ->
+    {error, {decode, {type_not_supported, Desc, compact}}};
 decode_k({k_base, _N, B}, Bin) when is_binary(Bin) ->
     case byte_size(Bin) >= base_size(B) of
         true -> {error, {decode, {bad_value_for_base_type, B}}};
@@ -505,13 +506,8 @@ check_present_fields(_Kind, ReqNames, _Fields, Map) ->
     end.
 
 -spec all_present([binary()], thrift_erl_binary:struct_value()) -> boolean().
-all_present([], _Map) ->
-    true;
-all_present([Name | Rest], Map) ->
-    case Map of
-        #{Name := _} -> all_present(Rest, Map);
-        #{} -> false
-    end.
+all_present(Names, Map) ->
+    thrift_erl_protocol:all_present(Names, Map).
 
 %%--------------------------------------------------------------------
 %% Containers
@@ -788,7 +784,7 @@ decode_message(<<?PROTOCOL_ID, VersionAndType, Rest/binary>>) ->
     case VersionAndType band ?VERSION_MASK of
         ?VERSION_1 ->
             TypeB = (VersionAndType bsr 5) band ?TYPE_BITS,
-            case message_type(TypeB) of
+            case thrift_erl_protocol:message_type(TypeB) of
                 {ok, Type} ->
                     decode_message_name(Type, Rest);
                 error ->
@@ -817,13 +813,6 @@ decode_message_name(Type, Bin) ->
             Other
     end.
 
--spec message_type(non_neg_integer()) -> {ok, thrift_erl_binary:message_type()} | error.
-message_type(1) -> {ok, call};
-message_type(2) -> {ok, reply};
-message_type(3) -> {ok, exception};
-message_type(4) -> {ok, oneway};
-message_type(_) -> error.
-
 %%--------------------------------------------------------------------
 %% TApplicationException
 %%--------------------------------------------------------------------
@@ -834,10 +823,7 @@ Encodes `TApplicationException` as an EXCEPTION message payload.
 -spec encode_application_exception(binary(), non_neg_integer()) ->
     {ok, iodata()} | {error, term()}.
 encode_application_exception(Message, Code) ->
-    encode(
-        {struct, thrift_erl_protocol:application_exception_desc()},
-        #{<<"message">> => Message, <<"code">> => Code}
-    ).
+    thrift_erl_protocol:encode_application_exception(?MODULE, Message, Code).
 
 -doc """
 Decodes `TApplicationException` from an EXCEPTION message payload.
@@ -847,26 +833,7 @@ Unknown fields are skipped per the usual struct rules.
 -spec decode_application_exception(binary()) ->
     decode_result(thrift_erl_binary:application_exception()).
 decode_application_exception(Bin) ->
-    case decode({struct, thrift_erl_protocol:application_exception_desc()}, Bin) of
-        {ok, #{<<"message">> := Message} = Map, Rest} ->
-            {ok,
-                #{
-                    message => Message,
-                    code => maps:get(<<"code">>, Map, 0),
-                    name => thrift_erl_protocol:application_exception_name(maps:get(<<"code">>, Map, 0))
-                },
-                Rest};
-        {ok, Map, Rest} ->
-            {ok,
-                #{
-                    message => <<>>,
-                    code => maps:get(<<"code">>, Map, 0),
-                    name => thrift_erl_protocol:application_exception_name(maps:get(<<"code">>, Map, 0))
-                },
-                Rest};
-        Other ->
-            Other
-    end.
+    thrift_erl_protocol:decode_application_exception(?MODULE, Bin).
 
 %%--------------------------------------------------------------------
 %% Descriptor compilation
@@ -874,7 +841,7 @@ decode_application_exception(Bin) ->
 
 -spec compile_type(thrift_erl_binary:type_desc()) -> k_type() | error.
 compile_type({base, uuid}) ->
-    {k_unsupported, uuid, compact};
+    {k_unsupported, {base, uuid}, compact};
 compile_type({base, B}) ->
     case base_nibble(B) of
         error -> error;
@@ -933,20 +900,7 @@ compile_struct(Kind, Fields) ->
 
 -spec resolve_struct(module(), binary()) -> {ok, k_struct()} | error.
 resolve_struct(Module, Name) ->
-    Key = {?MODULE, schema, Module, Name},
-    case persistent_term:get(Key, error) of
-        error ->
-            case Module:struct_info(Name) of
-                {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
-                    Compiled = compile_struct(Kind, Fields),
-                    persistent_term:put(Key, Compiled),
-                    {ok, Compiled};
-                error ->
-                    error
-            end;
-        Compiled ->
-            {ok, Compiled}
-    end.
+    thrift_erl_protocol:resolve_struct(?MODULE, Module, Name, fun compile_struct/2).
 
 -spec decode_ref_struct(module(), binary(), binary()) -> decode_result(thrift_erl_binary:struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
@@ -957,33 +911,12 @@ decode_ref_struct(Module, Name, Bin) ->
             {error, {decode, {unknown_struct, {Module, Name}}}}
     end.
 
--define(MEMO_KEY, {?MODULE, compiled_structs}).
--define(MEMO_LIMIT, 8).
-
 -spec memo_compiled(thrift_erl_binary:type_desc(), struct | union | exception, [
     thrift_erl_binary:field_desc()
 ]) ->
     k_struct().
 memo_compiled(Desc, Kind, Fields) ->
-    case erlang:get(?MEMO_KEY) of
-        undefined ->
-            Compiled = compile_struct(Kind, Fields),
-            erlang:put(?MEMO_KEY, [{Desc, Compiled}]),
-            Compiled;
-        Entries when is_list(Entries) ->
-            case lists:keyfind(Desc, 1, Entries) of
-                {_Desc, Compiled} ->
-                    Compiled;
-                false ->
-                    Compiled = compile_struct(Kind, Fields),
-                    erlang:put(?MEMO_KEY, lists:sublist([{Desc, Compiled} | Entries], ?MEMO_LIMIT)),
-                    Compiled
-            end;
-        _ ->
-            Compiled = compile_struct(Kind, Fields),
-            erlang:put(?MEMO_KEY, [{Desc, Compiled}]),
-            Compiled
-    end.
+    thrift_erl_protocol:memo_compiled(?MODULE, Desc, Kind, Fields, fun compile_struct/2).
 
 %%--------------------------------------------------------------------
 %% Varint and zigzag
@@ -1042,22 +975,5 @@ base_size(i16) -> 2;
 base_size(i32) -> 4;
 base_size(i64) -> 8;
 base_size(double) -> 8;
-base_size(uuid) -> 16;
 base_size(string) -> 0;
 base_size(binary) -> 0.
-
--spec enum_to_int(thrift_erl_binary:enum_desc(), atom() | integer()) -> {ok, integer()} | error.
-enum_to_int(Desc, V) when is_atom(V) ->
-    case lists:keyfind(V, 2, Desc) of
-        {Int, V} -> {ok, Int};
-        false -> error
-    end;
-enum_to_int(_Desc, V) when is_integer(V) ->
-    {ok, V}.
-
--spec enum_from_int(thrift_erl_binary:enum_desc(), integer()) -> {ok, atom()} | error.
-enum_from_int(Desc, Int) ->
-    case lists:keyfind(Int, 1, Desc) of
-        {Int, Atom} -> {ok, Atom};
-        false -> error
-    end.

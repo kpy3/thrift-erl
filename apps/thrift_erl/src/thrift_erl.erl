@@ -67,7 +67,7 @@ and `thrift_erl_server`.
 
 %% Tag index emitted by the generator into `<mod>_types.erl`:
 %% record tag or `__struct__` key -> struct descriptor.
--type tag_index() :: #{atom() => thrift_erl_binary:type_desc()}.
+-type tag_index() :: #{atom() => thrift_erl_protocol:type_desc()}.
 
 %% The thrift_erl_protocol callback set a custom protocol module must
 %% export.
