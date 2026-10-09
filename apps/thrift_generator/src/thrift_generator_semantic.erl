@@ -388,16 +388,17 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
                 Ctx1
         end,
     Ctx3 = validate_type(Type, Line, Ctx2),
-    {DefaultResolved, Ctx4} =
+    Ctx4 = reject_misplaced_set_impl(FieldNode#thrift_generator_node.annotations, Line, Ctx3),
+    {DefaultResolved, Ctx5} =
         case Default of
             undefined ->
-                {undefined, Ctx3};
+                {undefined, Ctx4};
             _ ->
-                case resolve_value(Default, #{}, Ctx3) of
+                case resolve_value(Default, #{}, Ctx4) of
                     {ok, Resolved} ->
-                        {Resolved, Ctx3};
+                        {Resolved, Ctx4};
                     {error, Reason} ->
-                        {undefined, err(Line, "unresolved default value: ~ts", [format("~tp", [Reason])], Ctx3)}
+                        {undefined, err(Line, "unresolved default value: ~ts", [format("~tp", [Reason])], Ctx4)}
                 end
         end,
     Field =
@@ -410,7 +411,7 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
             erl = FieldNode#thrift_generator_node.annotations,
             doc = FieldNode#thrift_generator_node.doc
         },
-    analyze_fields(Rest, Kind, Next, Seen#{Id => FieldName}, [Field | Acc], Ctx4).
+    analyze_fields(Rest, Kind, Next, Seen#{Id => FieldName}, [Field | Acc], Ctx5).
 
 %% -- enums -----------------------------------------------------------
 
@@ -485,6 +486,7 @@ analyze_typedef(Node, {Acc, Ctx}) ->
             #thrift_generator_typedef{name = Name, type = Type} = Node#thrift_generator_node.payload,
             Line = Node#thrift_generator_node.line,
             Ctx1 = validate_type(Type, Line, Ctx),
+            Ctx2 = reject_misplaced_set_impl(Node#thrift_generator_node.annotations, Line, Ctx1),
             Typedef =
                 #tg_typedef{
                     name = Name,
@@ -493,7 +495,7 @@ analyze_typedef(Node, {Acc, Ctx}) ->
                     doc = Node#thrift_generator_node.doc,
                     line = Line
                 },
-            {[Typedef | Acc], Ctx1};
+            {[Typedef | Acc], Ctx2};
         _ ->
             {Acc, Ctx}
     end.
@@ -876,6 +878,24 @@ validate_set_impl(Ann, Line, Ctx) ->
             Ctx;
         {ok, Impl} ->
             err(Line, "unknown erl.set ~ts (expected \"sets\" or \"ordset\")", [Impl], Ctx)
+    end.
+
+%% `erl.set` only works as a type annotation (between the set<...> type
+%% and the name); written after the name it would land on the field or
+%% typedef node and be silently ignored, so reject it up front.
+
+-spec reject_misplaced_set_impl(erl_annotations(), non_neg_integer(), #ctx{}) -> #ctx{}.
+reject_misplaced_set_impl(Ann, Line, Ctx) ->
+    case maps:is_key(set, Ann) of
+        true ->
+            err(
+                Line,
+                "erl.set belongs between the set<...> type and the name, not after it",
+                [],
+                Ctx
+            );
+        false ->
+            Ctx
     end.
 
 %% A name without dots resolves locally; a dotted name resolves as

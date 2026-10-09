@@ -43,6 +43,13 @@ struct_info(<<"BinKeys">>) ->
     {struct, [
         {1, default, {base, string}, <<"s">>, undefined}
     ]};
+struct_info(<<"SetBag">>) ->
+    {struct, [
+        {1, default, {set, {base, i32}, list}, <<"plain">>, undefined},
+        {2, default, {set, {base, i32}, ordset}, <<"ords">>, undefined},
+        {3, default, {set, {base, string}, sets}, <<"tags">>, undefined},
+        {4, default, {set, {set, {base, i32}, ordset}, sets}, <<"nested">>, undefined}
+    ]};
 struct_info(_) ->
     error.
 
@@ -60,5 +67,7 @@ record_fields(<<"Loose">>) ->
     {map, atom};
 record_fields(<<"BinKeys">>) ->
     {map, binary};
+record_fields(<<"SetBag">>) ->
+    {setbag, [plain, ords, tags, nested]};
 record_fields(_) ->
     none.

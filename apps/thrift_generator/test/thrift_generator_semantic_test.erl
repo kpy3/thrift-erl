@@ -42,7 +42,8 @@
     const_codec_clash_error_test/0,
     const_reserved_clash_error_test/0,
     struct_annotation_error_test/0,
-    set_annotation_error_test/0
+    set_annotation_error_test/0,
+    misplaced_set_annotation_error_test/0
 ]).
 
 -spec analyze(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.
@@ -259,4 +260,20 @@ set_annotation_error_test() ->
     {ok, _} = analyze(<<"struct S { 1: set<i32> (erl.set = \"sets\") tags }">>),
     {ok, _} = analyze(<<"typedef set<i32> (erl.set = \"ordset\") Tags">>),
     {ok, _} = analyze(<<"struct S { 1: set<set<i32>> tags }">>),
+    ok.
+
+%% erl.set written after the name lands on the field or typedef node,
+%% where nothing would read it — the set would silently decode as a
+%% plain list, so the semantic pass rejects it instead.
+
+misplaced_set_annotation_error_test() ->
+    Message = <<"erl.set belongs between the set<...> type and the name, not after it">>,
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, Message}]},
+        analyze(<<"struct S { 1: set<i32> tags (erl.set = \"ordset\") }">>)
+    ),
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, Message}]},
+        analyze(<<"typedef set<i32> Tags (erl.set = \"ordset\")">>)
+    ),
     ok.

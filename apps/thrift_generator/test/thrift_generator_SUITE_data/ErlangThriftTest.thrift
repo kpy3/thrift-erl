@@ -21,7 +21,7 @@
  * details.
  */
 
-namespace erl test (erl.set_type = "sets_v2")
+namespace erl test
 
 /**
  * Docstring!
@@ -41,7 +41,7 @@ const Numberz myNumberz = Numberz.ONE;
 // const Numberz urNumberz = ONE;
 
 typedef i64 UserId (erl.type = "nominal")
-typedef set<string> UserIds (erl.set_type = "ordset")
+typedef set<string> (erl.set = "ordset") UserIds
 
 struct Bonk
 {
@@ -88,7 +88,7 @@ struct Insanity
 
 struct CrazyNesting {
   1: string string_field,
-  2: optional set<Insanity> set_field (erl.set_type = "ordset"),
+  2: optional set<Insanity> (erl.set = "ordset") set_field,
   // Do not insert line break as test/go/Makefile.am is removing this line with pattern match
   3: required list<map<set<i32> (python.immutable = ""), map<i32,set<list<map<Insanity,string>(python.immutable = "")> (python.immutable = "")>>>> list_field,
   4: binary binary_field

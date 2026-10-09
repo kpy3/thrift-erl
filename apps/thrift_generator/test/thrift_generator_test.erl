@@ -44,22 +44,22 @@
 
 namespace_annotations_test() ->
     {ok, Doc} = thrift_generator:parse_string(
-        <<"namespace erl test (erl.set_type = \"sets_v2\")">>
+        <<"namespace erl test (erl.note = \"hello\")">>
     ),
     #thrift_generator_document{headers = [Namespace]} = Doc#thrift_generator_node.payload,
     #thrift_generator_namespace{scope = <<"erl">>, name = <<"test">>} =
         Namespace#thrift_generator_node.payload,
-    ?assertEqual(#{set_type => <<"sets_v2">>}, Namespace#thrift_generator_node.annotations),
+    ?assertEqual(#{note => <<"hello">>}, Namespace#thrift_generator_node.annotations),
     ok.
 
 star_namespace_annotations_test() ->
     {ok, Doc} = thrift_generator:parse_string(
-        <<"namespace * test (erl.set_type = \"sets_v2\")">>
+        <<"namespace * test (erl.note = \"hello\")">>
     ),
     #thrift_generator_document{headers = [Namespace]} = Doc#thrift_generator_node.payload,
     #thrift_generator_namespace{scope = <<"*">>, name = <<"test">>} =
         Namespace#thrift_generator_node.payload,
-    ?assertEqual(#{set_type => <<"sets_v2">>}, Namespace#thrift_generator_node.annotations),
+    ?assertEqual(#{note => <<"hello">>}, Namespace#thrift_generator_node.annotations),
     ok.
 
 typedef_node_test() ->
@@ -100,25 +100,27 @@ container_type_annotations_test() ->
 field_type_annotations_test() ->
     %% Annotations written between the type and the field name belong
     %% to the type; annotations after the name are the field's own.
+    %% `erl.set` is the canonical case: only the type position reaches
+    %% the generated descriptor.
     {ok, Doc} = thrift_generator:parse_string(
-        <<"struct S { 1: set<string> (erl.set_type = \"ordset\") ids }">>
+        <<"struct S { 1: set<string> (erl.set = \"ordset\") ids }">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
     #thrift_generator_struct{fields = [Field]} = Struct#thrift_generator_node.payload,
-    #thrift_generator_field{type = {set, {base, string, #{}}, #{<<"erl.set_type">> := <<"ordset">>}}} =
+    #thrift_generator_field{type = {set, {base, string, #{}}, #{<<"erl.set">> := <<"ordset">>}}} =
         Field#thrift_generator_node.payload,
     ?assertEqual(#{}, Field#thrift_generator_node.annotations),
     ok.
 
 field_own_annotations_test() ->
     {ok, Doc} = thrift_generator:parse_string(
-        <<"struct S { 1: set<string> ids (erl.set_type = \"ordset\") }">>
+        <<"struct S { 1: set<string> ids (erl.note = \"x\") }">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
     #thrift_generator_struct{fields = [Field]} = Struct#thrift_generator_node.payload,
-    #thrift_generator_field{type = {set, {base, string, #{}}, #{}}} =
+    #thrift_generator_field{type = {set, {base, string, #{}}, #{}}, name = <<"ids">>} =
         Field#thrift_generator_node.payload,
-    ?assertEqual(#{set_type => <<"ordset">>}, Field#thrift_generator_node.annotations),
+    ?assertEqual(#{note => <<"x">>}, Field#thrift_generator_node.annotations),
     ok.
 
 doc_comment_test() ->

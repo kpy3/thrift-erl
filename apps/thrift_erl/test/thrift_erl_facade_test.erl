@@ -31,6 +31,7 @@
     record_engine_repr_test/0,
     record_engine_map_mode_test/0,
     record_engine_wire_passthrough_test/0,
+    record_engine_set_impl_test/0,
     native_repr_test/0,
     encode_bad_value_shape_test/0,
     encode_strict_test/0,
@@ -216,6 +217,66 @@ record_engine_wire_passthrough_test() ->
     Plain = {struct, {ref, ?FIXTURE, <<"Unknown">>}},
     ?assertEqual(Value, thrift_erl_record:to_wire(Plain, Value)),
     ?assertEqual(Value, thrift_erl_record:from_wire(Plain, Value, struct)),
+    ok.
+
+%% The `erl.set` axis: descriptor impls only shape the in-process value,
+%% the wire stays the element list. `list` passes through, `ordset`
+%% sorts and dedups, `sets` builds a v2 set — in both directions and
+%% uniformly across nesting.
+
+record_engine_set_impl_test() ->
+    %% bare set descriptors, record repr
+    ?assertEqual([3, 1, 2], thrift_erl_record:from_wire({set, {base, i32}, list}, [3, 1, 2], record)),
+    ?assertEqual(
+        [1, 2, 3],
+        thrift_erl_record:from_wire({set, {base, i32}, ordset}, [3, 1, 2, 1], record)
+    ),
+    ?assertEqual(
+        sets:from_list([1, 2, 3]),
+        thrift_erl_record:from_wire({set, {base, i32}, sets}, [3, 1, 2, 1], record)
+    ),
+    %% nesting: an outer sets of inner ordsets
+    Nested = {set, {set, {base, i32}, ordset}, sets},
+    ?assertEqual(
+        sets:from_list([[1, 2], [5]]),
+        thrift_erl_record:from_wire(Nested, [[2, 1, 1], [5]], record)
+    ),
+    %% to_wire takes each impl's shape (and a plain list) and yields the
+    %% element list
+    ?assertEqual([1, 2], thrift_erl_record:to_wire({set, {base, i32}, list}, [1, 2])),
+    ?assertEqual([1, 2], thrift_erl_record:to_wire({set, {base, i32}, ordset}, ordsets:from_list([2, 1]))),
+    ?assertEqual(
+        [1, 2],
+        thrift_erl_record:to_wire({set, {base, i32}, sets}, sets:from_list([2, 1]))
+    ),
+    ?assertEqual(
+        [[1, 2]],
+        thrift_erl_record:to_wire(Nested, sets:from_list([ordsets:from_list([1, 2])]))
+    ),
+    %% the same over the facade on a record-mode struct: encode accepts
+    %% each impl's input shape, decode rebuilds it, auto-detect closes
+    %% the loop
+    SetBag = {struct, {ref, ?FIXTURE, <<"SetBag">>}},
+    {ok, Bin} =
+        thrift_erl:encode(
+            SetBag,
+            {setbag, [3, 1], ordsets:from_list([3, 1, 2, 1]), sets:from_list([<<"b">>, <<"a">>]),
+                sets:from_list([[2, 1, 1]])}
+        ),
+    {ok, {setbag, Plain, Ords, Tags, NestedOut}} = thrift_erl:decode(SetBag, Bin, record),
+    ?assertEqual([3, 1], Plain),
+    ?assertEqual([1, 2, 3], Ords),
+    ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), Tags),
+    ?assertEqual(sets:from_list([[1, 2]]), NestedOut),
+    %% encode passes values through as given (a [2, 1, 1] input stays on
+    %% the wire), the decode above normalized it, and re-encoding the
+    %% decoded value reproduces the normalized bytes
+    {ok, NormBin} =
+        thrift_erl:encode(SetBag, {setbag, [3, 1], [1, 2, 3], Tags, sets:from_list([[1, 2]])}),
+    ?assertEqual(
+        {ok, NormBin},
+        thrift_erl:encode(SetBag, {setbag, Plain, Ords, Tags, NestedOut})
+    ),
     ok.
 
 %% The EEP-79 axis: native records minted from the descriptor, read
