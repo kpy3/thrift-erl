@@ -41,7 +41,7 @@ that role on both ends).
 
 -export_type([headers/0, request/0, response/0]).
 
--define(MAX_HEADER_SIZE, 16 * 1024).
+-define(MAX_HEADER_SIZE, (16 * 1024)).
 -define(CONTENT_TYPE, <<"application/x-thrift">>).
 
 -type headers() :: [{binary(), binary()}].
