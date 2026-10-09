@@ -1154,7 +1154,15 @@ qualified_desc(ModKey, Local, Ctx) ->
                 {ok, E} ->
                     {enum, enum_desc(E)};
                 error ->
-                    error({unresolved_type, ModKey, Local})
+                    %% A typedef from another module (base.Timestamp and
+                    %% friends) resolves in its own module's context, so
+                    %% refs inside its body stay home.
+                    case find_typedef(Module, Local) of
+                        {ok, Type} ->
+                            type_desc(Type, Ctx#ectx{current = ModKey});
+                        error ->
+                            error({unresolved_type, ModKey, Local})
+                    end
             end
     end.
 
