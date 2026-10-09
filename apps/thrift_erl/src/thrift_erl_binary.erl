@@ -467,26 +467,39 @@ decode_ref_struct(Module, Name, Bin) ->
 
 %% The specialized-codec probe: generated types modules export
 %% `binary_codec/1` handing out their per-struct wire function pairs.
-%% Cached in `persistent_term` under the same no-hot-swap assumption as
-%% the schema cache — both the hit and the miss are stored, so a module
-%% without the export pays the probe once.
+%% The persistent_term cache stores only whether the module exports the
+%% lookup — the funs themselves come fresh from the module on every
+%% call, so reloading a types module (as the test suite does) never
+%% leaves a fun from a purged version in the cache. The export fact is
+%% still cached once, so a module without the export pays the probe
+%% once. Version drift between a cached export and the current module
+%% remains the documented no-hot-swap scenario.
 
 -spec binary_codec(module(), binary()) -> {ok, fun(), fun()} | error.
 binary_codec(Module, Name) ->
-    Key = {?MODULE, codec, Module, Name},
+    Key = {?MODULE, codec_export, Module},
     case persistent_term:get(Key, probe) of
-        {ok, Encode, Decode} ->
-            {ok, Encode, Decode};
-        none ->
-            error;
-        probe ->
+        yes ->
             case probe_codec(Module, Name) of
-                {ok, _Encode, _Decode} = Found ->
-                    persistent_term:put(Key, Found),
+                {ok, _, _} = Found ->
                     Found;
                 none ->
-                    persistent_term:put(Key, none),
                     error
+            end;
+        no ->
+            error;
+        probe ->
+            Found = probe_codec(Module, Name),
+            persistent_term:put(
+                Key,
+                case Found of
+                    {ok, _, _} -> yes;
+                    none -> no
+                end
+            ),
+            case Found of
+                {ok, _, _} -> Found;
+                none -> error
             end
     end.
 

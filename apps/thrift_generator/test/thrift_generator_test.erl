@@ -33,6 +33,7 @@
     doc_comment_test/0,
     line_doc_comment_test/0,
     hash_comment_test/0,
+    snake_case_names_test/0,
     header_doc_comment_test/0,
     merged_doc_comment_test/0,
     enum_values_test/0,
@@ -187,6 +188,21 @@ merged_doc_comment_test() ->
     ),
     [Struct] = Doc#thrift_generator_node.payload#thrift_generator_document.definitions,
     ?assertEqual(<<"First block.\nSecond line.">>, Struct#thrift_generator_node.doc),
+    ok.
+
+%% Derived identifiers snake-case the IDL name: record tags, type
+%% aliases and helper names stay readable for multi-word CamelCase
+%% structs (wire names and enum atoms are untouched).
+
+snake_case_names_test() ->
+    ?assertEqual(<<"invoice_bank_account">>, thrift_generator_names:snake(<<"InvoiceBankAccount">>)),
+    ?assertEqual(<<"country_id_ref">>, thrift_generator_names:snake(<<"CountryIDRef">>)),
+    ?assertEqual(<<"three_ds_verification">>, thrift_generator_names:snake(<<"ThreeDSVerification">>)),
+    ?assertEqual(<<"utf8_value">>, thrift_generator_names:snake(<<"UTF8Value">>)),
+    ?assertEqual(<<"already_snake">>, thrift_generator_names:snake(<<"already_snake">>)),
+    ?assertEqual(<<"plain">>, thrift_generator_names:snake(<<"Plain">>)),
+    ?assertEqual(<<"kind_value">>, thrift_generator_names:snake(<<"KIND_VALUE">>)),
+    ?assertEqual(<<"v2_fast">>, thrift_generator_names:snake(<<"V2Fast">>)),
     ok.
 
 enum_values_test() ->

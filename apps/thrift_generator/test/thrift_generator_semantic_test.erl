@@ -45,7 +45,10 @@
     set_annotation_error_test/0,
     misplaced_set_annotation_error_test/0,
     namespace_set_default_test/0,
-    namespace_set_default_error_test/0
+    namespace_set_default_error_test/0,
+    namespace_union_default_test/0,
+    namespace_union_default_error_test/0,
+    union_type_validation_test/0
 ]).
 
 -spec analyze(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.
@@ -335,5 +338,60 @@ namespace_set_default_error_test() ->
     ?assertMatch(
         {error, [{<<"t.thrift">>, _, <<"unknown erl.set v2 (expected \"sets\" or \"ordset\")">>}]},
         analyze("namespace erl t (erl.set = \"v2\")\nstruct S { 1: i32 x }")
+    ),
+    ok.
+
+%% The namespace header's erl.union_type is the file-wide union
+%% representation; explicit per-union annotations win.
+
+namespace_union_default_test() ->
+    {ok, Model} =
+        analyze(
+            "namespace erl t (erl.union_type = \"sum\")\n"
+            "union Value { 1: i64 n }\n"
+            "union Legacy { 1: i64 n } (erl.union_type = \"record\")\n"
+            "struct S { 1: i32 x }\n"
+        ),
+    Module = model_module(Model),
+    [Value, Legacy, _S] = Module#tg_module.structs,
+    ?assertEqual(#{union_type => <<"sum">>}, Value#tg_struct.erl),
+    ?assertEqual(#{union_type => <<"record">>}, Legacy#tg_struct.erl),
+    {ok, WildcardModel} =
+        analyze(
+            "namespace * t (erl.union_type = \"sum\")\n"
+            "namespace erl t (erl.union_type = \"record\")\n"
+            "union U { 1: i64 n }"
+        ),
+    [U] = (model_module(WildcardModel))#tg_module.structs,
+    %% A record default injects nothing — the annotation stays absent,
+    %% exactly like erl.set's list default.
+    ?assertEqual(#{}, U#tg_struct.erl),
+    ok.
+
+namespace_union_default_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.union_type tagged (expected \"record\" or \"sum\")">>}]},
+        analyze("namespace erl t (erl.union_type = \"tagged\")\nunion U { 1: i64 n }")
+    ),
+    ok.
+
+union_type_validation_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"erl.union_type belongs on a union">>}]},
+        analyze(<<"struct S { 1: i64 x } (erl.union_type = \"sum\")">>)
+    ),
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.union_type tuple (expected \"record\" or \"sum\")">>}]},
+        analyze(<<"union U { 1: i64 n } (erl.union_type = \"tuple\")">>)
+    ),
+    %% Two sum unions of one module cannot claim the same field atom:
+    %% the atoms are convert/2's tags.
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"duplicate sum union field n">>}]},
+        analyze(
+            "namespace erl t (erl.union_type = \"sum\")\n"
+            "union A { 1: i64 n }\n"
+            "union B { 1: string n }"
+        )
     ),
     ok.

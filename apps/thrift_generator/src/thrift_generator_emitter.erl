@@ -17,12 +17,13 @@
 -moduledoc """
 Turns the semantic model into Erlang modules.
 
-Per IDL file a `<mod>_types.erl` is emitted: records for structs (map
-representation via the `erl.struct_type = "map"` annotation), the
-introspection surface (`struct_info/1`, `enum_info/1`,
-`function_info/2`, `service_info/0`) and the record-field index
-(`record_fields/1`) that `thrift_erl_record` uses to bridge records
-and the wire.
+Per IDL file a `<mod>_types.erl` is emitted: records for structs and
+unions (map representation via the `erl.struct_type = "map"`
+annotation, tagged-tuple sums via `erl.union_type = "sum"` on a union
+or its namespace header), the introspection surface (`struct_info/1`,
+`enum_info/1`, `function_info/2`, `service_info/0`) and the
+record-field index (`record_fields/1`) that `thrift_erl_record` uses
+to bridge records and the wire.
 
 Per service: `<svc>_handler.erl` (the `-callback` behaviour),
 `<svc>_server.erl` (a `thrift_erl_service` implementation plus the
@@ -43,6 +44,7 @@ the descriptor terms, which keeps the emitter declarative.
     record_form/2,
     sanitize/1,
     section_label/1,
+    sum_mode/1,
     type_desc/2
 ]).
 
@@ -300,30 +302,53 @@ hrl_record_forms(Mod, Ctx) ->
         [thrift_generator_emitter_syntax:section_form(section_label(S))] ++
             hrl_struct_forms(S, Ctx)
      || S <- Mod#tg_module.structs,
-        record_mode(S)
+        record_mode(S) orelse sum_mode(S)
     ]).
 
 -spec hrl_struct_forms(#tg_struct{}, #ectx{}) -> erl_syntax:forms().
 hrl_struct_forms(S, Ctx) ->
     Anno = erl_anno:new(0),
     Tag = record_tag(current_prefix(Ctx), S#tg_struct.name),
-    TypedFields = [
-        {typed_record_field,
-            case F#tg_field.default of
-                undefined ->
-                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}};
-                Default ->
-                    Expr = set_default_expr(F#tg_field.type, const_literal(Default)),
-                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}, erl_syntax:revert(Expr)}
-            end,
-            erlang_type(F#tg_field.type, Ctx)}
+    case sum_mode(S) of
+        true ->
+            %% A sum union has no record: the alias IS the type, a
+            %% union of {field atom, payload} tuples.
+            [{attribute, Anno, type, {Tag, sum_type_node(S, Ctx), []}}];
+        false ->
+            TypedFields = [
+                {typed_record_field,
+                    case F#tg_field.default of
+                        undefined ->
+                            {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}};
+                        Default ->
+                            Expr = set_default_expr(F#tg_field.type, const_literal(Default)),
+                            {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}, erl_syntax:revert(Expr)}
+                    end,
+                    erlang_type(F#tg_field.type, Ctx)}
+             || F <- S#tg_struct.fields
+            ],
+            RecordForm = {attribute, Anno, record, {Tag, TypedFields}},
+            TypeAlias = {attribute, Anno, type, {Tag, {type, Anno, record, [{atom, Anno, Tag}]}, []}},
+            [RecordForm, TypeAlias]
+    end.
+
+%% The sum type of a `erl.union_type = "sum"' union: one {Tag, Payload}
+%% tuple per field, payload types inline.
+
+-spec sum_type_node(#tg_struct{}, #ectx{}) -> erl_syntax:syntaxTree().
+sum_type_node(S, Ctx) ->
+    Anno = erl_anno:new(0),
+    Tuples = [
+        {type, Anno, tuple, [
+            {atom, Anno, field_atom(F#tg_field.name)},
+            erlang_type(F#tg_field.type, Ctx)
+        ]}
      || F <- S#tg_struct.fields
     ],
-    RecordForm =
-        {attribute, Anno, record, {Tag, TypedFields}},
-    TypeAlias =
-        {attribute, Anno, type, {Tag, {type, Anno, record, [{atom, Anno, Tag}]}, []}},
-    [RecordForm, TypeAlias].
+    case Tuples of
+        [One] -> One;
+        Many -> {type, Anno, union, Many}
+    end.
 
 -spec hrl_enum_forms(#tg_module{}) -> erl_syntax:forms().
 hrl_enum_forms(Mod) ->
@@ -416,10 +441,13 @@ struct_codec_one(S, Ctx) ->
     Prefix = typed_prefix(current_prefix(Ctx), thrift_generator_names:snake(S#tg_struct.name)),
     Encode = binary_to_atom(<<"encode_", Prefix/binary>>, utf8),
     Decode = binary_to_atom(<<"decode_", Prefix/binary>>, utf8),
+    %% A sum union has no record: its default representation is the
+    %% tagged tuple, reached through the `record' axis. Map-mode
+    %% structs default to their atom-keyed map.
     DefaultRepr =
-        case record_mode(S) of
-            true -> record;
-            false -> map
+        case {sum_mode(S), record_mode(S)} of
+            {false, false} -> map;
+            _ -> record
         end,
     Desc = struct_ref(S, Ctx),
     Doc = S#tg_struct.doc,
@@ -477,9 +505,10 @@ struct_codec_one(S, Ctx) ->
         thrift_generator_emitter_syntax:doc_form(
             Doc,
             <<
-                "Decodes the whole binary into the default representation"
-                " (record for record-mode structs, map otherwise); trailing"
-                " bytes or truncation fail the decode."
+                "Decodes the whole binary into the struct's default"
+                " representation (record, atom-keyed map, or the sum"
+                " union's tagged tuple); trailing bytes or truncation"
+                " fail the decode."
             >>
         ) ++
         [DecodeSpec(1)] ++
@@ -588,13 +617,15 @@ struct_index_tag(S, Prefix) ->
 
 -spec value_type(#tg_struct{}, #ectx{}) -> erl_syntax:syntaxTree().
 value_type(S, Ctx) ->
-    case record_mode(S) of
-        true ->
+    case {sum_mode(S), record_mode(S)} of
+        {true, _} ->
+            sum_type_node(S, Ctx);
+        {false, true} ->
             Tag = record_tag(current_prefix(Ctx), S#tg_struct.name),
             {type, erl_anno:new(0), union, [
                 thrift_generator_emitter_syntax:record_type(Tag), thrift_generator_emitter_syntax:raw_type(map)
             ]};
-        false ->
+        {false, false} ->
             thrift_generator_emitter_syntax:raw_type(map)
     end.
 
@@ -605,10 +636,18 @@ value_type(S, Ctx) ->
 -spec tag_index_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 tag_index_forms(Mod, Ctx) ->
     Anno = erl_anno:new(0),
-    Pairs = [
-        {struct_index_tag(S, current_prefix(Ctx)), struct_ref(S, Ctx)}
+    Pairs = lists:append([
+        case sum_mode(S) of
+            %% A sum-union value carries a field atom as its tag: every
+            %% field indexes the union (the semantic rejects atoms
+            %% claimed by two unions of one module).
+            true ->
+                [{field_atom(F#tg_field.name), struct_ref(S, Ctx)} || F <- S#tg_struct.fields];
+            false ->
+                [{struct_index_tag(S, current_prefix(Ctx)), struct_ref(S, Ctx)}]
+        end
      || S <- Mod#tg_module.structs
-    ],
+    ]),
     [
         {attribute, Anno, spec,
             {{tag_index, 0}, [
@@ -640,7 +679,7 @@ tag_index_forms(Mod, Ctx) ->
             <<
                 "The struct tag -> descriptor map `thrift_erl:convert/3` takes:"
                 " record tags for record-mode structs, wire names for"
-                " map-mode ones."
+                " map-mode ones, sum-union field atoms for sums."
             >>
         ) ++
         thrift_generator_emitter_syntax:fn_form(tag_index, [
@@ -891,10 +930,24 @@ set_default_expr({set, _, Ann}, Default) ->
 set_default_expr(_Type, Default) ->
     Default.
 
+%% Representations of a generated struct-family definition:
+%%
+%% - `record_mode' — the tuple record (structs and unions by default);
+%% - `sum_mode' — unions only, the `erl.union_type = "sum"' form: the
+%%   value is a `{FieldAtom, Value}' tagged tuple, no record exists;
+%% - anything else (`erl.struct_type = "map"') is the atom-keyed map.
+
 -spec record_mode(#tg_struct{}) -> boolean().
 record_mode(S) ->
-    not is_map_key(struct_type, S#tg_struct.erl) orelse
-        maps:get(struct_type, S#tg_struct.erl) =/= <<"map">>.
+    not sum_mode(S) andalso
+        (not is_map_key(struct_type, S#tg_struct.erl) orelse
+            maps:get(struct_type, S#tg_struct.erl) =/= <<"map">>).
+
+-doc "Whether the union is generated as a tagged-tuple sum type.".
+-spec sum_mode(#tg_struct{}) -> boolean().
+sum_mode(S) ->
+    S#tg_struct.kind =:= union andalso
+        maps:get(union_type, S#tg_struct.erl, <<"record">>) =:= <<"sum">>.
 
 -spec struct_info_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 struct_info_forms(Mod, Ctx) ->
@@ -1086,18 +1139,22 @@ record_fields_forms(Mod) ->
     ).
 
 %% The record_fields contract: record mode answers {Tag, FieldAtoms},
-%% map mode answers {map, KeyType} (default atom keys); structs with no
+%% map mode answers {map, KeyType} (default atom keys), sum unions
+%% answer {sum, FieldAtoms} — the runtime converts their {Tag, Value}
+%% tuples by matching the atom against the field list; structs with no
 %% clause fall through to `none` — the wire passthrough.
 
 -spec fields_decl(#tg_struct{}, binary()) -> {atom(), [atom()]} | {map, atom | binary}.
 fields_decl(S, Prefix) ->
-    case record_mode(S) of
-        true ->
+    case {sum_mode(S), record_mode(S)} of
+        {true, _} ->
+            {sum, [field_atom(F#tg_field.name) || F <- S#tg_struct.fields]};
+        {false, true} ->
             {record_tag(Prefix, S#tg_struct.name), [
                 field_atom(F#tg_field.name)
              || F <- S#tg_struct.fields
             ]};
-        false ->
+        {false, false} ->
             {map, map_key_type(S)}
     end.
 
@@ -1337,11 +1394,43 @@ erlang_type({ref, Name, _}, Ctx) ->
     case binary:split(Name, <<".">>) of
         [ModKey, Local] ->
             Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
-            ref_type(find_struct(Module, Local), module_prefix(ModKey, Ctx));
+            qualified_ref_type(find_struct(Module, Local), ModKey, Local, Ctx);
         [Local] ->
             Module = maps:get(Ctx#ectx.current, Ctx#ectx.modules),
-            ref_type(find_struct(Module, Local), current_prefix(Ctx))
+            local_ref_type(find_struct(Module, Local), Ctx)
     end.
+
+-spec local_ref_type({ok, #tg_struct{}} | error, #ectx{}) -> erl_syntax:syntaxTree().
+local_ref_type({ok, S}, Ctx) ->
+    case sum_mode(S) of
+        %% The alias lives in the same hrl; the name resolves at
+        %% compile time even before its definition line.
+        true ->
+            thrift_generator_emitter_syntax:user_type(record_tag(current_prefix(Ctx), S#tg_struct.name));
+        false ->
+            ref_type({ok, S}, current_prefix(Ctx))
+    end;
+local_ref_type(error, _Ctx) ->
+    %% Enums and typedefs surface as their scalar element types.
+    thrift_generator_emitter_syntax:raw_type(term).
+
+-spec qualified_ref_type({ok, #tg_struct{}} | error, module_key(), binary(), #ectx{}) ->
+    erl_syntax:syntaxTree().
+qualified_ref_type({ok, S}, ModKey, Local, Ctx) ->
+    case {sum_mode(S), record_mode(S)} of
+        %% A cross-module sum alias is not nameable from another
+        %% module's record fields (types in records must resolve
+        %% locally) — the precise type stays reachable through the
+        %% defining module's specs.
+        {true, _} ->
+            thrift_generator_emitter_syntax:raw_type(term);
+        {false, true} ->
+            thrift_generator_emitter_syntax:record_type(record_tag(module_prefix(ModKey, Ctx), Local));
+        {false, false} ->
+            thrift_generator_emitter_syntax:raw_type(map)
+    end;
+qualified_ref_type(error, _ModKey, _Local, _Ctx) ->
+    thrift_generator_emitter_syntax:raw_type(term).
 -spec module_prefix(module_key(), #ectx{}) -> binary().
 module_prefix(ModKey, Ctx) ->
     case maps:get(ModKey, Ctx#ectx.modules, undefined) of
@@ -1349,15 +1438,12 @@ module_prefix(ModKey, Ctx) ->
         Mod -> Mod#tg_module.prefix
     end.
 
--spec ref_type({ok, #tg_struct{}} | error, binary()) -> erl_syntax:syntaxTree().
+-spec ref_type({ok, #tg_struct{}}, binary()) -> erl_syntax:syntaxTree().
 ref_type({ok, S}, Prefix) ->
     case record_mode(S) of
         true -> thrift_generator_emitter_syntax:record_type(record_tag(Prefix, S#tg_struct.name));
         false -> thrift_generator_emitter_syntax:raw_type(map)
-    end;
-ref_type(error, _Prefix) ->
-    %% Enums and typedefs surface as their scalar element types.
-    thrift_generator_emitter_syntax:raw_type(term).
+    end.
 %%--------------------------------------------------------------------
 %% In-memory compilation
 %%--------------------------------------------------------------------

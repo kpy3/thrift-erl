@@ -101,7 +101,7 @@ union SomeUnion {
   3: i32 i32_thing,
   4: Xtruct3 xtruct_thing,
   5: Insanity insanity_thing
-} (erl.union_type = "union")
+} (erl.union_type = "sum")
 
 exception Xception {
   1: i32 errorCode,
