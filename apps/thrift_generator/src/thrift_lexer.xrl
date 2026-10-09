@@ -19,8 +19,9 @@ WHITESPACE      = [\s\t\r\n]+
 DOCLINE         = ///[^\n]*
 DOCCOMMENT      = /\*\*([^*]|\*+[^*/])*\*+/
 COMMENT         = //[^\n]*
+HASHCOMMENT     = #[^\n]*
 CCOMMENT        = /\*/*([^*/]|[^*]/|\*[^/])*\**\*/
-COMMENTS        = {COMMENT}|{CCOMMENT}
+COMMENTS        = {COMMENT}|{CCOMMENT}|{HASHCOMMENT}
 
 INT             = [+-]?[0-9]+
 HEX             = [+-]?0x[0-9A-Fa-f]+
