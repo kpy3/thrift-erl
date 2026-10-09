@@ -495,16 +495,21 @@ include a fresh membuffer transport and protocol per operation, which
 its API requires; both sides run on the same ThriftTest payloads. Our
 codec compiles type descriptors once — referenced structs in a shared
 `persistent_term` cache, inline descriptors in a per-process memo — so
-nested schemas are never re-resolved per wire occurrence.
+nested schemas are never re-resolved per wire occurrence. For the
+binary protocol the emitter also writes specialized per-type codecs
+into `<mod>_types.erl`; named struct references dispatch to them via a
+`binary_codec/1` probe (`encode_<X>_wire`/`decode_<X>_wire` with no
+descriptor interpretation on the hot path), while the generic engine
+remains the compact/json path and the introspection fallback.
 
 | case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (42 B)     | encode | 4.37 M/s | 902 K/s | 4.8x |
-| Xtruct            | decode | 1.96 M/s | 431 K/s | 4.5x |
-| Xtruct2 (51 B)    | encode | 1.89 M/s | 623 K/s | 3.0x |
-| Xtruct2           | decode | 1.05 M/s | 230 K/s | 4.6x |
-| Insanity (3.2 KB) | encode | 31.8 K/s | 8.4 K/s | 3.8x |
-| Insanity          | decode | 16.8 K/s | 5.0 K/s | 3.4x |
+| Xtruct (42 B)     | encode | 2.54 M/s | 453 K/s | 5.6x |
+| Xtruct            | decode | 1.36 M/s | 223 K/s | 6.1x |
+| Xtruct2 (51 B)    | encode | 1.48 M/s | 327 K/s | 4.5x |
+| Xtruct2           | decode | 794 K/s  | 119 K/s | 6.7x |
+| Insanity (3.2 KB) | encode | 31.2 K/s | 4.4 K/s | 7.0x |
+| Insanity          | decode | 14.0 K/s | 2.6 K/s | 5.4x |
 
 The **compact protocol** runs the same payload set on both sides —
 `thrift_erl_compact` against the vendored `thrift_compact_protocol`
@@ -512,12 +517,12 @@ The **compact protocol** runs the same payload set on both sides —
 
 | case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (28 B)      | encode | 2.88 M/s | 500 K/s | 5.8x |
-| Xtruct             | decode | 2.04 M/s | 401 K/s | 5.1x |
-| Xtruct2 (24 B)     | encode | 1.50 M/s | 398 K/s | 3.8x |
-| Xtruct2            | decode | 945 K/s  | 253 K/s | 3.7x |
-| Insanity (1.2 KB)  | encode | 19.5 K/s | 9.3 K/s | 2.1x |
-| Insanity           | decode | 16.7 K/s | 4.6 K/s | 3.6x |
+| Xtruct (28 B)      | encode | 1.53 M/s | 252 K/s | 6.1x |
+| Xtruct             | decode | 851 K/s  | 215 K/s | 4.0x |
+| Xtruct2 (24 B)     | encode | 1.04 M/s | 204 K/s | 5.1x |
+| Xtruct2            | decode | 541 K/s  | 130 K/s | 4.2x |
+| Insanity (1.2 KB)  | encode | 11.9 K/s | 5.0 K/s | 2.4x |
+| Insanity           | decode | 7.9 K/s  | 2.4 K/s | 3.3x |
 
 The **JSON protocol** runs the same payload set on both sides —
 `thrift_erl_json` against the vendored `thrift_json_protocol`
@@ -526,11 +531,11 @@ level, since the official JSON reader primes on a whole message):
 
 | case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (87 B)      | encode | 796 K/s | 109 K/s | 7.3x |
-| Xtruct             | decode | 84 K/s  | 66 K/s  | 1.3x |
-| Xtruct2 (110 B)    | encode | 587 K/s | 60 K/s  | 9.8x |
-| Xtruct2            | decode | 51 K/s  | 46 K/s  | 1.1x |
-| Insanity (6.7 KB)  | encode | 5.7 K/s | 1.2 K/s | 4.8x |
+| Xtruct (87 B)      | encode | 794 K/s | 113 K/s | 7.1x |
+| Xtruct             | decode | 101 K/s | 63 K/s  | 1.6x |
+| Xtruct2 (110 B)    | encode | 568 K/s | 57 K/s  | 10.1x |
+| Xtruct2            | decode | 54 K/s  | 45 K/s  | 1.2x |
+| Insanity (6.7 KB)  | encode | 5.3 K/s | 1.2 K/s | 4.5x |
 | Insanity           | decode | 1.1 K/s | 1.1 K/s | 1.0x |
 
 Encode is several times faster because the official side formats every

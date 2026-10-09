@@ -37,9 +37,20 @@ compiled once and cached in `persistent_term` under their names, so
 resolving a nested struct is a constant-time lookup. Inline
 `{Kind, Fields}` descriptors (such as the `function_info/2` params
 structs) are memoized per process under exact equality — generated
-descriptors are literals, so the memo hit is a pointer comparison. The
-caches assume generated types modules are never hot-swapped between
-incompatible versions.
+descriptors are literals, so the memo hit is a pointer comparison.
+
+Generated types modules ship **specialized wire codecs** (the
+`encode_<name>_wire/1` / `decode_<name>_wire/1` pair plus the
+`binary_codec/1` lookup, emitted by the generator): ref descriptors of
+named structs dispatch there, so the hot path runs direct binary
+patterns instead of this engine's compiled-scheme interpreter. The
+interpreter stays for inline descriptors (RPC param/result structs),
+hand-written descriptors, and as the fallback when the probe finds no
+`binary_codec/1`. Compact and JSON are unaffected — they never consult
+the probe.
+
+The caches assume generated types modules are never hot-swapped
+between incompatible versions.
 """.
 
 -export([
@@ -50,7 +61,8 @@ incompatible versions.
     encode_application_exception/2,
     decode_application_exception/1,
     type_id/1,
-    struct_fields/1
+    struct_fields/1,
+    skip_by_wire/2
 ]).
 
 %% The exported encode/decode/message functions are the
@@ -168,14 +180,21 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
     end.
 
 %% The shared resolve-then-encode shape of the top-level ref entry and
-%% the nested `c_ref' encoding.
+%% the nested `c_ref' encoding. A generated module's specialized wire
+%% codec (found through the `binary_codec/1' probe) takes precedence
+%% over the compiled-scheme interpreter.
 -spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
 encode_resolved(Module, Name, Value) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            encode_struct_c(Compiled, Value);
+    case binary_codec(Module, Name) of
+        {ok, Encode, _Decode} ->
+            Encode(Value);
         error ->
-            {error, {encode, {unknown_struct, {Module, Name}}}}
+            case resolve_struct(Module, Name) of
+                {ok, Compiled} ->
+                    encode_struct_c(Compiled, Value);
+                error ->
+                    {error, {encode, {unknown_struct, {Module, Name}}}}
+            end
     end.
 
 -spec encode_c(c_type(), term()) -> {ok, iodata()} | {error, term()}.
@@ -434,11 +453,58 @@ resolve_struct(Module, Name) ->
 
 -spec decode_ref_struct(module(), binary(), binary()) -> decode_result(struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            decode_struct_c(Compiled, Bin);
+    case binary_codec(Module, Name) of
+        {ok, _Encode, Decode} ->
+            Decode(Bin);
         error ->
-            {error, {decode, {unknown_struct, {Module, Name}}}}
+            case resolve_struct(Module, Name) of
+                {ok, Compiled} ->
+                    decode_struct_c(Compiled, Bin);
+                error ->
+                    {error, {decode, {unknown_struct, {Module, Name}}}}
+            end
+    end.
+
+%% The specialized-codec probe: generated types modules export
+%% `binary_codec/1` handing out their per-struct wire function pairs.
+%% Cached in `persistent_term` under the same no-hot-swap assumption as
+%% the schema cache — both the hit and the miss are stored, so a module
+%% without the export pays the probe once.
+
+-spec binary_codec(module(), binary()) -> {ok, fun(), fun()} | error.
+binary_codec(Module, Name) ->
+    Key = {?MODULE, codec, Module, Name},
+    case persistent_term:get(Key, probe) of
+        {ok, Encode, Decode} ->
+            {ok, Encode, Decode};
+        none ->
+            error;
+        probe ->
+            case probe_codec(Module, Name) of
+                {ok, _Encode, _Decode} = Found ->
+                    persistent_term:put(Key, Found),
+                    Found;
+                none ->
+                    persistent_term:put(Key, none),
+                    error
+            end
+    end.
+
+-spec probe_codec(module(), binary()) -> {ok, fun(), fun()} | none.
+probe_codec(Module, Name) ->
+    Loaded =
+        case code:ensure_loaded(Module) of
+            {module, Module} -> true;
+            {error, _} -> false
+        end,
+    case Loaded andalso erlang:function_exported(Module, binary_codec, 1) of
+        true ->
+            case Module:binary_codec(Name) of
+                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
+                error -> none
+            end;
+        false ->
+            none
     end.
 
 %% Compiles an inline `{Kind, Fields}` descriptor (like the params
@@ -669,9 +735,11 @@ decode_pairs_c(CKey, CVal, N, Bin, Acc) ->
 %% Wire-type skipping (forward compatibility)
 %%--------------------------------------------------------------------
 
-%% Skips a value of a raw wire type, used for struct fields with ids the
-%% descriptor does not know.
-
+-doc """
+Skips a value of a raw wire type, used for struct fields with ids the
+descriptor does not know — and by the generated specialized codecs for
+the same purpose.
+""".
 -spec skip_by_wire(non_neg_integer(), binary()) -> {ok, binary()} | more | {error, term()}.
 skip_by_wire(?BOOL, <<_, Rest/binary>>) ->
     {ok, Rest};

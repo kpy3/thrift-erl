@@ -152,7 +152,12 @@ insanity() ->
 run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     #{our_value := OurValue, official_value := OfficialValue, official_check := Check} = Spec,
     Desc = {struct, goldentest_types:struct_info(Name)},
-    {ok, Encoded} = thrift_erl_binary:encode(Desc, OurValue),
+    %% The binary side measures the specialized wire codecs: the ref
+    %% descriptor engages thrift_erl_binary's binary_codec/1 probe.
+    %% Compact and json have no specialized codecs and stay on the
+    %% generic descriptor path.
+    BinDesc = {struct, {ref, goldentest_types, Name}},
+    {ok, Encoded} = thrift_erl_binary:encode(BinDesc, OurValue),
     BinaryWire = iolist_to_binary(Encoded),
     {ok, CompactEncoded} = thrift_erl_compact:encode(Desc, OurValue),
     CompactWire = iolist_to_binary(CompactEncoded),
@@ -167,7 +172,7 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     %% encoding, and the official reader of each protocol must accept
     %% our bytes for that protocol — the same wire-compatibility proof
     %% the golden suite runs over TCP, here at the codec level.
-    {ok, OurDecoded, <<>>} = thrift_erl_binary:decode(Desc, BinaryWire),
+    {ok, OurDecoded, <<>>} = thrift_erl_binary:decode(BinDesc, BinaryWire),
     ?assertEqual(OurValue, OurDecoded),
     {_, {ok, OfficialDecoded}} = official_decode(BinaryWire, binary, OfficialName),
     Check(OfficialDecoded),
@@ -180,8 +185,8 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     {_, {ok, JsonDecoded}} = official_decode_message(JsonMessage, OfficialName),
     Check(JsonDecoded),
 
-    OursEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(Desc, OurValue) end),
-    OursDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(Desc, BinaryWire) end),
+    OursEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(BinDesc, OurValue) end),
+    OursDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(BinDesc, BinaryWire) end),
     OursCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(Desc, OurValue) end),
     OursCompactDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(Desc, CompactWire) end),
     OursJsonEncode = erlbench(fun() -> {ok, _} = thrift_erl_json:encode(Desc, OurValue) end),

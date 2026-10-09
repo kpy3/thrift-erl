@@ -41,7 +41,8 @@ the descriptor terms, which keeps the emitter declarative.
     erlang_type/2,
     record_mode/1,
     record_form/2,
-    sanitize/1
+    sanitize/1,
+    type_desc/2
 ]).
 
 -export_type([compiled/0, source/0]).
@@ -156,6 +157,9 @@ types_forms(Mod, Ctx) ->
                 {convert, 2}
             ]),
             thrift_generator_emitter_syntax:export_form(struct_codec_entries(Mod)),
+            thrift_generator_emitter_syntax:export_form(
+                thrift_generator_codec:export_entries(Mod, Ctx)
+            ),
             thrift_generator_emitter_syntax:export_form(enum_helper_entries(Mod)),
             thrift_generator_emitter_syntax:export_form(const_entries(Mod))
         ],
@@ -173,6 +177,7 @@ types_forms(Mod, Ctx) ->
         service_info_forms(Mod, Ctx) ++
         record_fields_forms(Mod) ++
         struct_codec_forms(Mod, Ctx) ++
+        thrift_generator_codec:module_forms(Mod, Ctx) ++
         tag_index_forms(Mod, Ctx) ++
         enum_helper_forms(Mod) ++
         const_forms(Mod).
@@ -833,7 +838,8 @@ types_doc(Mod) ->
         io_lib:format(
             "Generated from ~ts. Do not edit."
             " Introspection: struct_info/1, enum_info/1, function_info/2,"
-            " service_info/0; record mapping: record_fields/1.",
+            " service_info/0; record mapping: record_fields/1; specialized"
+            " binary wire codecs: binary_codec/1.",
             [Mod#tg_module.path]
         )
     ).
@@ -1097,6 +1103,11 @@ map_key_type(S) ->
 %% Type descriptors
 %%--------------------------------------------------------------------
 
+-doc """
+Converts a model type into the wire descriptor vocabulary the runtime
+codecs consume (resolving references, expanding typedefs and inlining
+enum descriptors); shared with the codec emitter.
+""".
 -spec type_desc(thrift_type(), #ectx{}) -> desc().
 type_desc({base, B, _}, _Ctx) ->
     {base, B};

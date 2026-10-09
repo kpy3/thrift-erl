@@ -82,10 +82,10 @@ connect_timeout(Opts) ->
 -spec umbrella(map(), handshake_timeout | idle_timeout | connect_timeout) ->
     pos_integer() | infinity.
 umbrella(Opts, Key) ->
-    case maps:find(Key, Opts) of
-        {ok, Specific} ->
+    case Opts of
+        #{Key := Specific} ->
             Specific;
-        error ->
+        #{} ->
             maps:get(timeout, Opts, ?DEFAULT_TIMEOUT)
     end.
 
