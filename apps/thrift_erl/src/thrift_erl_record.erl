@@ -39,6 +39,11 @@ keys (already the wire shape) or an Elixir-style tagged map
 
 Field atoms are only ever taken from generated definitions or minted
 from IDL-controlled field names — never from wire data.
+
+A struct value that matches no representation (neither the declared
+record tag nor a map) raises `value_does_not_match_type`; the facade
+turns it into the tagged `{error, {value_does_not_match_type, Value}}`
+the codecs answer with.
 """.
 
 -export([
@@ -49,7 +54,8 @@ from IDL-controlled field names — never from wire data.
     to_wire/2,
     from_wire/2,
     from_wire/3,
-    repr_mode/1
+    repr_mode/1,
+    unknown_fields/2
 ]).
 
 -export_type([
@@ -160,6 +166,44 @@ repr_mode({struct, {ref, Module, Name}}) ->
     end;
 repr_mode(_) ->
     wire.
+
+%% The keys of a map/struct-map input that match no declared field: the
+%% `strict` encode option turns these into `{error, {unknown_fields,
+%% Keys}}` instead of the default silent drop. `none` marks inputs with
+%% nothing to check — non-maps, inline descriptors and wire-passthrough
+%% targets have no declared field set to compare against.
+
+-spec unknown_fields(type_desc(), term()) -> [atom() | binary()] | none.
+unknown_fields({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
+    case struct_mode(Module, Name) of
+        {record, Tag, FieldAtoms} ->
+            dropped_keys(
+                maps:remove('__struct__', Value),
+                Tag,
+                FieldAtoms ++ [NameBin || {_, _, _, NameBin, _} <- struct_fields(Module, Name)]
+            );
+        {map, KeyType} ->
+            Fields = struct_fields(Module, Name),
+            dropped_keys(
+                Value,
+                none,
+                [NameBin || {_, _, _, NameBin, _} <- Fields] ++
+                    [field_atom(NameBin) || {_, _, _, NameBin, _} <- Fields, KeyType =:= atom]
+            );
+        wire ->
+            none
+    end;
+unknown_fields(_Desc, _Value) ->
+    none.
+
+%% The input keys that match neither the binary field names nor the
+%% field atoms; `Key` (a record tag) is identity metadata, not a field.
+
+-spec dropped_keys(map(), atom() | none, [atom() | binary()]) -> [atom() | binary()].
+dropped_keys(Map, Key, Declared) ->
+    maps:keys(
+        maps:without([Key | Declared], Map)
+    ).
 
 %%--------------------------------------------------------------------
 %% Core value conversion
@@ -316,7 +360,9 @@ record_to_wire(Module, Name, _Tag, FieldAtoms, Value) when is_map(Value) ->
     %% Atom keys come from the generated record definition, binary keys
     %% are already wire; the __struct__ tag is identity metadata.
     FieldsZip = lists:zip(struct_fields(Module, Name), FieldAtoms),
-    declared_to_wire(FieldsZip, maps:remove('__struct__', Value)).
+    declared_to_wire(FieldsZip, maps:remove('__struct__', Value));
+record_to_wire(_Module, _Name, _Tag, _FieldAtoms, Value) ->
+    erlang:error({value_does_not_match_type, Value}).
 
 -spec struct_to_wire([field_desc()], tuple()) -> map().
 struct_to_wire(Fields, Record) ->
@@ -395,7 +441,9 @@ map_mode_to_wire(Module, Name, KeyType, Value) when is_map(Value) ->
         end,
     %% lookup_field accepts binary keys first, so a {map, atom} struct
     %% fed its own wire shape round-trips instead of dropping fields.
-    declared_to_wire(FieldsZip, Value).
+    declared_to_wire(FieldsZip, Value);
+map_mode_to_wire(_Module, _Name, _KeyType, Value) ->
+    erlang:error({value_does_not_match_type, Value}).
 
 %%--------------------------------------------------------------------
 %% wire -> record | map | struct

@@ -134,9 +134,12 @@ ok = 'Ping_server':stop(Server).
 - `protocol` — `binary` (the default), `compact`, `json`, or any
   module implementing the `thrift_erl_protocol` behaviour;
 - server: `port`, `handler`, `max_frame_size`, `max_connections`,
-  `timeout` (maximum silence between messages), `backlog`;
+  `timeout` (the umbrella: TLS handshake and inter-message silence),
+  `handshake_timeout` / `idle_timeout` (naming each meaning
+  specifically), `active_n`, `backlog`;
 - client: `host`, `port`, `timeout` (connect and TLS handshake;
-  per-call timeouts ride the call itself), `max_frame_size`.
+  per-call timeouts ride the call itself; `connect_timeout` overrides
+  the umbrella), `max_frame_size`, `active_n`.
 
 ## Representations and protocols
 
@@ -155,7 +158,12 @@ wire format (`binary`, `compact` and `json` are built in; any
   answer `{error, {unsupported_repr, native}}`.
 
 `encode/2` accepts any representation and auto-detects it; `decode/3`
-produces the requested one. Every struct in `<mod>_types.erl` gets a
+produces the requested one. `thrift_erl:encode/4` takes an options map
+on top: `strict => true` fails a map/struct-map input carrying keys
+that match no declared field (`{error, {unknown_fields, Keys}}`)
+instead of dropping them silently. A value that matches no
+representation answers `{error, {value_does_not_match_type, Value}}`
+from every entry point. Every struct in `<mod>_types.erl` gets a
 fixed set of codec functions (prefix = the `erl` namespace prefix, then the lowercased struct name):
 
 ```erlang
@@ -178,7 +186,8 @@ lives on `thrift_erl:convert/3` for hand-written descriptors):
 {ok, Map} = ping_api_types:convert(Req, map),
 {ok, Req} = ping_api_types:convert(Struct, record).
 %% map-mode structs (erl.struct_type = "map") have no record to
-%% produce: convert(_, record) answers {error, {no_record, Tag}}.
+%% produce: the record target answers {error, {no_record, Tag}} in
+%% convert/2, convert/3 and decode alike.
 ```
 
 The representation of a struct can also be pinned in the IDL with

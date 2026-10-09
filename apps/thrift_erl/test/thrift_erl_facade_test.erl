@@ -32,6 +32,11 @@
     record_engine_map_mode_test/0,
     record_engine_wire_passthrough_test/0,
     native_repr_test/0,
+    encode_bad_value_shape_test/0,
+    encode_strict_test/0,
+    decode_bad_repr_test/0,
+    decode_record_of_map_mode_test/0,
+    options_defaults_test/0,
     extract_message_framed_test/0,
     extract_message_buffered_test/0,
     client_queue_serializes_test/0,
@@ -189,12 +194,13 @@ record_engine_map_mode_test() ->
     %% a record-mode child inside a map-mode parent converts recursively
     {ok, Bin} = thrift_erl:encode(Bag, #{p => {point, 1, 2}}),
     ?assertEqual({ok, #{p => #{x => 1, y => 2}}}, thrift_erl:decode(Bag, Bin, map)),
-    ?assertEqual({ok, #{p => {point, 1, 2}}}, thrift_erl:decode(Bag, Bin, record)),
-    %% {map, binary} structs take wire keys on input; the `record` target
-    %% keeps them, the `map` target normalizes to atoms
+    %% a map-mode struct has no record to produce: the `record` target
+    %% is the same {error, {no_record, Tag}} convert/3 answers
+    ?assertEqual({error, {no_record, bag}}, thrift_erl:decode(Bag, Bin, record)),
+    %% {map, binary} structs take wire keys on input; the `map` target
+    %% normalizes them to atoms
     BinKeys = {struct, {ref, ?FIXTURE, <<"BinKeys">>}},
     {ok, BinKeysBin} = thrift_erl:encode(BinKeys, #{<<"s">> => <<"v">>}),
-    ?assertEqual({ok, #{<<"s">> => <<"v">>}}, thrift_erl:decode(BinKeys, BinKeysBin, record)),
     ?assertEqual({ok, #{s => <<"v">>}}, thrift_erl:decode(BinKeys, BinKeysBin, map)),
     ok.
 
@@ -254,6 +260,112 @@ native_repr_test() ->
             %% tuple records stay tuples
             ?assertNot(thrift_erl_native:is_native({point, 1, 2}))
     end,
+    ok.
+
+%% A value that matches no representation answers the same tagged
+%% error the codecs use for scalar mismatches, instead of crashing the
+%% caller with function_clause.
+
+encode_bad_value_shape_test() ->
+    Desc = point_desc(),
+    ?assertEqual(
+        {error, {value_does_not_match_type, 42}},
+        thrift_erl:encode(Desc, 42)
+    ),
+    ?assertEqual(
+        {error, {value_does_not_match_type, [1, 2]}},
+        thrift_erl:encode(Desc, [1, 2])
+    ),
+    %% the record tag must match the descriptor's
+    ?assertMatch(
+        {error, {value_does_not_match_type, {other, 1, 2}}},
+        thrift_erl:encode(Desc, {other, 1, 2})
+    ),
+    %% map-mode structs reject non-maps the same way
+    Bag = {struct, {ref, ?FIXTURE, <<"Bag">>}},
+    ?assertMatch(
+        {error, {value_does_not_match_type, 9}},
+        thrift_erl:encode(Bag, 9)
+    ),
+    ok.
+
+%% strict=true checks the top-level map/struct-map input against the
+%% declared fields; the default keeps the silent drop.
+
+encode_strict_test() ->
+    Desc = point_desc(),
+    %% default: unknown keys are dropped silently
+    ?assertMatch(
+        {ok, _},
+        thrift_erl:encode(Desc, #{x => 1, y => 2, zzz => 3})
+    ),
+    ?assertMatch(
+        {error, {unknown_fields, [zzz]}},
+        thrift_erl:encode(Desc, #{x => 1, y => 2, zzz => 3}, binary, #{strict => true})
+    ),
+    %% declared fields pass, atom or binary keyed
+    ?assertMatch(
+        {ok, _},
+        thrift_erl:encode(Desc, #{x => 1, <<"y">> => 2}, binary, #{strict => true})
+    ),
+    %% a struct-map's __struct__ key is identity metadata, not a field
+    ?assertMatch(
+        {ok, _},
+        thrift_erl:encode(Desc, #{'__struct__' => point, x => 1, y => 2}, binary, #{
+            strict => true
+        })
+    ),
+    %% a record tuple input has nothing to check
+    ?assertMatch(
+        {ok, _},
+        thrift_erl:encode(Desc, {point, 1, 2}, binary, #{strict => true})
+    ),
+    %% map-mode structs are checked against their own key type
+    Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
+    ?assertMatch(
+        {error, {unknown_fields, [nope]}},
+        thrift_erl:encode(Loose, #{s => <<"ok">>, nope => 1}, binary, #{strict => true})
+    ),
+    ok.
+
+decode_bad_repr_test() ->
+    Desc = point_desc(),
+    {ok, Bin} = thrift_erl:encode(Desc, {point, 1, 2}),
+    ?assertEqual({error, {bad_repr, maps}}, thrift_erl:decode(Desc, Bin, maps)),
+    ?assertEqual({error, {bad_repr, whatever}}, thrift_erl:decode(Desc, Bin, whatever, compact)),
+    ok.
+
+%% A map-representation struct has no record to produce: decode answers
+%% the same {error, {no_record, Tag}} convert/3 answers for it, instead
+%% of silently returning an atom-keyed map.
+
+decode_record_of_map_mode_test() ->
+    Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
+    {ok, Bin} = thrift_erl:encode(Loose, #{s => <<"x">>}),
+    ?assertEqual({error, {no_record, loose}}, thrift_erl:decode(Loose, Bin, record)),
+    %% the map representation keeps working
+    ?assertEqual({ok, #{s => <<"x">>}}, thrift_erl:decode(Loose, Bin, map)),
+    ok.
+
+%% The shared option defaults and the timeout umbrella.
+
+options_defaults_test() ->
+    ?assertEqual(5000, thrift_erl_options:idle_timeout(#{})),
+    ?assertEqual(1000, thrift_erl_options:idle_timeout(#{timeout => 1000})),
+    ?assertEqual(300, thrift_erl_options:idle_timeout(#{timeout => 1000, idle_timeout => 300})),
+    %% the umbrella fills both meanings until a specific key splits them
+    ?assertEqual(1000, thrift_erl_options:handshake_timeout(#{timeout => 1000})),
+    ?assertEqual(250, thrift_erl_options:handshake_timeout(#{timeout => 1000, handshake_timeout => 250})),
+    ?assertEqual(700, thrift_erl_options:connect_timeout(#{timeout => 1000, connect_timeout => 700})),
+    ?assertEqual(framed, thrift_erl_options:transport(#{})),
+    ?assertEqual(65536, thrift_erl_options:max_frame_size(#{max_frame_size => 65536})),
+    ?assertEqual(7, thrift_erl_options:active_n(#{active_n => 7})),
+    ?assertEqual(<<"/thrift">>, thrift_erl_options:http_path(#{http_path => <<"/thrift">>})),
+    ?assertEqual({ok, thrift_erl_compact}, thrift_erl_options:protocol_module(#{protocol => compact})),
+    ?assertMatch(
+        {error, {bad_protocol, nope, _}},
+        thrift_erl_options:protocol_module(#{protocol => nope})
+    ),
     ok.
 
 %%--------------------------------------------------------------------

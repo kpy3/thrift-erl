@@ -50,8 +50,9 @@ both:
   non-200 status fails the call with `{error, {http_status, Code}}`;
 - `protocol` — `binary` (default), or any `thrift_erl_protocol`
   implementation module (see `thrift_erl:protocol_module/1`);
-- `timeout` — connect, TLS handshake and per-call timeout, default
-  5000 ms;
+- `timeout` / `connect_timeout` — the connect and TLS handshake wait,
+  default 5000 ms (`connect_timeout` overrides the umbrella; per-call
+  timeouts ride the `call/4` argument);
 - `max_frame_size` — framed guard and HTTP body bound, default 64 MiB;
 - `ssl_opts` — a list of `ssl:tls_client_option()`; presence switches
   the connection to TLS (verify the server with `verify_peer` plus
@@ -81,7 +82,9 @@ both:
     max_frame_size => pos_integer(),
     http_path => binary(),
     ssl_opts => [ssl:tls_client_option()],
-    multiplex => binary()
+    multiplex => binary(),
+    %% the `{active, N}` delivery batch size, default 100
+    active_n => pos_integer()
 }.
 
 -type call_result() ::
@@ -132,10 +135,6 @@ both:
     pending :: undefined | #pending{},
     queue = [] :: [#request{}]
 }).
-
--define(DEFAULT_TIMEOUT, 5000).
--define(DEFAULT_MAX_FRAME_SIZE, 64 * 1024 * 1024).
--define(DEFAULT_ACTIVE_N, 100).
 
 -doc """
 Connects to the server and links the client to the caller; fails if
@@ -200,14 +199,14 @@ oneway(Pid, Function, Args, Timeout) ->
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
+    Timeout = thrift_erl_options:connect_timeout(Opts),
     Connect =
         thrift_erl_socket:connect(
             maps:get(host, Opts), maps:get(port, Opts), maps:get(ssl_opts, Opts, undefined), Timeout
         ),
-    case {Connect, thrift_erl:protocol_module(maps:get(protocol, Opts, binary))} of
+    case {Connect, thrift_erl_options:protocol_module(Opts)} of
         {{ok, Socket}, {ok, Protocol}} ->
-            ActiveN = ?DEFAULT_ACTIVE_N,
+            ActiveN = thrift_erl_options:active_n(Opts),
             ok = thrift_erl_socket:set_active(Socket, ActiveN),
             Service = maps:get(service, Opts),
             {ok, #state{
@@ -215,11 +214,11 @@ init(Opts) ->
                 service = Service,
                 service_info = Service:service_info(),
                 protocol = Protocol,
-                transport = maps:get(transport, Opts, framed),
+                transport = thrift_erl_options:transport(Opts),
                 multiplex = maps:get(multiplex, Opts, undefined),
                 timeout = Timeout,
-                max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
-                http_path = maps:get(http_path, Opts, <<"/">>),
+                max_frame_size = thrift_erl_options:max_frame_size(Opts),
+                http_path = thrift_erl_options:http_path(Opts),
                 host_value = host_value(maps:get(host, Opts), maps:get(port, Opts)),
                 active_n = ActiveN
             }};

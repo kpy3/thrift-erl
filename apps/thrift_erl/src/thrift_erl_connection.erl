@@ -45,7 +45,8 @@ application environment:
 - `protocol` — `binary` (default), or any `thrift_erl_protocol`
   implementation module (see `thrift_erl:protocol_module/1`);
 - `max_frame_size` — framed mode guard, default 64 MiB;
-- `timeout` — maximum silence between messages, default 5000 ms;
+- `timeout` / `idle_timeout` — maximum silence between messages,
+  default 5000 ms (`idle_timeout` overrides the umbrella);
 - `active_n` — `{active, N}` batch size, default 100;
 - `record_api` — when true, handler arguments and results are records;
   `types` names the generated types module providing `record_fields/1`.
@@ -78,7 +79,9 @@ Exactly one service mode is required:
     transport => thrift_erl_socket:transport(),
     protocol => binary | compact | module(),
     max_frame_size => pos_integer(),
-    timeout => pos_integer(),
+    %% the umbrella; `idle_timeout` names it specifically
+    timeout => pos_integer() | infinity,
+    idle_timeout => pos_integer() | infinity,
     active_n => pos_integer(),
     %% when true, handler arguments and results are records; `types`
     %% names the generated types module providing record_fields/1
@@ -105,10 +108,6 @@ Exactly one service mode is required:
     buffer = <<>> :: binary()
 }).
 
--define(DEFAULT_MAX_FRAME_SIZE, 64 * 1024 * 1024).
--define(DEFAULT_TIMEOUT, 5000).
--define(DEFAULT_ACTIVE_N, 100).
-
 -doc "Starts a linked connection process for an accepted socket.".
 -spec start_link(options()) -> gen_server:start_ret().
 start_link(Opts) ->
@@ -134,11 +133,11 @@ stop(Pid) ->
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
-    case {thrift_erl:protocol_module(maps:get(protocol, Opts, binary)), services(Opts)} of
+    Timeout = thrift_erl_options:idle_timeout(Opts),
+    case {thrift_erl_options:protocol_module(Opts), services(Opts)} of
         {{ok, Protocol}, {ok, Services}} ->
             Socket = maps:get(socket, Opts),
-            ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
+            ActiveN = thrift_erl_options:active_n(Opts),
             %% The socket arrives owned by the acceptor and still
             %% passive; it takes over ownership (the acceptor calls
             %% controlling_process) and only then arms active delivery
@@ -148,8 +147,8 @@ init(Opts) ->
                     socket = Socket,
                     services = Services,
                     protocol = Protocol,
-                    transport = maps:get(transport, Opts, framed),
-                    max_frame_size = maps:get(max_frame_size, Opts, ?DEFAULT_MAX_FRAME_SIZE),
+                    transport = thrift_erl_options:transport(Opts),
+                    max_frame_size = thrift_erl_options:max_frame_size(Opts),
                     timeout = Timeout,
                     active_n = ActiveN,
                     record_api =

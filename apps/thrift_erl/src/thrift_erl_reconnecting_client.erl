@@ -70,11 +70,15 @@ server that is down and keeps trying.
     host := inet:socket_address() | inet:hostname(),
     port := inet:port_number(),
     service := module(),
+    %% everything below passes through to `thrift_erl_client` unchanged
     transport => thrift_erl_socket:transport(),
     protocol => binary | compact | module(),
     timeout => pos_integer(),
     max_frame_size => pos_integer(),
+    http_path => binary(),
     ssl_opts => [ssl:tls_client_option()],
+    multiplex => binary(),
+    active_n => pos_integer(),
     reconnect_min => pos_integer(),
     reconnect_max => pos_integer()
 }.
@@ -164,7 +168,7 @@ init(Opts) ->
     %% A bad protocol is a configuration error: fail the start the same
     %% way the plain client would. A dead server is not: this wrapper
     %% exists to outlive it.
-    case thrift_erl:protocol_module(maps:get(protocol, Opts, binary)) of
+    case thrift_erl_options:protocol_module(Opts) of
         {ok, Protocol} ->
             State =
                 #state{
