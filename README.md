@@ -104,14 +104,14 @@ headers say which):
 
 -behaviour('Ping_handler').
 
--export([ping/1, poke/1]).
+-export([ping/1, poke/0]).
 
-ping(#pingrequest{message = <<"bad">>}) ->
-    {error, {exception, <<"NoSuchMessage">>, #nosuchmessage{text = <<"nope">>}}};
-ping(#pingrequest{message = Msg}) ->
-    {ok, #pingreply{message = <<"pong: ", Msg/binary>>, at_millis = 0}}.
+ping(#ping_api_pingrequest{message = <<"bad">>}) ->
+    {error, {exception, <<"NoSuchMessage">>, #ping_api_nosuchmessage{text = <<"nope">>}}};
+ping(#ping_api_pingrequest{message = Msg}) ->
+    {ok, #ping_api_pingreply{message = <<"pong: ", Msg/binary>>, at_millis = 0}}.
 
-poke(_Req) -> {ok, undefined}.
+poke() -> {ok, undefined}.
 ```
 
 Server and client:
@@ -119,11 +119,11 @@ Server and client:
 ```erlang
 {ok, Server} = 'Ping_server':start_link(#{port => 9090, handler => ping_handler}),
 {ok, Client} = 'Ping_client':start_link(#{host => "127.0.0.1", port => 9090}),
-{ok, #pingreply{message = <<"pong: hi">>}} =
-    'Ping_client':ping(Client, #pingrequest{message = <<"hi">>}),
+{ok, #ping_api_pingreply{message = <<"pong: hi">>}} =
+    'Ping_client':ping(Client, #ping_api_pingrequest{message = <<"hi">>}),
 %% a declared exception comes back typed:
-{error, {exception, <<"NoSuchMessage">>, #nosuchmessage{}}} =
-    'Ping_client':ping(Client, #pingrequest{message = <<"bad">>}),
+{error, {exception, <<"NoSuchMessage">>, #ping_api_nosuchmessage{}}} =
+    'Ping_client':ping(Client, #ping_api_pingrequest{message = <<"bad">>}),
 ok = 'Ping_client':stop(Client),
 ok = 'Ping_server':stop(Server).
 ```
@@ -134,9 +134,9 @@ ok = 'Ping_server':stop(Server).
 - `protocol` — `binary` (the default), `compact`, `json`, or any
   module implementing the `thrift_erl_protocol` behaviour;
 - server: `port`, `handler`, `max_frame_size`, `max_connections`,
-  `timeout`, `backlog`;
-- client: `host`, `port`, `timeout` (connect and per-call),
-  `max_frame_size`.
+  `timeout` (maximum silence between messages), `backlog`;
+- client: `host`, `port`, `timeout` (connect and TLS handshake;
+  per-call timeouts ride the call itself), `max_frame_size`.
 
 ## Representations and protocols
 
@@ -156,16 +156,16 @@ wire format (`binary`, `compact` and `json` are built in; any
 
 `encode/2` accepts any representation and auto-detects it; `decode/3`
 produces the requested one. Every struct in `<mod>_types.erl` gets a
-fixed set of codec functions (prefix = lowercased struct name):
+fixed set of codec functions (prefix = the `erl` namespace prefix, then the lowercased struct name):
 
 ```erlang
-{ok, Bin} = ping_api_types:encode_pingrequest(Req),
-{ok, Req} = ping_api_types:decode_pingrequest(Bin),                  %% record
-{ok, Map} = ping_api_types:decode_pingrequest(Bin, map),             %% atom-key map
-{ok, Struct} = ping_api_types:decode_pingrequest(Bin, struct),
-{ok, Req} = ping_api_types:pingrequest_from_map(Map),
-%% protocol is the third argument everywhere:
-{ok, Bin} = ping_api_types:encode_pingrequest(Req, my_protocol_mod).
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req),
+{ok, Req} = ping_api_types:ping_api_decode_pingrequest(Bin),                  %% record
+{ok, Map} = ping_api_types:ping_api_decode_pingrequest(Bin, map),             %% atom-key map
+{ok, Struct} = ping_api_types:ping_api_decode_pingrequest(Bin, struct),
+{ok, Req} = ping_api_types:ping_api_pingrequest_from_map(Map),
+%% the protocol goes into the last argument of every codec:
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req, my_protocol_mod).
 ```
 
 Decoding is strict: trailing bytes answer `{error, trailing}`,
@@ -194,9 +194,9 @@ emitted), so pattern matching one requires declaring `-record #name{}`
 in the consumer — reading through the `records` module needs nothing:
 
 ```erlang
-{ok, Req} = ping_api_types:decode_pingrequest(Bin, native),
-<<"john">> = records:get(name, Req),
-{ok, Bin} = ping_api_types:encode_pingrequest(Req).   %% auto-detected
+{ok, Req} = ping_api_types:ping_api_decode_pingrequest(Bin, native),
+<<"hi">> = records:get(message, Req),
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req).   %% auto-detected
 ```
 
 Enums get `color_to_int/1` / `color_from_int/1` helpers, constants get
@@ -220,8 +220,8 @@ the same way as `binary`:
 {ok, Client} = 'Ping_client':start_link(#{
     host => "127.0.0.1", port => 9090, protocol => compact, transport => buffered
 }),
-{ok, Bin} = ping_api_types:encode_pingrequest(Req, thrift_erl_compact),
-{ok, Req} = thrift_erl_compact:decode(ping_api_types:pingrequest_struct_info(), Bin).
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req, thrift_erl_compact),
+{ok, Req, <<>>} = thrift_erl_compact:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
 The same values take up to ~2.5× fewer wire bytes than binary on
@@ -250,8 +250,8 @@ ins:
 {ok, Client} = 'Ping_client':start_link(#{
     host => "127.0.0.1", port => 9090, protocol => json, transport => buffered
 }),
-{ok, Bin} = ping_api_types:encode_pingrequest(Req, thrift_erl_json),
-{ok, Req} = thrift_erl_json:decode(ping_api_types:pingrequest_struct_info(), Bin).
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req, thrift_erl_json),
+{ok, Req, <<>>} = thrift_erl_json:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
 Two bends are documented on the module: the envelope's closing bracket
@@ -297,29 +297,31 @@ runs the full ThriftTest battery against our HTTP server.
 `thrift_erl_client` is deliberately connection-per-process with no
 automatic reconnection: any failure fails the outstanding calls and
 stops the process, so a pool sees the death immediately and replaces
-the worker. Use it as a poolboy/pooler worker:
+the worker. The unlinked `thrift_erl_client:start/1` (plus
+`service => 'Ping_server'`) is the pool-worker entry:
 
 ```erlang
+ClientOpts = #{host => "127.0.0.1", port => 9090, service => 'Ping_server'},
+
 %% poolboy
 {ok, Pool} = poolboy:start_link(#{
-    worker_module => {'Ping_client', start, [#{host => "127.0.0.1", port => 9090}]},
+    worker_module => {thrift_erl_client, start, [ClientOpts]},
     size => 10, max_overflow => 5
 }),
-Reply = poolboy:transaction(Pool, fun(C) -> 'Ping_client':call(C, <<"ping">>, [], 5000) end).
+Reply = poolboy:transaction(Pool, fun(C) -> thrift_erl_client:call(C, <<"poke">>, [], 5000) end).
 
 %% pooler
 %% in config: {[{pools, [[{name, ping}, {max_count, 10}, {init_count, 2},
-%%                        {start_mfa, {'Ping_client', start, [Opts]}}]]}]}
+%%                        {start_mfa, {thrift_erl_client, start, [ClientOpts]}}]]}]}
 Client = pooler:take_member(ping),
-try 'Ping_client':call(Client, <<"ping">>, [], 5000)
+try thrift_erl_client:call(Client, <<"poke">>, [], 5000)
 after pooler:return_member(ping, Client, ok) end.
 ```
 
-`start/1` (unlinked) exists exactly for such owners; `stop/1` answers
-outstanding calls with `{error, closed}` instead of leaving them
-hanging. Sockets run in `{active, N}` delivery mode, so a dead peer is
-noticed even on an idle connection. Calls are serialized per
-connection; concurrent callers queue in order.
+`stop/1` answers outstanding calls with `{error, closed}` instead of
+leaving them hanging. Sockets run in `{active, N}` delivery mode, so a
+dead peer is noticed even on an idle connection. Calls are serialized
+per connection; concurrent callers queue in order.
 
 ## Reconnecting client
 
@@ -335,10 +337,10 @@ start — the wrapper keeps trying, like the reference Apache
 
 ```erlang
 {ok, Client} = thrift_erl_reconnecting_client:start_link(
-    #{host => "localhost", port => 9090, service => 'Ping_thrift',
+    #{host => "localhost", port => 9090, service => 'Ping_server',
       reconnect_min => 500, reconnect_max => 30000}
 ),
-{ok, Pong} = thrift_erl_reconnecting_client:call(Client, <<"ping">>, [], 5000),
+{ok, undefined} = thrift_erl_reconnecting_client:call(Client, <<"poke">>, [], 5000),
 
 %% the pool health-check surface
 #{connected := true, calls_ok := 3, calls_failed := 0,
@@ -364,16 +366,16 @@ changes):
 {ok, Server} = thrift_erl_server:start_link(#{
     port => 9090,
     services => #{
-        <<"Widgets">> => #{handler => WidgetsHandler, service => 'Widgets_thrift'},
-        <<"Users">>   => #{handler => UsersHandler,   service => 'Users_thrift'}
+        <<"Widgets">> => #{handler => WidgetsHandler, service => 'Widgets_server'},
+        <<"Users">>   => #{handler => UsersHandler,   service => 'Users_server'}
     }
 }),
 
 %% clients pick their service; function names stay plain
 {ok, Widgets} = thrift_erl_client:start_link(
-    #{host => "localhost", port => 9090, service => 'Widgets_thrift', multiplex => <<"Widgets">>}),
+    #{host => "localhost", port => 9090, service => 'Widgets_server', multiplex => <<"Widgets">>}),
 {ok, Users} = thrift_erl_client:start_link(
-    #{host => "localhost", port => 9090, service => 'Users_thrift', multiplex => <<"Users">>}),
+    #{host => "localhost", port => 9090, service => 'Users_server', multiplex => <<"Users">>}),
 ```
 
 A generated server/client pair takes the same options — pass
@@ -399,13 +401,13 @@ option (`certs_keys`, `verify`, `cacerts`, ...) applies:
 ```erlang
 %% server: present a certificate
 {ok, Server} = thrift_erl_server:start_link(#{
-    port => 9090, handler => PingHandler, service => 'Ping_thrift',
+    port => 9090, handler => ping_handler, service => 'Ping_server',
     ssl_opts => [{certs_keys, [#{certfile => "cert.pem", keyfile => "key.pem"}]}]
 }),
 
 %% client: verify the server
 {ok, Client} = thrift_erl_client:start_link(#{
-    host => "localhost", port => 9090, service => 'Ping_thrift',
+    host => "localhost", port => 9090, service => 'Ping_server',
     ssl_opts => [{verify, verify_peer}, {cacerts, CaDer},
                  {server_name_indication, "localhost"}]
 })
@@ -458,8 +460,8 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
   preserved.
 
 Introspection in the spirit of the official generator: `struct_info/1`,
-`enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`
-in `<mod>_types.erl`.
+`enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`,
+`tag_index/0` and `convert/2` in `<mod>_types.erl`.
 
 ## Performance
 
