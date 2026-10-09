@@ -38,7 +38,8 @@
     same_struct_names_coexist/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
-    generated_map_mode/1
+    generated_map_mode/1,
+    generated_set_impl/1
 ]).
 
 all() ->
@@ -56,7 +57,8 @@ all() ->
         same_struct_names_coexist,
         generated_loopback_buffered,
         generated_loopback_framed,
-        generated_map_mode
+        generated_map_mode,
+        generated_set_impl
     ].
 
 parse_thrift_test_idl(Config) ->
@@ -130,15 +132,34 @@ parse_erlang_thrift_test_idl(Config) ->
     ?assertEqual(35, length(Definitions)),
 
     ErlNamespace = find_header(Headers, <<"erl">>),
-    ?assertEqual(#{set_type => <<"sets_v2">>}, ErlNamespace#thrift_generator_node.annotations),
+    ?assertEqual(#{}, ErlNamespace#thrift_generator_node.annotations),
 
     UserId = find_definition(Definitions, thrift_generator_typedef, <<"UserId">>),
     ?assertEqual(#{type => <<"nominal">>}, UserId#thrift_generator_node.annotations),
 
+    %% erl.set annotates the type, so it stays in the dotted binary
+    %% form inside the type; the typedef node itself stays clean
     UserIds = find_definition(Definitions, thrift_generator_typedef, <<"UserIds">>),
-    #thrift_generator_typedef{type = {set, {base, string, #{}}, #{}}} =
+    #thrift_generator_typedef{
+        type = {set, {base, string, #{}}, #{<<"erl.set">> := <<"ordset">>}}
+    } =
         UserIds#thrift_generator_node.payload,
-    ?assertEqual(#{set_type => <<"ordset">>}, UserIds#thrift_generator_node.annotations),
+    ?assertEqual(#{}, UserIds#thrift_generator_node.annotations),
+
+    CrazyNesting = find_definition(Definitions, thrift_generator_struct, <<"CrazyNesting">>),
+    #thrift_generator_struct{fields = CrazyFields} = CrazyNesting#thrift_generator_node.payload,
+    [
+        #thrift_generator_node{
+            payload = #thrift_generator_field{
+                type = {set, {ref, <<"Insanity">>, #{}}, #{<<"erl.set">> := <<"ordset">>}}
+            }
+        }
+    ] =
+        [
+            F
+         || F <- CrazyFields,
+            #thrift_generator_field{name = <<"set_field">>} <- [F#thrift_generator_node.payload]
+        ],
 
     Bonk = find_definition(Definitions, thrift_generator_struct, <<"Bonk">>),
     ?assertEqual(<<"map">>, maps:get(struct_type, Bonk#thrift_generator_node.annotations)),
@@ -492,8 +513,68 @@ generated_map_mode(Config) ->
             'MapSvc_client':stop(Client)
         end
     after
-        'MapSvc_server':stop(Server)
+        'MainService_server':stop(Server)
     end.
+
+%% End-to-end over the Erlang-annotated fixture: an `erl.set = "ordset"`
+%% annotation survives the whole pipeline — the descriptor carries
+%% `ordset`, decode builds a real ordset (sorted, deduplicated) in both
+%% representations and encode takes it back — while unannotated sets
+%% stay plain wire lists.
+
+-spec generated_set_impl(ct:config()) -> ok.
+generated_set_impl(Config) ->
+    MainPath = data_file(Config, "ErlangThriftTest.thrift"),
+    {ok, Loaded} = thrift_generator_loader:load(MainPath),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) ->
+                {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam);
+            ({error, {Name, Errors}}) ->
+                erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+    {struct, CrazyFields} = test_types:struct_info(<<"CrazyNesting">>),
+    {value, {2, optional, {set, {struct, {ref, test_types, <<"Insanity">>}}, ordset}, <<"set_field">>, undefined}} =
+        lists:search(fun(F) -> element(4, F) =:= <<"set_field">> end, CrazyFields),
+    %% no annotation, no impl: an unannotated set keeps the wire list
+    {struct, VersioningFields} = test_types:struct_info(<<"VersioningTestV2">>),
+    {value, {9, default, {set, {base, i32}, list}, <<"newset">>, undefined}} =
+        lists:search(fun(F) -> element(4, F) =:= <<"newset">> end, VersioningFields),
+    %% codec roundtrip: duplicates and arbitrary order on the way in, a
+    %% real ordset on the way out, map and record representations alike
+    Full = #{userMap => #{'ONE' => 1}, xtructs => []},
+    Empty = #{userMap => #{}, xtructs => []},
+    Value = #{
+        string_field => <<"s">>,
+        set_field => [Full, Empty, Full],
+        list_field => [],
+        binary_field => <<"b">>
+    },
+    {ok, Bin} = test_types:encode_test_crazynesting(Value),
+    {ok, #{set_field := MapOrdset}} = test_types:decode_test_crazynesting(Bin, map),
+    ?assertEqual(lists:usort([Full, Empty]), MapOrdset),
+    {ok, Rec} = test_types:decode_test_crazynesting(Bin),
+    {test_crazynesting, <<"s">>, RecOrdset, [], <<"b">>, undefined} = Rec,
+    ?assertEqual(
+        lists:usort([{test_insanity, #{'ONE' => 1}, []}, {test_insanity, #{}, []}]),
+        RecOrdset
+    ),
+    %% encode passes values through as given, so the duplicated wire
+    %% above does not reproduce verbatim; the normalized value does
+    {ok, NormBin} =
+        test_types:encode_test_crazynesting(
+            #{
+                string_field => <<"s">>,
+                set_field => lists:usort([Full, Empty]),
+                list_field => [],
+                binary_field => <<"b">>
+            }
+        ),
+    ?assertEqual({ok, NormBin}, test_types:encode_test_crazynesting(Rec)),
+    ok.
 
 %% Generates and loads the modules for the semantic fixture. Safe to
 %% call repeatedly: `code:load_binary` replaces prior versions.
