@@ -50,8 +50,11 @@ Rootsymbol Document.
 
 % Document
 
+%% The trailing File matches the `__file__` marker `tokens/1` appends;
+%% its value is deliberately dropped — paths are the loader's business,
+%% the AST document carries only headers and definitions.
 Document -> Headers Definitions File:
-    build_node(thrift_generator_document, 0, ['$3', '$1', '$2']).
+    build_node(thrift_generator_document, 0, ['$1', '$2']).
 
 File -> '$empty': undefined.
 File -> file string: unwrap('$2').

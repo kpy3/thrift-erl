@@ -127,7 +127,7 @@
 %% move together.
 
 -define(NODE_BUILDERS, #{
-    thrift_generator_document => {thrift_generator_document, [filename, headers, definitions]},
+    thrift_generator_document => {thrift_generator_document, [headers, definitions]},
     thrift_generator_include => {thrift_generator_include, [path]},
     thrift_generator_cpp_include => {thrift_generator_cpp_include, [path]},
     thrift_generator_namespace => {thrift_generator_namespace, [scope, name]},
@@ -143,10 +143,7 @@
     thrift_generator_service => {thrift_generator_service, [name, extends, functions]}
 }).
 
--nominal file_name() :: binary().
-
 -record(thrift_generator_document, {
-    filename :: file_name(),
     headers :: [ast_node()],
     definitions :: [ast_node()]
 }).
@@ -159,6 +156,9 @@
 }).
 -type include_() :: #thrift_generator_include{}.
 
+%% `cpp_include` is parsed for IDL compatibility and deliberately
+%% unused by the Erlang pipeline; the path is the node's whole content.
+-hank([{unused_record_fields, [{thrift_generator_cpp_include, path}]}]).
 -record(thrift_generator_cpp_include, {
     path :: include_path()
 }).
