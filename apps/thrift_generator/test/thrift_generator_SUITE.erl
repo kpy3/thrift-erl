@@ -36,6 +36,7 @@
     loader_namespace_prefix/1,
     loader_namespace_error/1,
     same_struct_names_coexist/1,
+    cross_module_typedef/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
     generated_map_mode/1,
@@ -55,6 +56,7 @@ all() ->
         loader_namespace_prefix,
         loader_namespace_error,
         same_struct_names_coexist,
+        cross_module_typedef,
         generated_loopback_buffered,
         generated_loopback_framed,
         generated_map_mode,
@@ -212,10 +214,13 @@ semantic_pipeline(Config) ->
 
     [Outer, Failed] = MainMod#tg_module.structs,
     ?assertEqual(struct, Outer#tg_struct.kind),
-    ?assertEqual([{<<"inner">>, undefined}, {<<"count">>, 10}], [
-        {F#tg_field.name, F#tg_field.default}
-     || F <- Outer#tg_struct.fields
-    ]),
+    ?assertEqual(
+        [{<<"inner">>, undefined}, {<<"count">>, 10}, {<<"seen_at">>, undefined}],
+        [
+            {F#tg_field.name, F#tg_field.default}
+         || F <- Outer#tg_struct.fields
+        ]
+    ),
     ?assertEqual(exception, Failed#tg_struct.kind),
 
     [MainService] = MainMod#tg_module.services,
@@ -240,6 +245,18 @@ semantic_pipeline(Config) ->
     [BaseService] = SharedMod#tg_module.services,
     ?assertEqual([<<"ping">>, <<"area">>], [F#tg_function.name || F <- BaseService#tg_service.functions]),
 
+    ok.
+
+%% A cross-module reference to a typedef (shared.Timestamp) resolves in
+%% the defining module's context and lands in the generated descriptor
+%% as the aliased type; the fixture file exercises the `#' comment form
+%% and a doc block before the typedef on the way.
+
+cross_module_typedef(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {struct, Fields} = 'main_types':struct_info(<<"Outer">>),
+    SeenAt = lists:keyfind(3, 1, Fields),
+    ?assertEqual({base, i64}, element(3, SeenAt)),
     ok.
 
 loader_cycle(Config) ->

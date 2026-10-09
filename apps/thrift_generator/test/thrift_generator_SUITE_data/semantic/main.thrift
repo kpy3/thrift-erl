@@ -7,7 +7,8 @@ const i32 BASE = 10
 
 struct Outer {
   1: shared.Inner inner,
-  2: i32 count = BASE
+  2: i32 count = BASE,
+  3: shared.Timestamp seen_at
 }
 
 enum Color { RED = 1, GREEN, BLUE = 10 }
