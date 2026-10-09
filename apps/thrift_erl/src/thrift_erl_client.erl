@@ -127,12 +127,10 @@ both:
 
 -record(state, {
     socket :: thrift_erl_socket:socket(),
-    service :: module(),
     service_info :: thrift_erl_service:service_info(),
     protocol :: module(),
     transport :: thrift_erl_socket:transport(),
     multiplex :: undefined | binary(),
-    timeout :: pos_integer(),
     max_frame_size :: pos_integer(),
     http_path :: binary(),
     host_value :: binary(),
@@ -219,12 +217,10 @@ init(Opts) ->
             Service = maps:get(service, Opts),
             {ok, #state{
                 socket = Socket,
-                service = Service,
                 service_info = Service:service_info(),
                 protocol = Protocol,
                 transport = thrift_erl_options:transport(Opts),
                 multiplex = maps:get(multiplex, Opts, undefined),
-                timeout = Timeout,
                 max_frame_size = thrift_erl_options:max_frame_size(Opts),
                 http_path = thrift_erl_options:http_path(Opts),
                 host_value = host_value(maps:get(host, Opts), maps:get(port, Opts)),
