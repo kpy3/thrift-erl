@@ -18,27 +18,84 @@
 Command-line front end (escript entry point).
 
 ```
+thrift_generator <file.thrift> [-o <out_dir>]
 thrift_generator generate <file.thrift> [-o <out_dir>]
 ```
 
-Runs the full pipeline (load with includes, semantic analysis, emit) and
-writes the generated Erlang sources to `out_dir` (default: the current
-directory).
+Argument parsing rides on the stdlib `argparse` module (usage/help
+included); `generate` stays accepted as an optional subcommand — the
+file operand selects the action. Runs the full pipeline (load with
+includes, semantic analysis, emit) and writes the generated Erlang
+sources to `out_dir` (default: the current directory).
 """.
 
 -export([main/1]).
 -export([format_error/1]).
 
 -spec main([string()]) -> no_return().
-main(["generate", File | Rest]) ->
-    case parse_out_dir(Rest) of
-        {ok, OutDir} ->
-            run(File, OutDir);
-        {error, Usage} ->
-            usage_error(Usage)
-    end;
-main(_Args) ->
-    usage_error(usage()).
+main(RawArgs) ->
+    Args =
+        case RawArgs of
+            ["generate" | Rest] -> Rest;
+            _ -> RawArgs
+        end,
+    Options = #{progname => "thrift_generator"},
+    %% argparse has no built-in help switch, and a required positional
+    %% would win over `-h', so `file' is optional in the spec and both
+    %% the help request and its presence are checked here.
+    case argparse:parse(Args, command(), Options) of
+        {ok, Parsed, _Path, _Cmd} ->
+            case maps:get(help, Parsed, false) of
+                true ->
+                    io:put_chars([argparse:help(command(), Options), $\n]),
+                    halt(0);
+                false ->
+                    case Parsed of
+                        #{file := File} ->
+                            run(File, maps:get(out_dir, Parsed, <<".">>));
+                        _ ->
+                            parse_error("missing <file.thrift> operand", Options)
+                    end
+            end;
+        {error, Reason} ->
+            parse_error(argparse:format_error(Reason), Options)
+    end.
+
+-spec parse_error(unicode:chardata(), #{progname => string()}) -> no_return().
+parse_error(Message, Options) ->
+    io:format(standard_error, "error: ~ts~n~ts~n", [
+        Message, argparse:help(command(), Options)
+    ]),
+    halt(1).
+
+-spec command() -> argparse:command().
+command() ->
+    #{
+        arguments => [
+            #{
+                name => help,
+                short => $h,
+                long => "-help",
+                type => boolean,
+                help => ["print this help and exit"]
+            },
+            #{
+                name => file,
+                %% Positional arguments are required by default in
+                %% argparse; `-h' must stay answerable without one.
+                required => false,
+                help => {"<file.thrift>", ["IDL document to compile"]}
+            },
+            #{
+                name => out_dir,
+                short => $o,
+                long => "-out-dir",
+                type => binary,
+                default => <<".">>,
+                help => {"[-o <out_dir>]", ["directory for generated .erl files (default: .)"]}
+            }
+        ]
+    }.
 
 run(File, OutDir) ->
     case thrift_generator:generate(File, OutDir, #{}) of
@@ -63,24 +120,6 @@ run(File, OutDir) ->
             io:format(standard_error, "thrift_generator: ~ts~n", [format_error(Reason)]),
             halt(1)
     end.
-
-parse_out_dir([]) ->
-    {ok, "."};
-parse_out_dir(["-o", OutDir]) ->
-    {ok, unicode:characters_to_binary(OutDir)};
-parse_out_dir(["-o" ++ _ = Arg | _]) ->
-    {error, "invalid option: " ++ Arg};
-parse_out_dir([Arg | _]) ->
-    {error, "unexpected argument: " ++ Arg}.
-
-usage() ->
-    "Usage: thrift_generator generate <file.thrift> [-o <out_dir>]\n"
-    "\n"
-    "  -o <out_dir>    directory for generated .erl files (default: .)".
-
-usage_error(Message) ->
-    io:format(standard_error, "~ts~n~n~ts~n", [Message, usage()]),
-    halt(1).
 
 format_error({parse, Path, {Line, Module, Term}}) when is_integer(Line) ->
     io_lib:format("~ts:~b: ~ts", [Path, Line, Module:format_error(Term)]);
