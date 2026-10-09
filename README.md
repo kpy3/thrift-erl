@@ -466,7 +466,14 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
   2-tuple descriptors intact, while `erl.set = "sets"` reproduces the
   official representation where wanted. The annotation sits
   after the whole `set<...>` type (on the field or the typedef —
-  inside the angle brackets it would annotate the element). The wire
+  inside the angle brackets it would annotate the element). The same
+  annotation on the `namespace erl` (or `namespace *`) header —
+  `namespace erl my.service (erl.set = "sets")` — sets the file-wide
+  default for every set in the document (the migration path from the
+  official runtime's `sets:set()` representation); an explicit
+  per-type annotation wins. Set-typed record defaults are wrapped in
+  the constructor call (`sets:from_list([...])`) in the generated
+  hrl and inline records. The wire
   encoding is identical for all three; records in the generated hrl get
   `sets:set(E)` / `ordsets:ordset(E)` types;
 - `erl.type = "nominal"` on a typedef — `-nominal` instead of an alias;

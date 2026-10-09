@@ -43,7 +43,9 @@
     const_reserved_clash_error_test/0,
     struct_annotation_error_test/0,
     set_annotation_error_test/0,
-    misplaced_set_annotation_error_test/0
+    misplaced_set_annotation_error_test/0,
+    namespace_set_default_test/0,
+    namespace_set_default_error_test/0
 ]).
 
 -spec analyze(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.
@@ -275,5 +277,63 @@ misplaced_set_annotation_error_test() ->
     ?assertMatch(
         {error, [{<<"t.thrift">>, _, Message}]},
         analyze(<<"typedef set<i32> Tags (erl.set = \"ordset\")">>)
+    ),
+    ok.
+
+%% erl.set on the namespace header is the file-wide default: every set
+%% without an explicit annotation is rewritten during analysis, nested
+%% sets included; the erl scope wins over the wildcard one, and a file
+%% without a namespace stays untouched.
+
+namespace_set_default_test() ->
+    {ok, Model} =
+        analyze(
+            "namespace erl t (erl.set = \"sets\")\n"
+            "struct S {\n"
+            "  1: set<i32> plain,\n"
+            "  2: set<i32> (erl.set = \"ordset\") ords,\n"
+            "  3: list<set<i32>> nest\n"
+            "}\n"
+            "typedef set<string> Tags\n"
+        ),
+    Module = model_module(Model),
+    [#tg_struct{fields = [Plain, Ords, Nest]}] = Module#tg_module.structs,
+    ?assertEqual(
+        {set, {base, i32, #{}}, #{<<"erl.set">> => <<"sets">>}},
+        Plain#tg_field.type
+    ),
+    ?assertEqual(
+        {set, {base, i32, #{}}, #{<<"erl.set">> => <<"ordset">>}},
+        Ords#tg_field.type
+    ),
+    ?assertEqual(
+        {list, {set, {base, i32, #{}}, #{<<"erl.set">> => <<"sets">>}}, #{}},
+        Nest#tg_field.type
+    ),
+    [#tg_typedef{type = TagsType}] = Module#tg_module.typedefs,
+    ?assertEqual(
+        {set, {base, string, #{}}, #{<<"erl.set">> => <<"sets">>}},
+        TagsType
+    ),
+    {ok, WildcardModel} =
+        analyze(
+            "namespace * t (erl.set = \"ordset\")\n"
+            "namespace erl t (erl.set = \"sets\")\n"
+            "struct S { 1: set<i32> tags }"
+        ),
+    [#tg_struct{fields = [Tags2]}] = (model_module(WildcardModel))#tg_module.structs,
+    ?assertMatch(
+        {set, _, #{<<"erl.set">> := <<"sets">>}},
+        Tags2#tg_field.type
+    ),
+    {ok, NoNamespaceModel} = analyze(<<"struct S { 1: set<i32> plain }">>),
+    [#tg_struct{fields = [NoNsPlain]}] = (model_module(NoNamespaceModel))#tg_module.structs,
+    ?assertEqual({set, {base, i32, #{}}, #{}}, NoNsPlain#tg_field.type),
+    ok.
+
+namespace_set_default_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.set v2 (expected \"sets\" or \"ordset\")">>}]},
+        analyze("namespace erl t (erl.set = \"v2\")\nstruct S { 1: i32 x }")
     ),
     ok.
