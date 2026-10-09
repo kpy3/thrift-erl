@@ -88,54 +88,20 @@ incompatible versions.
 
 -define(VERSION_1, 16#80010000).
 
--type base_type() :: bool | i8 | i16 | i32 | i64 | double | string | binary | uuid.
--type requiredness() :: required | optional | default.
--type enum_desc() :: [{integer(), atom()}].
-%% A struct descriptor is either the full `{Kind, Fields}` tuple or a
-%% `{ref, Module, Name}` resolved through `Module:struct_info/1` — the
-%% indirection keeps recursive descriptors finite.
--type struct_desc() :: {struct | union | exception, [field_desc()]} | {ref, module(), binary()}.
--type field_desc() :: {
-    Id :: integer(),
-    requiredness(),
-    type_desc(),
-    Name :: binary(),
-    Default :: term()
-}.
--type type_desc() ::
-    {base, base_type()}
-    | {enum, enum_desc()}
-    | {list, type_desc()}
-    | {set, type_desc()}
-    | {set, type_desc(), set_impl()}
-    | {map, type_desc(), type_desc()}
-    | {struct, struct_desc()}.
+%% The descriptor vocabulary lives in `thrift_erl_protocol` (the
+%% behaviour owns the contract); these aliases keep the existing
+%% `thrift_erl_binary:` type references compiling unchanged.
 
-%% The in-process representation a decoded set is built into. `list`
-%% keeps the wire list as is; `sets`/`ordset` name the stdlib collection
-%% the representation layer (`thrift_erl_record`) builds from it. This
-%% codec — the wire layer — encodes and decodes lists regardless; the
-%% third element only has to be tolerated here so generated descriptors
-%% pass through.
+-type base_type() :: thrift_erl_protocol:base_type().
+-type enum_desc() :: thrift_erl_protocol:enum_desc().
+-type struct_desc() :: thrift_erl_protocol:struct_desc().
+-type field_desc() :: thrift_erl_protocol:field_desc().
+-type type_desc() :: thrift_erl_protocol:type_desc().
+-type struct_value() :: thrift_erl_protocol:struct_value().
+-type message_type() :: thrift_erl_protocol:message_type().
+-type application_exception() :: thrift_erl_protocol:application_exception().
 
--type set_impl() :: list | sets | ordset.
-
-%% Generic struct representation: binary field names to values.
-
--type struct_value() :: #{binary() := term()}.
-
--type message_type() :: call | reply | exception | oneway.
-
--type application_exception() :: #{
-    message := binary(),
-    code := non_neg_integer(),
-    name := binary()
-}.
-
--type decode_result(Value) ::
-    {ok, Value, binary()}
-    | more
-    | {error, term()}.
+-type decode_result(Value) :: thrift_erl_protocol:decode_result(Value).
 
 %% Compiled descriptors: the same schema with wire type bytes
 %% precomputed. Every tag carries its wire byte in position 2; list,
@@ -168,13 +134,8 @@ incompatible versions.
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
 -spec encode(type_desc(), term()) -> {ok, iodata()} | {error, term()}.
-encode({struct, {ref, Module, Name}} = Ref, Value) when is_map(Value) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            encode_struct_c(Compiled, Value);
-        error ->
-            {error, {encode, {unknown_struct, Ref}}}
-    end;
+encode({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
+    encode_resolved(Module, Name, Value);
 encode({struct, {Kind, Fields}} = Desc, Value) when is_atom(Kind), is_list(Fields), is_map(Value) ->
     encode_struct_c(memo_compiled(Desc, Kind, Fields), Value);
 encode({struct, _}, Value) ->
@@ -206,6 +167,17 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
             decode_c(CType, Bin)
     end.
 
+%% The shared resolve-then-encode shape of the top-level ref entry and
+%% the nested `c_ref' encoding.
+-spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
+encode_resolved(Module, Name, Value) ->
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            encode_struct_c(Compiled, Value);
+        error ->
+            {error, {encode, {unknown_struct, {Module, Name}}}}
+    end.
+
 -spec encode_c(c_type(), term()) -> {ok, iodata()} | {error, term()}.
 encode_c({c_base, _W, bool}, true) ->
     {ok, <<1>>};
@@ -230,7 +202,7 @@ encode_c({c_base, _W, string}, V) when is_binary(V) ->
 encode_c({c_base, _W, binary}, V) when is_binary(V) ->
     {ok, [int32(byte_size(V)), V]};
 encode_c({c_enum, _W, Desc}, V) ->
-    case enum_to_int(Desc, V) of
+    case thrift_erl_protocol:enum_to_int(Desc, V) of
         {ok, Int} -> {ok, int32(Int)};
         error -> {error, {encode, {unknown_enum_value, V}}}
     end;
@@ -242,13 +214,8 @@ encode_c({c_map, _W, KeyW, ValW, CKey, CVal}, Value) when is_map(Value) ->
     encode_map_c(KeyW, ValW, CKey, CVal, Value);
 encode_c({c_struct, _W, Compiled}, Value) when is_map(Value) ->
     encode_struct_c(Compiled, Value);
-encode_c({c_ref, _W, Module, Name} = CRef, Value) when is_map(Value) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            encode_struct_c(Compiled, Value);
-        error ->
-            {error, {encode, {unknown_struct, c_ref_to_desc(CRef)}}}
-    end;
+encode_c({c_ref, _W, Module, Name}, Value) when is_map(Value) ->
+    encode_resolved(Module, Name, Value);
 encode_c(_Type, Value) ->
     {error, {encode, {value_does_not_match_type, Value}}}.
 
@@ -274,7 +241,7 @@ decode_c({c_base, _W, S}, Bin) when S =:= string; S =:= binary ->
 decode_c({c_enum, _W, Desc}, Bin) ->
     case decode_i32(Bin) of
         {ok, Int, Rest} ->
-            case enum_from_int(Desc, Int) of
+            case thrift_erl_protocol:enum_from_int(Desc, Int) of
                 {ok, Atom} -> {ok, Atom, Rest};
                 error -> {ok, Int, Rest}
             end;
@@ -382,10 +349,7 @@ Codes follow the Thrift specification: 0 unknown, 1 unknown method,
 -spec encode_application_exception(binary(), non_neg_integer()) ->
     {ok, iodata()} | {error, term()}.
 encode_application_exception(Message, Code) ->
-    encode(
-        {struct, thrift_erl_protocol:application_exception_desc()},
-        #{<<"message">> => Message, <<"code">> => Code}
-    ).
+    thrift_erl_protocol:encode_application_exception(?MODULE, Message, Code).
 
 -doc """
 Decodes `TApplicationException` from an EXCEPTION message payload.
@@ -394,26 +358,7 @@ Unknown fields are skipped per the usual struct rules.
 """.
 -spec decode_application_exception(binary()) -> decode_result(application_exception()).
 decode_application_exception(Bin) ->
-    case decode({struct, thrift_erl_protocol:application_exception_desc()}, Bin) of
-        {ok, #{<<"message">> := Message} = Map, Rest} ->
-            {ok,
-                #{
-                    message => Message,
-                    code => maps:get(<<"code">>, Map, 0),
-                    name => thrift_erl_protocol:application_exception_name(maps:get(<<"code">>, Map, 0))
-                },
-                Rest};
-        {ok, Map, Rest} ->
-            {ok,
-                #{
-                    message => <<>>,
-                    code => maps:get(<<"code">>, Map, 0),
-                    name => thrift_erl_protocol:application_exception_name(maps:get(<<"code">>, Map, 0))
-                },
-                Rest};
-        Other ->
-            Other
-    end.
+    thrift_erl_protocol:decode_application_exception(?MODULE, Bin).
 
 %%--------------------------------------------------------------------
 %% Descriptor compilation
@@ -485,20 +430,7 @@ compile_struct(Kind, Fields) ->
 %% is not a supported scenario (see the moduledoc).
 -spec resolve_struct(module(), binary()) -> {ok, c_struct()} | error.
 resolve_struct(Module, Name) ->
-    Key = {?MODULE, schema, Module, Name},
-    case persistent_term:get(Key, error) of
-        error ->
-            case Module:struct_info(Name) of
-                {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
-                    Compiled = compile_struct(Kind, Fields),
-                    persistent_term:put(Key, Compiled),
-                    {ok, Compiled};
-                error ->
-                    error
-            end;
-        Compiled ->
-            {ok, Compiled}
-    end.
+    thrift_erl_protocol:resolve_struct(?MODULE, Module, Name, fun compile_struct/2).
 
 -spec decode_ref_struct(module(), binary(), binary()) -> decode_result(struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
@@ -515,34 +447,9 @@ decode_ref_struct(Module, Name, Bin) ->
 %% call — so the exact-equality scan short-circuits on pointer equality
 %% and a hit costs nanoseconds; a miss compiles and inserts at the head
 %% of a capped list, so pathological callers cannot grow the memo.
--define(MEMO_KEY, {?MODULE, compiled_structs}).
--define(MEMO_LIMIT, 8).
-
 -spec memo_compiled(type_desc(), struct | union | exception, [field_desc()]) -> c_struct().
 memo_compiled(Desc, Kind, Fields) ->
-    case erlang:get(?MEMO_KEY) of
-        undefined ->
-            Compiled = compile_struct(Kind, Fields),
-            erlang:put(?MEMO_KEY, [{Desc, Compiled}]),
-            Compiled;
-        Entries when is_list(Entries) ->
-            case lists:keyfind(Desc, 1, Entries) of
-                {_Desc, Compiled} ->
-                    Compiled;
-                false ->
-                    Compiled = compile_struct(Kind, Fields),
-                    erlang:put(?MEMO_KEY, lists:sublist([{Desc, Compiled} | Entries], ?MEMO_LIMIT)),
-                    Compiled
-            end;
-        _ ->
-            Compiled = compile_struct(Kind, Fields),
-            erlang:put(?MEMO_KEY, [{Desc, Compiled}]),
-            Compiled
-    end.
-
--spec c_ref_to_desc(c_type()) -> type_desc().
-c_ref_to_desc({c_ref, _W, Module, Name}) ->
-    {struct, {ref, Module, Name}}.
+    thrift_erl_protocol:memo_compiled(?MODULE, Desc, Kind, Fields, fun compile_struct/2).
 
 %%--------------------------------------------------------------------
 %% Structs
@@ -604,13 +511,8 @@ check_present_fields(_Kind, ReqNames, _Fields, Map) ->
     end.
 
 -spec all_present([binary()], struct_value()) -> boolean().
-all_present([], _Map) ->
-    true;
-all_present([Name | Rest], Map) ->
-    case Map of
-        #{Name := _} -> all_present(Rest, Map);
-        #{} -> false
-    end.
+all_present(Names, Map) ->
+    thrift_erl_protocol:all_present(Names, Map).
 
 -spec decode_struct_c(c_struct(), binary()) -> decode_result(struct_value()).
 decode_struct_c(#{by_id := ById, required := Required}, Bin) ->
@@ -924,38 +826,12 @@ Returns the field descriptors of a struct type descriptor
 through `M:struct_info/1`.
 """.
 -spec struct_fields(type_desc()) -> [field_desc()].
-struct_fields({struct, {ref, Module, Name}}) ->
-    {_, Fields} = Module:struct_info(Name),
-    Fields;
-struct_fields({struct, {_Kind, Fields}}) ->
-    Fields.
-
--spec message_type(non_neg_integer()) -> {ok, message_type()} | error.
-message_type(1) -> {ok, call};
-message_type(2) -> {ok, reply};
-message_type(3) -> {ok, exception};
-message_type(4) -> {ok, oneway};
-message_type(_) -> error.
+struct_fields(Desc) ->
+    thrift_erl_protocol:struct_fields(Desc).
 
 -spec message_type_or(non_neg_integer()) -> {ok, message_type()} | {error, term()}.
 message_type_or(TypeByte) ->
-    case message_type(TypeByte) of
+    case thrift_erl_protocol:message_type(TypeByte) of
         {ok, Type} -> {ok, Type};
         error -> {error, {decode, {unknown_message_type, TypeByte}}}
-    end.
-
--spec enum_to_int(enum_desc(), atom() | integer()) -> {ok, integer()} | error.
-enum_to_int(Desc, V) when is_atom(V) ->
-    case lists:keyfind(V, 2, Desc) of
-        {Int, V} -> {ok, Int};
-        false -> error
-    end;
-enum_to_int(_Desc, V) when is_integer(V) ->
-    {ok, V}.
-
--spec enum_from_int(enum_desc(), integer()) -> {ok, atom()} | error.
-enum_from_int(Desc, Int) ->
-    case lists:keyfind(Int, 1, Desc) of
-        {Int, Atom} -> {ok, Atom};
-        false -> error
     end.

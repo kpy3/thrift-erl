@@ -322,17 +322,17 @@ more_semantics_test() ->
 
 uuid_unsupported_test() ->
     ?assertMatch(
-        {error, {encode, {type_not_supported, uuid, compact}}},
+        {error, {encode, {type_not_supported, {base, uuid}, compact}}},
         thrift_erl_compact:encode({base, uuid}, <<0:128>>)
     ),
     ?assertMatch(
-        {error, {decode, {type_not_supported, uuid, compact}}},
+        {error, {decode, {type_not_supported, {base, uuid}, compact}}},
         thrift_erl_compact:decode({base, uuid}, <<0:128>>)
     ),
     %% the same refusal arrives from a struct field carrying one
     U = {struct, {struct, [{1, default, {base, uuid}, <<"u">>, undefined}]}},
     ?assertMatch(
-        {error, {encode, {type_not_supported, uuid, compact}}},
+        {error, {encode, {type_not_supported, {base, uuid}, compact}}},
         thrift_erl_compact:encode(U, #{<<"u">> => <<0:128>>})
     ),
     ok.

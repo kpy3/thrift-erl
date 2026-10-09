@@ -204,31 +204,12 @@ Encodes `TApplicationException` as an EXCEPTION message payload
 -spec encode_application_exception(binary(), non_neg_integer()) ->
     {ok, iodata()} | {error, term()}.
 encode_application_exception(Message, Code) ->
-    encode(
-        {struct, thrift_erl_protocol:application_exception_desc()},
-        #{<<"message">> => Message, <<"code">> => Code}
-    ).
+    thrift_erl_protocol:encode_application_exception(?MODULE, Message, Code).
 
 -doc "Decodes `TApplicationException` from an EXCEPTION message payload.".
 -spec decode_application_exception(binary()) -> decode_result(thrift_erl_binary:application_exception()).
 decode_application_exception(Bin) ->
-    case decode({struct, thrift_erl_protocol:application_exception_desc()}, Bin) of
-        {ok, #{<<"message">> := Message} = Map, Rest} ->
-            {ok, application_exception(Message, Map), Rest};
-        {ok, Map, Rest} ->
-            {ok, application_exception(<<>>, Map), Rest};
-        Other ->
-            Other
-    end.
-
--spec application_exception(binary(), struct_value()) -> thrift_erl_binary:application_exception().
-application_exception(Message, Map) ->
-    Code = maps:get(<<"code">>, Map, 0),
-    #{
-        message => Message,
-        code => Code,
-        name => thrift_erl_protocol:application_exception_name(Code)
-    }.
+    thrift_erl_protocol:decode_application_exception(?MODULE, Bin).
 
 %%--------------------------------------------------------------------
 %% Compiled descriptor encoding
@@ -249,7 +230,7 @@ encode_j({j_base, S}, V) when S =:= string; S =:= binary ->
         false -> {error, {encode, {value_does_not_match_type, V}}}
     end;
 encode_j({j_enum, Desc}, V) ->
-    case enum_to_int(Desc, V) of
+    case thrift_erl_protocol:enum_to_int(Desc, V) of
         {ok, Int} -> {ok, integer_to_binary(Int)};
         error -> {error, {encode, {unknown_enum_value, V}}}
     end;
@@ -366,7 +347,7 @@ encode_key_text({j_base, double}, V) when is_number(V) ->
 encode_key_text({j_base, B}, V) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
     encode_int(B, V);
 encode_key_text({j_enum, Desc}, V) ->
-    case enum_to_int(Desc, V) of
+    case thrift_erl_protocol:enum_to_int(Desc, V) of
         {ok, Int} -> {ok, integer_to_binary(Int)};
         error -> {error, {encode, {unknown_enum_value, V}}}
     end;
@@ -455,13 +436,8 @@ check_present_fields(_Kind, ReqNames, Map) ->
     end.
 
 -spec all_present([binary()], struct_value()) -> boolean().
-all_present([], _Map) ->
-    true;
-all_present([Name | Rest], Map) ->
-    case Map of
-        #{Name := _} -> all_present(Rest, Map);
-        #{} -> false
-    end.
+all_present(Names, Map) ->
+    thrift_erl_protocol:all_present(Names, Map).
 
 %% The top-level struct decode folds the envelope's closing bracket
 %% (see the moduledoc); nested struct decodes never see one.
@@ -632,7 +608,7 @@ decode_j({j_base, S}, Bin) when S =:= string; S =:= binary ->
 decode_j({j_enum, Desc}, Bin) ->
     case scan_number(Bin) of
         {ok, {int, Int}, Rest} ->
-            case enum_from_int(Desc, Int) of
+            case thrift_erl_protocol:enum_from_int(Desc, Int) of
                 {ok, Atom} -> {ok, Atom, Rest};
                 error -> {ok, Int, Rest}
             end;
@@ -822,7 +798,7 @@ key_from_text({j_base, _B}, Text) ->
 key_from_text({j_enum, Desc}, Text) ->
     try
         Int = binary_to_integer(Text),
-        case enum_from_int(Desc, Int) of
+        case thrift_erl_protocol:enum_from_int(Desc, Int) of
             {ok, Atom} -> {ok, Atom};
             error -> {ok, Int}
         end
@@ -1294,20 +1270,7 @@ compile_struct(Kind, Fields) ->
 
 -spec resolve_struct(module(), binary()) -> {ok, j_struct()} | error.
 resolve_struct(Module, Name) ->
-    Key = {?MODULE, schema, Module, Name},
-    case persistent_term:get(Key, error) of
-        error ->
-            case Module:struct_info(Name) of
-                {Kind, Fields} when is_atom(Kind), is_list(Fields) ->
-                    Compiled = compile_struct(Kind, Fields),
-                    persistent_term:put(Key, Compiled),
-                    {ok, Compiled};
-                error ->
-                    error
-            end;
-        Compiled ->
-            {ok, Compiled}
-    end.
+    thrift_erl_protocol:resolve_struct(?MODULE, Module, Name, fun compile_struct/2).
 
 %% The shared resolve-then-encode shape of the top-level ref entry and
 %% the nested `j_ref' encoding.
@@ -1334,31 +1297,9 @@ resolve_compiled(Module, Name) ->
 %% Inline `{Kind, Fields}` descriptors (params structs of
 %% `function_info/2`) are literals, so the per-process memo hits on
 %% pointer equality and a miss compiles into a capped list.
--define(MEMO_KEY, {?MODULE, compiled_structs}).
--define(MEMO_LIMIT, 8).
-
 -spec memo_compiled(struct | union | exception, [thrift_erl_binary:field_desc()]) -> j_struct().
 memo_compiled(Kind, Fields) ->
-    Key = {Kind, Fields},
-    case erlang:get(?MEMO_KEY) of
-        undefined ->
-            Compiled = compile_struct(Kind, Fields),
-            erlang:put(?MEMO_KEY, [{Key, Compiled}]),
-            Compiled;
-        Entries when is_list(Entries) ->
-            case lists:keyfind(Key, 1, Entries) of
-                {_Key, Compiled} ->
-                    Compiled;
-                false ->
-                    Compiled = compile_struct(Kind, Fields),
-                    erlang:put(?MEMO_KEY, lists:sublist([{Key, Compiled} | Entries], ?MEMO_LIMIT)),
-                    Compiled
-            end;
-        _ ->
-            Compiled = compile_struct(Kind, Fields),
-            erlang:put(?MEMO_KEY, [{Key, Compiled}]),
-            Compiled
-    end.
+    thrift_erl_protocol:memo_compiled(?MODULE, {Kind, Fields}, Kind, Fields, fun compile_struct/2).
 
 %%--------------------------------------------------------------------
 %% Type tags and scalar helpers
@@ -1399,19 +1340,3 @@ in_range(i64, V) when is_integer(V) ->
     V >= -9223372036854775808 andalso V =< 9223372036854775807;
 in_range(_B, _V) ->
     false.
-
--spec enum_to_int(enum_desc(), atom() | integer()) -> {ok, integer()} | error.
-enum_to_int(Desc, V) when is_atom(V) ->
-    case lists:keyfind(V, 2, Desc) of
-        {Int, V} -> {ok, Int};
-        false -> error
-    end;
-enum_to_int(_Desc, V) when is_integer(V) ->
-    {ok, V}.
-
--spec enum_from_int(enum_desc(), integer()) -> {ok, atom()} | error.
-enum_from_int(Desc, Int) ->
-    case lists:keyfind(Int, 1, Desc) of
-        {Int, Atom} -> {ok, Atom};
-        false -> error
-    end.
