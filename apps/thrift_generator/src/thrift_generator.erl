@@ -19,10 +19,11 @@ Front end of the Thrift IDL generator: turns IDL files into tokens and
 an AST of `#thrift_generator_node{}` records.
 
 The pipeline is `tokens/1` -> `ast/1`; `parse_file/1` and
-`parse_string/1` wrap both steps. Every parsed file gets a synthetic
-`__file__` marker appended so the document node knows which file the
-AST came from; the path is kept as given (not reduced to a base name)
-because include resolution needs the directory.
+`parse_string/1` wrap both steps. `parse_file/1` appends a synthetic
+`__file__` marker to the source, which the grammar consumes after the
+document's definitions; the AST document itself carries only headers
+and definitions — module naming and include resolution work from the
+paths the loader tracks.
 """.
 
 -export([tokens/1, ast/1, parse_file/1, parse_string/1]).

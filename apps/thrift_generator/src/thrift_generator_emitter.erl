@@ -49,8 +49,6 @@ the descriptor terms, which keeps the emitter declarative.
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
 
--define(DEFAULT_TIMEOUT, 5000).
-
 -type compiled() ::
     {ok, module(), binary()}
     | {error, {module(), [tuple()]}}.

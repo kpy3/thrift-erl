@@ -281,9 +281,15 @@ analyze_struct(Node, {Acc, Ctx}) ->
 -spec build_struct(ast_node(), struct | union | exception, [#tg_struct{}], #ctx{}) ->
     {[#tg_struct{}], #ctx{}}.
 build_struct(Node, Kind, Acc, Ctx0) ->
-    Payload = Node#thrift_generator_node.payload,
-    Name = element(2, Payload),
-    FieldsRaw = element(3, Payload),
+    %% struct, union and exception share the payload shape but arrive
+    %% as three distinct records; named reads keep the fields visible
+    %% to tooling
+    {Name, FieldsRaw} =
+        case Node#thrift_generator_node.payload of
+            #thrift_generator_struct{name = N, fields = F} -> {N, F};
+            #thrift_generator_union{name = N, fields = F} -> {N, F};
+            #thrift_generator_exception{name = N, fields = F} -> {N, F}
+        end,
     Line = Node#thrift_generator_node.line,
     {Fields, Ctx} = analyze_fields(FieldsRaw, Kind, Ctx0),
     Struct =
