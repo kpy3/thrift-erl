@@ -84,7 +84,10 @@ both:
     ssl_opts => [ssl:tls_client_option()],
     multiplex => binary(),
     %% the `{active, N}` delivery batch size, default 100
-    active_n => pos_integer()
+    active_n => pos_integer(),
+    %% how many calls may wait while another is on the wire; `infinity`
+    %% (the default) keeps the classic unbounded queue
+    max_queue_depth => pos_integer() | infinity
 }.
 
 -type call_result() ::
@@ -102,7 +105,11 @@ both:
     from :: gen_server:from(),
     function :: binary(),
     args :: [term()],
-    timeout :: pos_integer() | infinity
+    %% the deadline covers the queue wait and the wire round-trip: the
+    %% timer is armed at enqueue time, not when the request reaches the
+    %% wire, so a call stuck behind a slow head still times out on time
+    timeout :: pos_integer() | infinity,
+    timer :: undefined | reference()
 }).
 
 %% The request currently on the wire.
@@ -133,7 +140,8 @@ both:
     seqid = 0 :: non_neg_integer(),
     buffer = <<>> :: binary(),
     pending :: undefined | #pending{},
-    queue = [] :: [#request{}]
+    queue = queue:new() :: queue:queue(#request{}),
+    max_queue_depth :: pos_integer() | infinity
 }).
 
 -doc """
@@ -220,7 +228,8 @@ init(Opts) ->
                 max_frame_size = thrift_erl_options:max_frame_size(Opts),
                 http_path = thrift_erl_options:http_path(Opts),
                 host_value = host_value(maps:get(host, Opts), maps:get(port, Opts)),
-                active_n = ActiveN
+                active_n = ActiveN,
+                max_queue_depth = maps:get(max_queue_depth, Opts, infinity)
             }};
         {{error, Reason}, _} ->
             {stop, Reason};
@@ -232,9 +241,19 @@ init(Opts) ->
 -spec handle_call(term(), gen_server:from(), #state{}) ->
     {noreply, #state{}} | {stop, term(), #state{}}.
 handle_call({Kind, Function, Args, Timeout}, From, #state{} = State) ->
-    Request =
-        #request{kind = Kind, from = From, function = Function, args = Args, timeout = Timeout},
-    try_dispatch(State#state{queue = State#state.queue ++ [Request]});
+    case queue:len(State#state.queue) < State#state.max_queue_depth of
+        true ->
+            Request = arm_request(#request{
+                kind = Kind,
+                from = From,
+                function = Function,
+                args = Args,
+                timeout = Timeout
+            }),
+            try_dispatch(State#state{queue = queue:in(Request, State#state.queue)});
+        false ->
+            {reply, {error, queue_full}, State}
+    end;
 handle_call(_Request, From, State) ->
     gen_server:reply(From, {error, unsupported}),
     {noreply, State}.
@@ -266,6 +285,8 @@ handle_info({ssl_error, _Socket, Reason}, State) ->
     abort(Reason, State);
 %% The reply can never be trusted to stay in sync after a timeout:
 %% fail the call and drop the connection.
+handle_info({timeout, Timer, call_timer}, #state{pending = undefined} = State) ->
+    queue_timer_fired(Timer, State);
 handle_info(
     {timeout, Timer, call_timer},
     #state{
@@ -274,6 +295,9 @@ handle_info(
 ) ->
     gen_server:reply(From, {error, timeout}),
     fail_queue(closed, State#state{pending = undefined});
+handle_info({timeout, Timer, call_timer}, State) ->
+    %% a queued request's deadline while another call is on the wire
+    queue_timer_fired(Timer, State);
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -295,16 +319,20 @@ terminate(_Reason, #state{socket = Socket} = State) ->
 %% Starts the head queued request while no other one is on the wire.
 
 -spec try_dispatch(#state{}) -> {noreply, #state{}} | {stop, term(), #state{}}.
-try_dispatch(#state{pending = undefined, queue = []} = State) ->
-    {noreply, State};
-try_dispatch(#state{pending = undefined, queue = [Request | Rest]} = State0) ->
-    SeqId = State0#state.seqid + 1,
-    case prepare(Request, SeqId, State0) of
-        {reply, Reply} ->
-            gen_server:reply(Request#request.from, Reply),
-            try_dispatch(State0#state{queue = Rest});
-        {ok, Message} ->
-            dispatch_request(Request, Message, SeqId, State0#state{queue = Rest})
+try_dispatch(#state{pending = undefined, queue = Queue} = State) ->
+    case queue:out(Queue) of
+        {empty, _} ->
+            {noreply, State};
+        {{value, Request}, Rest} ->
+            SeqId = State#state.seqid + 1,
+            case prepare(Request, SeqId, State) of
+                {reply, Reply} ->
+                    cancel_call_timer(Request#request.timer),
+                    gen_server:reply(Request#request.from, Reply),
+                    try_dispatch(State#state{queue = Rest});
+                {ok, Message} ->
+                    dispatch_request(Request, Message, SeqId, State#state{queue = Rest})
+            end
     end;
 try_dispatch(State) ->
     {noreply, State}.
@@ -324,7 +352,7 @@ dispatch_request(
             seqid = SeqId,
             info = request_info(Request, State),
             oneway = true,
-            timer = arm_call_timer(Request)
+            timer = Request#request.timer
         },
     case send_message(Message, State#state{seqid = SeqId, pending = Pending}) of
         #state{} = Sent -> {noreply, Sent};
@@ -346,7 +374,7 @@ dispatch_request(Request, Message, SeqId, State) ->
             function = Request#request.function,
             seqid = SeqId,
             info = request_info(Request, State),
-            timer = arm_call_timer(Request)
+            timer = Request#request.timer
         },
     case send_message(Message, State#state{seqid = SeqId, pending = Pending}) of
         #state{} = Sent -> {noreply, Sent};
@@ -408,20 +436,56 @@ wire_name(Function, #state{multiplex = undefined}) ->
 wire_name(Function, #state{multiplex = Service}) ->
     <<Service/binary, ":", Function/binary>>.
 
--spec arm_call_timer(#request{}) -> undefined | reference().
-arm_call_timer(#request{timeout = infinity}) ->
-    undefined;
-arm_call_timer(#request{timeout = Timeout}) ->
-    erlang:start_timer(Timeout, self(), call_timer).
+%% The per-call deadline starts when the call is accepted, not when it
+%% reaches the wire: a request queued behind a slow head keeps its own
+%% deadline. The timer reference travels with the request; on dispatch
+%% it moves into the pending slot, on a queue timeout the request is
+%% answered from its queue position.
+
+-spec arm_request(#request{}) -> #request{}.
+arm_request(#request{timeout = infinity} = Request) ->
+    Request#request{timer = undefined};
+arm_request(#request{timeout = Timeout} = Request) ->
+    Request#request{timer = erlang:start_timer(Timeout, self(), call_timer)}.
+
+%% A queued request's deadline fired: answer it from its queue position
+%% and keep the rest of the queue flowing.
+
+-spec queue_timer_fired(reference(), #state{}) -> {noreply, #state{}}.
+queue_timer_fired(Timer, #state{queue = Queue} = State) ->
+    case queue:out(Queue) of
+        {{value, #request{timer = Timer, from = From}}, Rest} ->
+            %% head of the queue: nothing is on the wire, the next
+            %% request may go out right away
+            gen_server:reply(From, {error, timeout}),
+            try_dispatch(State#state{queue = Rest});
+        _ ->
+            case queue_take_timer(Timer, Queue) of
+                {ok, Request, Queue1} ->
+                    gen_server:reply(Request#request.from, {error, timeout}),
+                    {noreply, State#state{queue = Queue1}};
+                error ->
+                    %% the timer was cancelled after all; the request is
+                    %% on the wire (its pending slot handles it) or gone
+                    {noreply, State}
+            end
+    end.
+
+-spec queue_take_timer(reference(), queue:queue(#request{})) ->
+    {ok, #request{}, queue:queue(#request{})} | error.
+queue_take_timer(Timer, Queue) ->
+    case lists:splitwith(fun(#request{timer = T}) -> T =/= Timer end, queue:to_list(Queue)) of
+        {Prefix, [Request | Suffix]} ->
+            {ok, Request, queue:from_list(Prefix ++ Suffix)};
+        {_, []} ->
+            error
+    end.
 
 -spec send_message(iodata(), #state{}) -> #state{} | {stop, normal, #state{}}.
 send_message(Message, #state{} = State) ->
-    Bytes =
-        case State#state.transport of
-            framed -> [<<(iolist_size(Message)):32/big-unsigned>>, Message];
-            buffered -> Message;
-            http -> thrift_erl_http:request(State#state.host_value, State#state.http_path, [], Message)
-        end,
+    Bytes = thrift_erl_transport:client_frame(
+        State#state.transport, Message, State#state.host_value, State#state.http_path
+    ),
     case thrift_erl_socket:send(State#state.socket, Bytes) of
         ok ->
             State;
@@ -591,10 +655,13 @@ exception_name({_, _, _, FieldName, _}) -> FieldName.
 -spec fail_queue(term(), #state{}) -> {stop, normal, #state{}}.
 fail_queue(Reason, #state{} = State) ->
     lists:foreach(
-        fun(#request{from = From}) -> gen_server:reply(From, {error, Reason}) end,
-        State#state.queue
+        fun(#request{from = From, timer = Timer}) ->
+            cancel_call_timer(Timer),
+            gen_server:reply(From, {error, Reason})
+        end,
+        queue:to_list(State#state.queue)
     ),
-    {stop, normal, State#state{queue = []}}.
+    {stop, normal, State#state{queue = queue:new()}}.
 
 -spec abort(term(), #state{}) -> {stop, normal, #state{}}.
 abort(Reason, #state{pending = #pending{from = From, timer = Timer}} = State) ->

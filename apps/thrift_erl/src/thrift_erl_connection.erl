@@ -568,12 +568,7 @@ reply_application_exception(Name, SeqId, Message, Code, #state{} = State) ->
 ) -> #state{}.
 send_message(Type, Name, SeqId, Payload, #state{} = State) ->
     Message = (State#state.protocol):encode_message(Type, Name, SeqId, Payload),
-    Bytes =
-        case State#state.transport of
-            framed -> [<<(iolist_size(Message)):32/big-unsigned>>, Message];
-            buffered -> Message;
-            http -> thrift_erl_http:response(200, [], Message)
-        end,
+    Bytes = thrift_erl_transport:server_frame(State#state.transport, Message),
     case thrift_erl_socket:send(State#state.socket, Bytes) of
         ok ->
             State;

@@ -42,6 +42,8 @@
     client_queue_serializes_test/0,
     client_start_unlinked_test/0,
     client_stop_with_pending_test/0,
+    client_queued_call_deadline_test/0,
+    client_max_queue_depth_test/0,
     client_peer_close_fails_pending_test/0,
     client_call_timeout_test/0
 ]).
@@ -514,6 +516,77 @@ client_peer_close_fails_pending_test() ->
     Peer ! close,
     assert_caller_result({error, closed}),
     assert_dead(Client),
+    ok.
+
+%% A call queued behind a slow head keeps its own deadline: armed at
+%% enqueue, it answers timeout while still waiting, not after the head
+%% finally finishes.
+
+client_queued_call_deadline_test() ->
+    {Port, Peer} = raw_peer(),
+    {ok, Client} = thrift_erl_client:start(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+    wait_peer(),
+    Slow = self(),
+    spawn(fun() -> Slow ! {head, thrift_erl_client:call(Client, <<"add">>, [1, 2], 4000)} end),
+    timer:sleep(100),
+    T0 = erlang:monotonic_time(millisecond),
+    Result = thrift_erl_client:call(Client, <<"add">>, [3, 4], 200),
+    Elapsed = erlang:monotonic_time(millisecond) - T0,
+    ?assertEqual({error, timeout}, Result),
+    ?assert(Elapsed < 2000),
+    %% the head call still finishes inside its own deadline
+    ?assertEqual(
+        {error, timeout},
+        receive
+            {head, R} -> R
+        after 6000 -> no_head_result
+        end
+    ),
+    assert_dead(Client),
+    Peer ! close,
+    ok.
+
+%% max_queue_depth bounds the waiting line; beyond it calls answer
+%% queue_full instead of piling up.
+
+client_max_queue_depth_test() ->
+    %% a mute peer keeps the head on the wire, so every concurrent call
+    %% waits in the queue until the depth cap rejects the next one
+    {Port, Peer} = raw_peer(),
+    {ok, Client} =
+        thrift_erl_client:start(#{
+            host => "127.0.0.1", port => Port, service => ?SERVICE, max_queue_depth => 2
+        }),
+    try
+        wait_peer(),
+        Caller = self(),
+        [
+            spawn(fun() -> Caller ! {N, thrift_erl_client:call(Client, <<"add">>, [N, N], 2000)} end)
+         || N <- lists:seq(1, 4)
+        ],
+        Results = [
+            receive
+                {N, R} -> {N, R}
+            after 3000 ->
+                erlang:error({no_result, N})
+            end
+         || N <- lists:seq(1, 4)
+        ],
+        lists:sort(Results),
+        Counts = lists:foldl(
+            fun
+                ({_N, {error, queue_full}}, Acc) -> Acc + 1;
+                ({_N, _Other}, Acc) -> Acc
+            end,
+            0,
+            Results
+        ),
+        ?assertEqual(1, Counts),
+        ?assertEqual(4, length(Results))
+    after
+        stop_quietly(Client),
+        Peer ! close
+    end,
     ok.
 
 client_call_timeout_test() ->
