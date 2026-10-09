@@ -32,6 +32,9 @@
     field_own_annotations_test/0,
     doc_comment_test/0,
     line_doc_comment_test/0,
+    hash_comment_test/0,
+    header_doc_comment_test/0,
+    merged_doc_comment_test/0,
     enum_values_test/0,
     empty_enum_test/0,
     const_literal_test/0,
@@ -137,6 +140,53 @@ line_doc_comment_test() ->
     ?assertEqual(<<"An enum.">>, Enum#thrift_generator_node.doc),
     #thrift_generator_enum{values = [{<<"A">>, undefined, #{}, undefined}]} =
         Enum#thrift_generator_node.payload,
+    ok.
+
+%% `#' is the official IDL's third comment form (alongside `//' and
+%% `/* */') — a line comment, never opened inside a string literal.
+
+hash_comment_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        <<"# leading\nstruct S {\n  1: string name # trailing\n  2: string tag = \"a#b\"\n}">>
+    ),
+    #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
+    #thrift_generator_struct{fields = [Name, Tag]} = Struct#thrift_generator_node.payload,
+    ?assertEqual(<<"name">>, Name#thrift_generator_node.payload#thrift_generator_field.name),
+    Default = Tag#thrift_generator_node.payload#thrift_generator_field.default,
+    ?assertEqual(<<"a#b">>, Default),
+    ok.
+
+%% The official grammar treats any comment as whitespace, so a doc
+%% comment before a header — or dangling at end of input — parses and
+%% carries nothing (there is no header doc), while a doc before a
+%% definition still attaches and consecutive docs merge into one.
+
+header_doc_comment_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        <<
+            "/** File-level prose. */\n"
+            "include \"other.thrift\"\n"
+            "/// namespace note\n"
+            "namespace erl demo\n"
+            "/** S. */\n"
+            "struct S {}\n"
+            "/** dangling */"
+        >>
+    ),
+    #thrift_generator_document{headers = [Include, Namespace]} = Doc#thrift_generator_node.payload,
+    #thrift_generator_include{path = <<"other.thrift">>} = Include#thrift_generator_node.payload,
+    #thrift_generator_namespace{scope = <<"erl">>, name = <<"demo">>} =
+        Namespace#thrift_generator_node.payload,
+    [Struct] = Doc#thrift_generator_node.payload#thrift_generator_document.definitions,
+    ?assertEqual(<<"S.">>, Struct#thrift_generator_node.doc),
+    ok.
+
+merged_doc_comment_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        <<"/** First block. */\n/// Second line.\nstruct S {}">>
+    ),
+    [Struct] = Doc#thrift_generator_node.payload#thrift_generator_document.definitions,
+    ?assertEqual(<<"First block.\nSecond line.">>, Struct#thrift_generator_node.doc),
     ok.
 
 enum_values_test() ->

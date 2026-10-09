@@ -113,7 +113,62 @@ tokens(Filename) ->
 -doc "Parses a token list into a document AST node.".
 -spec ast([token()]) -> {ok, ast_node()} | {error, term()}.
 ast(Tokens) ->
-    thrift_parser:parse(Tokens).
+    thrift_parser:parse(strip_detached_docs(Tokens)).
+
+%% The grammar attaches `doc' comments to definitions and, inside
+%% bodies, to fields, enum values and functions. Consecutive comments
+%% merge into one doc (the official compiler concatenates them the same
+%% way). A document-level doc before a header — or dangling at end of
+%% input — has nothing to attach to; the official grammar treats any
+%% comment there as whitespace, so those tokens are dropped.
+
+-spec strip_detached_docs([token()]) -> [token()].
+strip_detached_docs(Tokens) ->
+    strip_detached_docs(Tokens, 0).
+
+strip_detached_docs([], _Depth) ->
+    [];
+strip_detached_docs([{doc, Line, Text} | Rest], Depth) ->
+    {Texts, Rest1} = collect_docs(Rest, [Text]),
+    Merged = {doc, Line, join_docs(lists:reverse(Texts))},
+    case Depth =:= 0 andalso detached(Rest1) of
+        true ->
+            strip_detached_docs(Rest1, Depth);
+        false ->
+            [Merged | strip_detached_docs(Rest1, Depth)]
+    end;
+strip_detached_docs([Token | Rest], Depth) ->
+    Depth1 =
+        case Token of
+            {'{', _} -> Depth + 1;
+            {'}', _} -> Depth - 1;
+            _ -> Depth
+        end,
+    [Token | strip_detached_docs(Rest, Depth1)].
+
+-spec collect_docs([token()], [binary()]) -> {[binary()], [token()]}.
+collect_docs([{doc, _, Text} | Rest], Acc) ->
+    collect_docs(Rest, [Text | Acc]);
+collect_docs(Rest, Acc) ->
+    {Acc, Rest}.
+
+-spec join_docs([binary()]) -> binary().
+join_docs(Texts) ->
+    iolist_to_binary(lists:join(<<"\n">>, Texts)).
+
+%% A doc is detached when the next meaningful token opens a header, the
+%% file marker, or nothing — everything else (a definition start, or any
+%% token inside a body) keeps it attached.
+
+-spec detached([token()]) -> boolean().
+detached([{doc, _, _} | Rest]) ->
+    detached(Rest);
+detached([{T, _} | _]) when T =:= include; T =:= cpp_include; T =:= namespace; T =:= file ->
+    true;
+detached([]) ->
+    true;
+detached(_) ->
+    false.
 
 -doc "Reads, lexes and parses an IDL file in one step.".
 -spec parse_file(file:filename_all()) -> {ok, ast_node()} | {error, term()}.
