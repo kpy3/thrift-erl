@@ -40,6 +40,7 @@
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
     generated_map_mode/1,
+    generated_native_repr/1,
     generated_set_impl/1
 ]).
 
@@ -60,6 +61,7 @@ all() ->
         generated_loopback_buffered,
         generated_loopback_framed,
         generated_map_mode,
+        generated_native_repr,
         generated_set_impl
     ].
 
@@ -533,6 +535,101 @@ generated_map_mode(Config) ->
         end
     after
         'MainService_server':stop(Server)
+    end.
+
+%% End-to-end over the `--repr native` axis: definitions without an
+%% explicit `erl.struct_type` generate as native-representation structs —
+%% no record declarations anywhere, `{native, Tag}` contracts, the codec
+%% defaults to runtime-minted native records (OTP 29; older releases
+%% answer `{error, {unsupported_repr, native}}`). Handlers speak the
+%% low-level record axis (atom-key maps) on every release.
+
+-spec generated_native_repr(ct:config()) -> ok.
+generated_native_repr(Config) ->
+    MainPath = data_file(Config, "nativerepr/nativedemo.thrift"),
+    {ok, Loaded} = thrift_generator_loader:load(MainPath),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded, #{repr => native}),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) ->
+                {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam);
+            ({error, {Name, Errors}}) ->
+                erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+    %% the representation contract: native mode tagged by the snake-cased
+    %% wire name, no generated from_map, no record declarations in the hrl
+    ?assertEqual({native, point}, nativedemo_types:record_fields(<<"Point">>)),
+    ?assertEqual({native, oops}, nativedemo_types:record_fields(<<"Oops">>)),
+    ?assertEqual(
+        false,
+        erlang:function_exported(nativedemo_types, nativedemo_point_from_map, 1)
+    ),
+    {value, #{hrl := Hrl}} =
+        lists:search(
+            fun(E) -> maps:get(module, E) =:= nativedemo_types end,
+            thrift_generator_emitter:sources(Model)
+        ),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(nativedemo_point">>)),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-type nativedemo_point\\(\\)">>)),
+    %% codec roundtrip: map and record axes on every release
+    {ok, PointBin} = nativedemo_types:encode_nativedemo_point(#{x => 1, label => <<"p">>}),
+    ?assertEqual(
+        {ok, #{x => 1, label => <<"p">>}},
+        nativedemo_types:decode_nativedemo_point(PointBin, map)
+    ),
+    ?assertEqual(
+        {error, {no_record, point}},
+        nativedemo_types:decode_nativedemo_point(PointBin, record)
+    ),
+    {ok, Server} =
+        'NatSvc_server':start_link(#{port => 0, handler => thrift_generator_nativedemo_handler}),
+    try
+        {ok, Port} = 'NatSvc_server':port(Server),
+        {ok, Client} = 'NatSvc_client':start_link(#{host => "127.0.0.1", port => Port}),
+        try
+            %% scalar results ride the wire untouched on every release
+            ?assertEqual({ok, 12}, 'NatSvc_client':area(Client, 3, 4)),
+            case native_supported() of
+                true ->
+                    {ok, PointNative} = nativedemo_types:decode_nativedemo_point(PointBin),
+                    ?assertEqual(nativedemo_types, records:get_module(PointNative)),
+                    ?assertEqual(point, records:get_name(PointNative)),
+                    ?assertEqual(
+                        {ok, PointBin}, nativedemo_types:encode_nativedemo_point(PointNative)
+                    ),
+                    ?assertEqual(
+                        {ok, #{x => 1, label => <<"p">>}},
+                        nativedemo_types:convert(PointNative, map)
+                    ),
+                    ?assertEqual(
+                        {error, {no_record, point}},
+                        nativedemo_types:convert(PointNative, record)
+                    ),
+                    %% e2e: generated clients decode replies through the
+                    %% low-level record axis (atom-key maps for native
+                    %% structs, same as map mode) — native records are
+                    %% the codec axis, not the wire-call surface
+                    ?assertEqual(
+                        {ok, #{x => -1, label => <<"p">>}},
+                        'NatSvc_client':reflect(Client, #{x => 1, label => <<"p">>})
+                    ),
+                    ?assertEqual(
+                        {error, {exception, <<"Oops">>, #{why => <<"negative x">>}}},
+                        'NatSvc_client':reflect(Client, #{x => -5, label => <<"p">>})
+                    );
+                false ->
+                    ?assertEqual(
+                        {error, {unsupported_repr, native}},
+                        nativedemo_types:decode_nativedemo_point(PointBin)
+                    )
+            end
+        after
+            'NatSvc_client':stop(Client)
+        end
+    after
+        'NatSvc_server':stop(Server)
     end.
 
 %% End-to-end over the Erlang-annotated fixture: an `erl.set = "ordset"`

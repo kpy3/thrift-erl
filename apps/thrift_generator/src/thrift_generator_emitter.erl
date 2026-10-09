@@ -443,11 +443,14 @@ struct_codec_one(S, Ctx) ->
     Decode = binary_to_atom(<<"decode_", Prefix/binary>>, utf8),
     %% A sum union has no record: its default representation is the
     %% tagged tuple, reached through the `record' axis. Map-mode
-    %% structs default to their atom-keyed map.
+    %% structs default to their atom-keyed map, native-mode structs
+    %% to the runtime-minted native record.
     DefaultRepr =
-        case {sum_mode(S), record_mode(S)} of
-            {false, false} -> map;
-            _ -> record
+        case {sum_mode(S), record_mode(S), native_mode(S)} of
+            {true, _, _} -> record;
+            {false, true, _} -> record;
+            {false, false, true} -> native;
+            {false, false, false} -> map
         end,
     Desc = struct_ref(S, Ctx),
     Doc = S#tg_struct.doc,
@@ -617,15 +620,19 @@ struct_index_tag(S, Prefix) ->
 
 -spec value_type(#tg_struct{}, #ectx{}) -> erl_syntax:syntaxTree().
 value_type(S, Ctx) ->
-    case {sum_mode(S), record_mode(S)} of
-        {true, _} ->
+    case {sum_mode(S), record_mode(S), native_mode(S)} of
+        {true, _, _} ->
             sum_type_node(S, Ctx);
-        {false, true} ->
+        {false, true, _} ->
             Tag = record_tag(current_prefix(Ctx), S#tg_struct.name),
             {type, erl_anno:new(0), union, [
                 thrift_generator_emitter_syntax:record_type(Tag), thrift_generator_emitter_syntax:raw_type(map)
             ]};
-        {false, false} ->
+        {false, false, true} ->
+            %% Native records are minted at runtime; no declared tuple
+            %% type exists to name.
+            thrift_generator_emitter_syntax:raw_type(term);
+        {false, false, false} ->
             thrift_generator_emitter_syntax:raw_type(map)
     end.
 
@@ -935,19 +942,36 @@ set_default_expr(_Type, Default) ->
 %% - `record_mode' — the tuple record (structs and unions by default);
 %% - `sum_mode' — unions only, the `erl.union_type = "sum"' form: the
 %%   value is a `{FieldAtom, Value}' tagged tuple, no record exists;
-%% - anything else (`erl.struct_type = "map"') is the atom-keyed map.
+%% - `native_mode' — `erl.struct_type = "native"': values are EEP-79
+%%   native records the runtime mints, no record is declared;
+%% - `erl.struct_type = "map"' is the atom-keyed map.
 
 -spec record_mode(#tg_struct{}) -> boolean().
 record_mode(S) ->
-    not sum_mode(S) andalso
-        (not is_map_key(struct_type, S#tg_struct.erl) orelse
-            maps:get(struct_type, S#tg_struct.erl) =/= <<"map">>).
+    struct_type(S) =:= record.
 
 -doc "Whether the union is generated as a tagged-tuple sum type.".
 -spec sum_mode(#tg_struct{}) -> boolean().
 sum_mode(S) ->
     S#tg_struct.kind =:= union andalso
         maps:get(union_type, S#tg_struct.erl, <<"record">>) =:= <<"sum">>.
+
+-doc "Whether the struct is generated as runtime-minted native records.".
+-spec native_mode(#tg_struct{}) -> boolean().
+native_mode(S) ->
+    struct_type(S) =:= native.
+
+%% The representation axis of a definition, from its erl.struct_type;
+%% sum unions keep their tagged-tuple form whatever the struct_type
+%% says, and anything unrecognized falls back to the record.
+
+-spec struct_type(#tg_struct{}) -> record | map | native.
+struct_type(S) ->
+    case maps:get(struct_type, S#tg_struct.erl, undefined) of
+        <<"map">> -> map;
+        <<"native">> -> native;
+        _ -> record
+    end.
 
 -spec struct_info_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 struct_info_forms(Mod, Ctx) ->
@@ -1141,20 +1165,26 @@ record_fields_forms(Mod) ->
 %% The record_fields contract: record mode answers {Tag, FieldAtoms},
 %% map mode answers {map, KeyType} (default atom keys), sum unions
 %% answer {sum, FieldAtoms} — the runtime converts their {Tag, Value}
-%% tuples by matching the atom against the field list; structs with no
-%% clause fall through to `none` — the wire passthrough.
+%% tuples by matching the atom against the field list; native mode
+%% answers {native, Tag} — the tag runtime-minted records carry; structs
+%% with no clause fall through to `none' — the wire passthrough.
 
--spec fields_decl(#tg_struct{}, binary()) -> {atom(), [atom()]} | {map, atom | binary}.
+-spec fields_decl(#tg_struct{}, binary()) ->
+    {atom(), [atom()]} | {map, atom | binary} | {native, atom}.
 fields_decl(S, Prefix) ->
-    case {sum_mode(S), record_mode(S)} of
-        {true, _} ->
+    case {sum_mode(S), record_mode(S), native_mode(S)} of
+        {true, _, _} ->
             {sum, [field_atom(F#tg_field.name) || F <- S#tg_struct.fields]};
-        {false, true} ->
+        {false, true, _} ->
             {record_tag(Prefix, S#tg_struct.name), [
                 field_atom(F#tg_field.name)
              || F <- S#tg_struct.fields
             ]};
-        {false, false} ->
+        {false, false, true} ->
+            %% No record declaration exists: the runtime mints native
+            %% records under the snake-cased wire name.
+            {native, record_tag(<<>>, S#tg_struct.name)};
+        {false, false, false} ->
             {map, map_key_type(S)}
     end.
 
