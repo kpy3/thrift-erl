@@ -517,12 +517,6 @@ gap is small.
 Only the speedup ratios on the same machine are meaningful; run
 `./scripts/bench` to get numbers for your hardware.
 
-## Roadmap
-
-Done through M9 (SSL, the reconnecting client, multiplexed services)
-plus the off-schedule axis items: the compact protocol, the JSON
-protocol, the HTTP transport and native EEP-79 records.
-
 ## License
 
 Apache License 2.0. The lexer/parser are derived from Apache Thrift
