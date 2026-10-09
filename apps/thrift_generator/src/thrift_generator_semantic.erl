@@ -187,8 +187,8 @@ analyze_module(Loaded, Ctx00) ->
 
 -spec check_generated_names(#tg_module{}, #ctx{}) -> #ctx{}.
 check_generated_names(Module, Ctx) ->
-    StructTags = [{string:lowercase(S#tg_struct.name), S#tg_struct.line} || S <- Module#tg_module.structs],
-    EnumPrefixes = [{string:lowercase(E#tg_enum.name), E#tg_enum.line} || E <- Module#tg_module.enums],
+    StructTags = [{thrift_generator_names:snake(S#tg_struct.name), S#tg_struct.line} || S <- Module#tg_module.structs],
+    EnumPrefixes = [{thrift_generator_names:snake(E#tg_enum.name), E#tg_enum.line} || E <- Module#tg_module.enums],
     Ctx1 = check_flat_clashes(StructTags, "record tag", Ctx),
     Ctx2 = check_flat_clashes(EnumPrefixes, "enum helper prefix", Ctx1),
     check_const_clashes(Module, Ctx2).
@@ -219,20 +219,22 @@ check_const_clashes(Module, Ctx) ->
             [
                 Prefix
              || S <- Module#tg_module.structs,
+                Snake <- [thrift_generator_names:snake(S#tg_struct.name)],
                 Prefix <- [
-                    <<"encode_", (string:lowercase(S#tg_struct.name))/binary>>,
-                    <<"decode_", (string:lowercase(S#tg_struct.name))/binary>>,
-                    <<(string:lowercase(S#tg_struct.name))/binary, "_from_map">>
+                    <<"encode_", Snake/binary>>,
+                    <<"decode_", Snake/binary>>,
+                    <<Snake/binary, "_from_map">>
                 ]
             ] ++
             [
-                <<(string:lowercase(E#tg_enum.name))/binary, Suffix/binary>>
+                <<(thrift_generator_names:snake(E#tg_enum.name))/binary, Suffix/binary>>
              || E <- Module#tg_module.enums,
                 Suffix <- [<<"_to_int">>, <<"_from_int">>]
             ],
     lists:foldl(
         fun(C, C0) ->
-            case lists:member(C#tg_const.name, Generated) of
+            Snake = thrift_generator_names:snake(C#tg_const.name),
+            case lists:member(Snake, Generated) of
                 true ->
                     err(
                         C#tg_const.line,

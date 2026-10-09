@@ -42,6 +42,7 @@ the descriptor terms, which keeps the emitter declarative.
     record_mode/1,
     record_form/2,
     sanitize/1,
+    section_label/1,
     type_desc/2
 ]).
 
@@ -140,11 +141,14 @@ module_sources(Mod, Ctx) ->
 -spec types_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 types_forms(Mod, Ctx) ->
     TypesMod = types_module_atom(Mod#tg_module.name),
-    Records = [
-        record_form(S, Mod#tg_module.prefix)
+    Records = lists:append([
+        [
+            thrift_generator_emitter_syntax:section_form(section_label(S)),
+            record_form(S, Mod#tg_module.prefix)
+        ]
      || S <- Mod#tg_module.structs,
         record_mode(S)
-    ],
+    ]),
     Exports =
         [
             thrift_generator_emitter_syntax:export_form([
@@ -163,7 +167,7 @@ types_forms(Mod, Ctx) ->
             thrift_generator_emitter_syntax:export_form(enum_helper_entries(Mod)),
             thrift_generator_emitter_syntax:export_form(const_entries(Mod))
         ],
-    thrift_generator_emitter_syntax:header(TypesMod, types_doc(Mod)) ++
+    thrift_generator_emitter_syntax:header(TypesMod, Mod#tg_module.path) ++
         Records ++
         [
             %% The types module declares every record for consumers;
@@ -293,7 +297,8 @@ record_dep_module(_, _) ->
 -spec hrl_record_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 hrl_record_forms(Mod, Ctx) ->
     lists:append([
-        hrl_struct_forms(S, Ctx)
+        [thrift_generator_emitter_syntax:section_form(section_label(S))] ++
+            hrl_struct_forms(S, Ctx)
      || S <- Mod#tg_module.structs,
         record_mode(S)
     ]).
@@ -322,11 +327,14 @@ hrl_struct_forms(S, Ctx) ->
 
 -spec hrl_enum_forms(#tg_module{}) -> erl_syntax:forms().
 hrl_enum_forms(Mod) ->
-    [
-        {attribute, erl_anno:new(0), type,
-            {record_tag(Mod#tg_module.prefix, E#tg_enum.name), enum_type_node(E#tg_enum.values), []}}
+    lists:append([
+        [
+            thrift_generator_emitter_syntax:section_form(section_label(E)),
+            {attribute, erl_anno:new(0), type,
+                {record_tag(Mod#tg_module.prefix, E#tg_enum.name), enum_type_node(E#tg_enum.values), []}}
+        ]
      || E <- Mod#tg_module.enums
-    ].
+    ]).
 
 -spec enum_type_node([{integer(), binary()}]) -> erl_syntax:syntaxTree().
 enum_type_node(Values) ->
@@ -356,14 +364,12 @@ hrl_const_forms(Mod) ->
     ]).
 
 %% The constant macro mirrors the (prefixed) function name, macro-style:
-%% the namespace prefix is uppercased, the declared name stays as is —
-%% without a namespace the macro keeps the exact declared name.
+%% the whole name — namespace prefix and snake-cased IDL name — is
+%% uppercased (DEMO_KIND_VALUE).
 
 -spec const_macro_name(binary(), binary()) -> binary().
-const_macro_name(<<>>, Name) ->
-    Name;
 const_macro_name(Prefix, Name) ->
-    <<(string:uppercase(Prefix))/binary, "_", Name/binary>>.
+    string:uppercase(typed_prefix(Prefix, thrift_generator_names:snake(Name))).
 
 -spec scalar_const(#tg_const{}) -> boolean().
 scalar_const(#tg_const{value = {ref, _}}) ->
@@ -394,19 +400,20 @@ struct_codec_entries(Mod) ->
                 false -> []
             end
      || S <- Mod#tg_module.structs,
-        Prefix <- [typed_prefix(Mod#tg_module.prefix, string:lowercase(S#tg_struct.name))]
+        Prefix <- [typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(S#tg_struct.name))]
     ]).
 
 -spec struct_codec_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 struct_codec_forms(Mod, Ctx) ->
     lists:append([
-        struct_codec_one(S, Ctx)
+        [thrift_generator_emitter_syntax:section_form(section_label(S))] ++
+            struct_codec_one(S, Ctx)
      || S <- Mod#tg_module.structs
     ]).
 
 -spec struct_codec_one(#tg_struct{}, #ectx{}) -> erl_syntax:forms().
 struct_codec_one(S, Ctx) ->
-    Prefix = typed_prefix(current_prefix(Ctx), string:lowercase(S#tg_struct.name)),
+    Prefix = typed_prefix(current_prefix(Ctx), thrift_generator_names:snake(S#tg_struct.name)),
     Encode = binary_to_atom(<<"encode_", Prefix/binary>>, utf8),
     Decode = binary_to_atom(<<"decode_", Prefix/binary>>, utf8),
     DefaultRepr =
@@ -673,13 +680,14 @@ enum_helper_entries(Mod) ->
             {binary_to_atom(<<Prefix/binary, "_from_int">>, utf8), 1}
         ]
      || E <- Mod#tg_module.enums,
-        Prefix <- [typed_prefix(Mod#tg_module.prefix, string:lowercase(E#tg_enum.name))]
+        Prefix <- [typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(E#tg_enum.name))]
     ]).
 
 -spec enum_helper_forms(#tg_module{}) -> erl_syntax:forms().
 enum_helper_forms(Mod) ->
     lists:append([
-        enum_helper_one(E, typed_prefix(Mod#tg_module.prefix, string:lowercase(E#tg_enum.name)))
+        [thrift_generator_emitter_syntax:section_form(section_label(E))] ++
+            enum_helper_one(E, typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(E#tg_enum.name)))
      || E <- Mod#tg_module.enums
     ]).
 
@@ -775,7 +783,7 @@ enum_helper_one(E, Prefix) ->
 -spec const_entries(#tg_module{}) -> [{atom(), arity()}].
 const_entries(Mod) ->
     [
-        {binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), 0}
+        {binary_to_atom(typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(C#tg_const.name)), utf8), 0}
      || C <- Mod#tg_module.consts
     ].
 
@@ -785,17 +793,19 @@ const_forms(Mod) ->
         thrift_generator_emitter_syntax:doc_form(C#tg_const.doc, <<"The constant's value as declared in the IDL.">>) ++
             [
                 {attribute, erl_anno:new(0), spec,
-                    {{binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), 0}, [
+                    {{const_name(Mod, C), 0}, [
                         thrift_generator_emitter_syntax:fun_type([], const_spec_type(C#tg_const.type))
                     ]}}
             ] ++
-            thrift_generator_emitter_syntax:fn_form(
-                binary_to_atom(typed_prefix(Mod#tg_module.prefix, C#tg_const.name), utf8), [
-                    thrift_generator_emitter_syntax:fn_clause([], const_literal(C#tg_const.value))
-                ]
-            )
+            thrift_generator_emitter_syntax:fn_form(const_name(Mod, C), [
+                thrift_generator_emitter_syntax:fn_clause([], const_literal(C#tg_const.value))
+            ])
      || C <- Mod#tg_module.consts
     ]).
+
+-spec const_name(#tg_module{}, #tg_const{}) -> atom().
+const_name(Mod, C) ->
+    binary_to_atom(typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(C#tg_const.name)), utf8).
 
 %% Constant spec types without a resolution context: refs (enum
 %% members) surface as term, containers mirror erlang_type/2.
@@ -832,17 +842,18 @@ const_literal({map, KVs}) ->
 const_literal(Value) ->
     thrift_generator_emitter_syntax:abstract(Value).
 
--spec types_doc(#tg_module{}) -> binary().
-types_doc(Mod) ->
-    unicode:characters_to_binary(
-        io_lib:format(
-            "Generated from ~ts. Do not edit."
-            " Introspection: struct_info/1, enum_info/1, function_info/2,"
-            " service_info/0; record mapping: record_fields/1; specialized"
-            " binary wire codecs: binary_codec/1.",
-            [Mod#tg_module.path]
-        )
-    ).
+%% The divider label naming the IDL construct the following forms
+%% implement (the declared name, not the derived tag).
+
+-spec section_label(#tg_struct{} | #tg_enum{}) -> string().
+section_label(#tg_struct{kind = union, name = Name}) ->
+    "Union " ++ unicode:characters_to_list(Name);
+section_label(#tg_struct{kind = exception, name = Name}) ->
+    "Exception " ++ unicode:characters_to_list(Name);
+section_label(#tg_struct{name = Name}) ->
+    "Struct " ++ unicode:characters_to_list(Name);
+section_label(#tg_enum{name = Name}) ->
+    "Enum " ++ unicode:characters_to_list(Name).
 
 -spec record_form(#tg_struct{}, binary()) -> erl_syntax:syntaxTree().
 record_form(S, Prefix) ->
@@ -1263,7 +1274,7 @@ field_atom(Name) ->
 
 -spec record_tag(binary(), binary()) -> atom().
 record_tag(Prefix, Name) ->
-    binary_to_atom(typed_prefix(Prefix, lowercase(Name)), utf8).
+    binary_to_atom(typed_prefix(Prefix, thrift_generator_names:snake(Name)), utf8).
 
 %% The module's namespace-derived identifier prefix: prepended (with a
 %% separating underscore) to every record tag, type alias, derived
@@ -1279,10 +1290,6 @@ typed_prefix(Prefix, Name) ->
 -spec current_prefix(#ectx{}) -> binary().
 current_prefix(Ctx) ->
     (maps:get(Ctx#ectx.current, Ctx#ectx.modules))#tg_module.prefix.
-
--spec lowercase(binary()) -> binary().
-lowercase(Bin) ->
-    string:lowercase(Bin).
 
 -spec types_module_atom(module_key()) -> module().
 types_module_atom(Name) ->

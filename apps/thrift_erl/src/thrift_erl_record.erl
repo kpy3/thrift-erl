@@ -284,7 +284,7 @@ from_wire({struct, {ref, Module, Name}}, Value, native) when is_map(Value) ->
                 }
              || {_, _, Type, NameBin, _} <- struct_fields(Module, Name)
             ],
-            thrift_erl_native:create(Module, record_tag(Name), FieldValues)
+            thrift_erl_native:create(Module, native_tag(Module, Name), FieldValues)
     end;
 from_wire({struct, {ref, Module, Name}}, Value, Repr) when is_map(Value) ->
     case struct_mode(Module, Name) of
@@ -381,7 +381,7 @@ struct_to_wire(Fields, Record) ->
 -spec native_to_wire(module(), binary(), term()) -> map().
 native_to_wire(Module, Name, Record) ->
     {RecordModule, RecordName, FieldMap} = thrift_erl_native:fields(Record),
-    case RecordModule =:= Module andalso RecordName =:= record_tag(Name) of
+    case RecordModule =:= Module andalso RecordName =:= native_tag(Module, Name) of
         true ->
             maps:from_list([
                 {NameBin, to_wire(Type, V)}
@@ -501,6 +501,22 @@ map_mode_from_wire(Fields, binary, Map) ->
 field_atom(NameBin) ->
     binary_to_atom(NameBin, utf8).
 
+%% The fallback identity tag for a struct whose definition declares no
+%% record tag of its own: the snake-cased wire name (`__struct__` tags
+%% of map-mode structs, hand-written descriptor targets).
+
 -spec record_tag(binary()) -> atom().
 record_tag(NameBin) ->
-    binary_to_atom(string:lowercase(NameBin), utf8).
+    binary_to_atom(thrift_erl_names:snake(NameBin), utf8).
+
+%% The tag a minted native record carries: the declared (prefixed)
+%% record tag when the target generates one — so a native value and the
+%% tuple record of the same struct share one identity — the fallback
+%% tag otherwise.
+
+-spec native_tag(module(), binary()) -> atom().
+native_tag(Module, Name) ->
+    case struct_mode(Module, Name) of
+        {record, Tag, _FieldAtoms} -> Tag;
+        _ -> record_tag(Name)
+    end.
