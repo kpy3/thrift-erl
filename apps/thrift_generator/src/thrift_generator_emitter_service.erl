@@ -48,8 +48,8 @@ service_sources(Svc, Mod, Ctx) ->
     ClientMod = service_module(Svc#tg_service.name, client),
     [
         {HandlerMod, handler_forms(Svc, Mod, HandlerMod, Ctx), undefined},
-        {ServerMod, server_forms(Svc, TypesMod, ServerMod), undefined},
-        {ClientMod, client_forms(Svc, TypesMod, ServerMod, ClientMod), undefined}
+        {ServerMod, server_forms(Svc, Mod, TypesMod, ServerMod), undefined},
+        {ClientMod, client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod), undefined}
     ].
 
 -spec service_module(binary(), handler | server | client) -> module().
@@ -100,7 +100,8 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
         lists:member(S#tg_struct.name, Needed)
     ],
     Callbacks = lists:append([callback_form(F, Ctx) || F <- Svc#tg_service.functions]),
-    thrift_generator_emitter_syntax:header(HandlerMod, Doc) ++
+    thrift_generator_emitter_syntax:header(HandlerMod, Mod#tg_module.path) ++
+        thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [
             %% Records here appear only in -callback spec types, which
             %% the compiler does not count as usage.
@@ -201,8 +202,8 @@ callback_doc(F) ->
 callback_attribute(Name, Arity, FunType) ->
     [{attribute, erl_anno:new(0), callback, {{thrift_generator_emitter_syntax:function_atom(Name), Arity}, [FunType]}}].
 
--spec server_forms(#tg_service{}, module(), module()) -> erl_syntax:forms().
-server_forms(Svc, TypesMod, ServerMod) ->
+-spec server_forms(#tg_service{}, #tg_module{}, module(), module()) -> erl_syntax:forms().
+server_forms(Svc, Mod, TypesMod, ServerMod) ->
     Doc =
         unicode:characters_to_binary([
             io_lib:format(
@@ -225,7 +226,8 @@ server_forms(Svc, TypesMod, ServerMod) ->
                 thrift_generator_emitter_syntax:map_field(types, thrift_generator_emitter_syntax:abstract(TypesMod))
             ]
         ),
-    thrift_generator_emitter_syntax:header(ServerMod, Doc) ++
+    thrift_generator_emitter_syntax:header(ServerMod, Mod#tg_module.path) ++
+        thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [thrift_generator_emitter_syntax:attribute(behaviour, thrift_erl_service)] ++
         [
             thrift_generator_emitter_syntax:export_form([{service_info, 0}, {start_link, 1}, {stop, 1}, {port, 1}])
@@ -267,8 +269,8 @@ server_forms(Svc, TypesMod, ServerMod) ->
             )
         ]).
 
--spec client_forms(#tg_service{}, module(), module(), module()) -> erl_syntax:forms().
-client_forms(Svc, TypesMod, ServerMod, ClientMod) ->
+-spec client_forms(#tg_service{}, #tg_module{}, module(), module(), module()) -> erl_syntax:forms().
+client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod) ->
     Doc =
         unicode:characters_to_binary([
             io_lib:format(
@@ -281,7 +283,8 @@ client_forms(Svc, TypesMod, ServerMod, ClientMod) ->
             service_doc_suffix(Svc)
         ]),
     ClientFns = [client_fn(F, TypesMod) || F <- Svc#tg_service.functions],
-    thrift_generator_emitter_syntax:header(ClientMod, Doc) ++
+    thrift_generator_emitter_syntax:header(ClientMod, Mod#tg_module.path) ++
+        thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [
             thrift_generator_emitter_syntax:export_form(
                 lists:append([Exports || {Exports, _} <- ClientFns]) ++ [{start_link, 1}, {stop, 1}]

@@ -42,12 +42,15 @@ everything else stays trees.
     fun_type/2,
     header/2,
     map_field/2,
+    moduledoc_form/1,
     nowarn_unused_record_form/0,
     ok_error_type/3,
     raw_type/1,
     record_type/1,
     remote_type/2,
+    section_form/1,
     term_type/0,
+    user_type/1,
     var_fun/0,
     wildcard/0
 ]).
@@ -74,6 +77,13 @@ error_term_type(Anno) ->
 -spec record_type(atom()) -> erl_syntax:syntaxTree().
 record_type(Tag) ->
     {type, erl_anno:new(0), record, [{atom, erl_anno:new(0), Tag}]}.
+
+%% A named type alias reference (`demo_value()'): sum unions surface in
+%% generated types as aliases, and specs reference them by name.
+
+-spec user_type(atom()) -> erl_syntax:syntaxTree().
+user_type(Name) ->
+    {type, erl_anno:new(0), user_type, [{atom, erl_anno:new(0), Name}]}.
 
 -spec nowarn_unused_record_form() -> erl_syntax:syntaxTree().
 nowarn_unused_record_form() ->
@@ -119,8 +129,12 @@ function_atom(Name) ->
 var_fun() ->
     fun erl_syntax:variable/1.
 
+%% The module header: copyright plus a plain comment naming the source
+%% document. Generated modules carry no -moduledoc — the path in an
+%% attribute gave the parser nothing the comment doesn't.
+
 -spec header(module(), binary()) -> erl_syntax:forms().
-header(ModuleName, DocBinary) ->
+header(ModuleName, SourcePath) ->
     [
         erl_syntax:comment([
             " Copyright 2026 Sergei Yelin",
@@ -129,13 +143,33 @@ header(ModuleName, DocBinary) ->
             " you may not use this file except in compliance with the License.",
             " You may obtain a copy of the License at",
             "",
-            "     http://www.apache.org/licenses/LICENSE-2.0"
+            "     http://www.apache.org/licenses/LICENSE-2.0",
+            "",
+            " Generated from " ++ unicode:characters_to_list(SourcePath) ++ ". Do not edit."
         ]),
-        erl_syntax:attribute(erl_syntax:atom(module), [erl_syntax:atom(ModuleName)]),
-        erl_syntax:attribute(
-            erl_syntax:atom(moduledoc),
-            [erl_syntax:string(unicode:characters_to_list(DocBinary))]
-        )
+        erl_syntax:attribute(erl_syntax:atom(module), [erl_syntax:atom(ModuleName)])
+    ].
+
+%% The divider above every generated struct/union/exception/enum block:
+%% a source comment naming the IDL construct the following forms were
+%% generated from. The lines carry their own `%': prettypr prefixes
+%% each comment line with exactly one.
+
+-spec section_form(string()) -> erl_syntax:syntaxTree().
+section_form(Label) ->
+    Line = "---------------------------------------------------------------------",
+    erl_syntax:comment(["% " ++ Line, "% " ++ Label, "% " ++ Line]).
+
+%% The -moduledoc of a generated module that has something real to say
+%% (the service handler/server/client contracts); types modules carry
+%% the story in their forms and get none.
+
+-spec moduledoc_form(binary()) -> erl_syntax:forms().
+moduledoc_form(Doc) ->
+    [
+        erl_syntax:attribute(erl_syntax:atom(moduledoc), [
+            erl_syntax:string(unicode:characters_to_list(Doc))
+        ])
     ].
 
 %% The attribute payload must be a term (tuples of {name, arity},

@@ -109,9 +109,10 @@ module_name(Headers, Path) ->
 
 %% Generated identifiers (record tags, type aliases, derived function
 %% names, constant macros) carry the normalized namespace value as a
-%% prefix when an erl or wildcard namespace is declared — same-named
-%% structs of different files then coexist. No such namespace: an empty
-%% prefix, and the emitted names stay exactly the declared ones.
+%% prefix — same-named structs of different files then coexist in one
+%% project. The prefix always exists: the erl/wildcard namespace value
+%% when declared, the file base name otherwise (a file with no usable
+%% prefix is a load error).
 
 -spec identifier_prefix([ast_node()], binary()) -> binary().
 identifier_prefix(Headers, Path) ->
@@ -121,7 +122,7 @@ identifier_prefix(Headers, Path) ->
             Namespaces, <<"erl">>, pick_namespace(Namespaces, <<"*">>, undefined)
         )
     of
-        undefined -> <<>>;
+        undefined -> normalize_prefix(basename_sans_extension(Path), Path);
         Name -> normalize_prefix(Name, Path)
     end.
 

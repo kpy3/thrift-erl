@@ -200,13 +200,12 @@ decode_repr(Desc, Value, record) ->
 decode_repr(Desc, Value, Repr) ->
     {ok, thrift_erl_record:from_wire(Desc, Value, Repr)}.
 
-%% The tag a struct value carries for this descriptor: the record tag
-%% for record-mode structs, the lowercased wire name for map-mode ones
-%% (the same rule `tag_index/0` follows).
+%% The tag a struct value carries for this descriptor: the snake-cased
+%% wire name of map-mode structs (the same rule `tag_index/0` follows).
 
 -spec struct_tag({struct, {ref, module(), binary()}}) -> atom().
 struct_tag({struct, {ref, _Module, Name}}) ->
-    binary_to_atom(string:lowercase(Name), utf8).
+    binary_to_atom(thrift_erl_names:snake(Name), utf8).
 %% `decode_repr/3` reaches `struct_tag/1` only for map-mode structs, and
 %% those are always ref descriptors — an inline descriptor has no
 %% representation to mis-decode into.

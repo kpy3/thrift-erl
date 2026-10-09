@@ -307,7 +307,9 @@ loader_namespace_prefix(Config) ->
     ),
     {ok, [ForeignEntry]} = thrift_generator_loader:load(Foreign),
     ?assertEqual(<<"foreign">>, ForeignEntry#tg_loaded.name),
-    ?assertEqual(<<>>, ForeignEntry#tg_loaded.prefix),
+    %% No usable namespace: the file base name becomes the prefix, so
+    %% same-named structs of namespace-less files still never collide.
+    ?assertEqual(<<"foreign">>, ForeignEntry#tg_loaded.prefix),
 
     %% End to end: the prefix lands in the emitted record tag and the
     %% generated module atom.
@@ -571,11 +573,11 @@ generated_set_impl(Config) ->
         list_field => [],
         binary_field => <<"b">>
     },
-    {ok, Bin} = test_types:encode_test_crazynesting(Value),
-    {ok, #{set_field := MapOrdset}} = test_types:decode_test_crazynesting(Bin, map),
+    {ok, Bin} = test_types:encode_test_crazy_nesting(Value),
+    {ok, #{set_field := MapOrdset}} = test_types:decode_test_crazy_nesting(Bin, map),
     ?assertEqual(lists:usort([Full, Empty]), MapOrdset),
-    {ok, Rec} = test_types:decode_test_crazynesting(Bin),
-    {test_crazynesting, <<"s">>, RecOrdset, [], <<"b">>, undefined} = Rec,
+    {ok, Rec} = test_types:decode_test_crazy_nesting(Bin),
+    {test_crazy_nesting, <<"s">>, RecOrdset, [], <<"b">>, undefined} = Rec,
     ?assertEqual(
         lists:usort([{test_insanity, #{'ONE' => 1}, []}, {test_insanity, #{}, []}]),
         RecOrdset
@@ -583,7 +585,7 @@ generated_set_impl(Config) ->
     %% encode passes values through as given, so the duplicated wire
     %% above does not reproduce verbatim; the normalized value does
     {ok, NormBin} =
-        test_types:encode_test_crazynesting(
+        test_types:encode_test_crazy_nesting(
             #{
                 string_field => <<"s">>,
                 set_field => lists:usort([Full, Empty]),
@@ -591,13 +593,13 @@ generated_set_impl(Config) ->
                 binary_field => <<"b">>
             }
         ),
-    ?assertEqual({ok, NormBin}, test_types:encode_test_crazynesting(Rec)),
+    ?assertEqual({ok, NormBin}, test_types:encode_test_crazy_nesting(Rec)),
     %% the file-wide sets default: unannotated sets decode as sets
     %% collections, encode takes them back (a sets input — no coercion)
-    {ok, VBin} = test_types:encode_test_versioningtestv2(#{newset => sets:from_list([3, 1, 2])}),
-    {ok, #{newset := NewSet}} = test_types:decode_test_versioningtestv2(VBin, map),
+    {ok, VBin} = test_types:encode_test_versioning_test_v2(#{newset => sets:from_list([3, 1, 2])}),
+    {ok, #{newset := NewSet}} = test_types:decode_test_versioning_test_v2(VBin, map),
     ?assertEqual(sets:from_list([1, 2, 3]), NewSet),
-    ?assertEqual({ok, VBin}, test_types:encode_test_versioningtestv2(#{newset => NewSet})),
+    ?assertEqual({ok, VBin}, test_types:encode_test_versioning_test_v2(#{newset => NewSet})),
     ok.
 
 %% Generates and loads the modules for the semantic fixture. Safe to

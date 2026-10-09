@@ -94,7 +94,15 @@ export_entries(Mod, Ctx) ->
 module_forms(Mod, Ctx) ->
     WireTypes = [wtype(F#tg_field.type, Ctx) || S <- Mod#tg_module.structs, F <- S#tg_struct.fields],
     Enums = enum_registry(WireTypes, #{}),
-    lists:append([struct_forms(S, Ctx, Enums) || S <- Mod#tg_module.structs]) ++
+    lists:append([
+        [
+            thrift_generator_emitter_syntax:section_form(
+                io_lib:format("~s wire codecs", [thrift_generator_emitter:section_label(S)])
+            )
+        ] ++
+            struct_forms(S, Ctx, Enums)
+     || S <- Mod#tg_module.structs
+    ]) ++
         helper_forms(WireTypes, Ctx, Enums) ++
         binary_codec_forms(Mod, Ctx).
 
@@ -128,7 +136,7 @@ children(_) -> [].
 wire_pair(#tg_struct{name = Name}, Ctx) ->
     wire_pair(Name, Ctx);
 wire_pair(Name, Ctx) when is_binary(Name) ->
-    Prefix = typed_prefix(current_prefix(Ctx), string:lowercase(Name)),
+    Prefix = typed_prefix(current_prefix(Ctx), thrift_generator_names:snake(Name)),
     {
         binary_to_atom(<<"encode_", Prefix/binary, "_wire">>, utf8),
         binary_to_atom(<<"decode_", Prefix/binary, "_wire">>, utf8)
@@ -166,7 +174,7 @@ type_name({set, T}, Enums) ->
 type_name({map, K, V}, Enums) ->
     <<"map_", (type_name(K, Enums))/binary, "_", (type_name(V, Enums))/binary>>;
 type_name({struct, {ref, TypesMod, Local}}, _Enums) ->
-    <<(module_tag(TypesMod))/binary, "_", (string:lowercase(Local))/binary>>.
+    <<(module_tag(TypesMod))/binary, "_", (thrift_generator_names:snake(Local))/binary>>.
 
 -spec module_tag(module()) -> binary().
 module_tag(TypesMod) ->

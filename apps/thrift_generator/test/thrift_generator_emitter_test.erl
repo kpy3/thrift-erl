@@ -259,7 +259,7 @@ enum_and_const_helpers_test() ->
     ?assertEqual(error, t_types:color_to_int(mauve)),
     ?assertEqual({ok, 'GREEN'}, t_types:color_from_int(10)),
     ?assertEqual(error, t_types:color_from_int(99)),
-    ?assertEqual(10, t_types:'BASE'()),
+    ?assertEqual(10, t_types:base()),
     ok.
 
 %% erl.set picks the in-process set implementation. The wire encoding
@@ -466,8 +466,8 @@ namespace_prefix_test() ->
     ?assertEqual([{0, 'RED'}, {10, 'GREEN'}], demo_widgets_types:enum_info(<<"Color">>)),
 
     %% Constant functions carry the prefix; scalar macros uppercase it.
-    ?assertEqual(10, demo_widgets_types:'demo_widgets_BASE'()),
-    ?assertEqual(<<"hi">>, demo_widgets_types:'demo_widgets_GREETING'()),
+    ?assertEqual(10, demo_widgets_types:demo_widgets_base()),
+    ?assertEqual(<<"hi">>, demo_widgets_types:demo_widgets_greeting()),
 
     Hrl = entry_hrl(demo_widgets_types, thrift_generator_emitter:sources(Model)),
     ?assertMatch(
