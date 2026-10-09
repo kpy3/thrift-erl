@@ -11,7 +11,7 @@
 #   suppress compiler warnings / use -dialyzer; generated and upstream
 #   code is not ours to restyle.
 # - W0023 atoms_exhaustion: the generator mints atoms from IDL names it
-#   controls (see AGENTS.md); thrift_erl_record's field_atom/record_tag
+#   controls; thrift_erl_record's field_atom/record_tag
 #   atomize the very names generated record_fields descriptors carry,
 #   so the runtime is covered by the same guarantee. The vendored app
 #   is excluded on the CLI.
