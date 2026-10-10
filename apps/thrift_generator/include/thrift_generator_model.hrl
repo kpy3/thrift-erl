@@ -142,7 +142,11 @@
     modules :: #{module_key() => #tg_module{}},
     %% binary module name -> emitted types module atom
     type_modules :: #{module_key() => module()},
-    current :: undefined | module_key()
+    current :: undefined | module_key(),
+    %% hrl context: type references qualify with the defining module —
+    %% the hrl carries no type definitions, and remote types compile at
+    %% the include site without the defining types module
+    qualify = false :: boolean()
 }).
 
 %% One entry handed from the loader to the semantic pass.
