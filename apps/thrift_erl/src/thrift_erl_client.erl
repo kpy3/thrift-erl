@@ -37,6 +37,12 @@ connection (one outstanding request at a time); concurrent callers
 queue inside the client and are served in order, matching the classic
 Thrift client model.
 
+Pool owners read the per-worker counters with `get_stats/1`
+(`#{calls_ok, calls_failed}`; `get_and_reset_stats/1` zeroes them) —
+the same accounting the `thrift_erl_reconnecting_client` wrapper
+reports, minus the connection axis a single-connection client does not
+have.
+
 The generated typed client modules call into this; the same map drives
 both:
 
@@ -66,11 +72,11 @@ both:
 
 -behaviour(gen_server).
 
--export([start/1, start_link/1, stop/1, call/4, oneway/4]).
+-export([start/1, start_link/1, stop/1, call/4, oneway/4, get_stats/1, get_and_reset_stats/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--export_type([options/0, call_result/0]).
+-export_type([options/0, call_result/0, stats/0]).
 
 -type options() :: #{
     host := inet:socket_address() | inet:hostname(),
@@ -95,6 +101,11 @@ both:
     | {error, {exception, binary(), thrift_erl_binary:struct_value()}}
     | {error, {application_exception, binary(), non_neg_integer(), binary()}}
     | {error, term()}.
+
+-type stats() :: #{
+    calls_ok := non_neg_integer(),
+    calls_failed := non_neg_integer()
+}.
 
 %% A caller waiting for its request to be sent. Calls additionally
 %% wait for the reply once on the wire; oneway requests complete on
@@ -139,7 +150,12 @@ both:
     buffer = <<>> :: binary(),
     pending :: undefined | #pending{},
     queue = queue:new() :: queue:queue(#request{}),
-    max_queue_depth :: pos_integer() | infinity
+    max_queue_depth :: pos_integer() | infinity,
+    %% caller-facing outcomes: every `{ok, _}' / `ok' answer counts ok,
+    %% every `{error, _}' failed (a declared exception included, same
+    %% accounting as `thrift_erl_reconnecting_client')
+    calls_ok = 0 :: non_neg_integer(),
+    calls_failed = 0 :: non_neg_integer()
 }).
 
 -doc """
@@ -200,6 +216,24 @@ call(Pid, Function, Args, Timeout) ->
 oneway(Pid, Function, Args, Timeout) ->
     gen_server:call(Pid, {oneway, Function, Args, Timeout}, infinity).
 
+-doc """
+Health-check counters for pool owners, same accounting as
+`thrift_erl_reconnecting_client` (minus the connection axis, which a
+single-connection client does not have): `#{calls_ok := N,
+calls_failed := N}`. A declared exception is a completed round-trip
+but still counts failed, matching the `{error, _}` the caller sees.
+""".
+-spec get_stats(pid()) -> stats().
+get_stats(Pid) ->
+    gen_server:call(Pid, get_stats).
+
+-doc """
+Returns the same map as `get_stats/1` and zeroes the counters.
+""".
+-spec get_and_reset_stats(pid()) -> stats().
+get_and_reset_stats(Pid) ->
+    gen_server:call(Pid, get_and_reset_stats).
+
 %% gen_server callbacks
 
 -doc false.
@@ -248,8 +282,12 @@ handle_call({Kind, Function, Args, Timeout}, From, #state{} = State) ->
             }),
             try_dispatch(State#state{queue = queue:in(Request, State#state.queue)});
         false ->
-            {reply, {error, queue_full}, State}
+            {reply, {error, queue_full}, State#state{calls_failed = State#state.calls_failed + 1}}
     end;
+handle_call(get_stats, _From, State) ->
+    {reply, stats(State), State};
+handle_call(get_and_reset_stats, _From, State) ->
+    {reply, stats(State), State#state{calls_ok = 0, calls_failed = 0}};
 handle_call(_Request, From, State) ->
     gen_server:reply(From, {error, unsupported}),
     {noreply, State}.
@@ -289,8 +327,7 @@ handle_info(
         pending = #pending{timer = Timer, from = From}
     } = State
 ) ->
-    gen_server:reply(From, {error, timeout}),
-    fail_queue(closed, State#state{pending = undefined});
+    fail_queue(closed, answer(From, {error, timeout}, State#state{pending = undefined}));
 handle_info({timeout, Timer, call_timer}, State) ->
     %% a queued request's deadline while another call is on the wire
     queue_timer_fired(Timer, State);
@@ -324,8 +361,7 @@ try_dispatch(#state{pending = undefined, queue = Queue} = State) ->
             case prepare(Request, SeqId, State) of
                 {reply, Reply} ->
                     cancel_call_timer(Request#request.timer),
-                    gen_server:reply(Request#request.from, Reply),
-                    try_dispatch(State#state{queue = Rest});
+                    try_dispatch(answer(Request#request.from, Reply, State#state{queue = Rest}));
                 {ok, Message} ->
                     dispatch_request(Request, Message, SeqId, State#state{queue = Rest})
             end
@@ -358,8 +394,7 @@ dispatch_request(#request{kind = oneway, from = From}, Message, SeqId, State) ->
     case send_message(Message, State) of
         #state{} = Sent ->
             %% Answered as soon as the bytes are out; no reply follows.
-            gen_server:reply(From, ok),
-            try_dispatch(Sent#state{seqid = SeqId});
+            try_dispatch(answer(From, ok, Sent#state{seqid = SeqId}));
         Stop ->
             Stop
     end;
@@ -453,13 +488,11 @@ queue_timer_fired(Timer, #state{queue = Queue} = State) ->
         {{value, #request{timer = Timer, from = From}}, Rest} ->
             %% head of the queue: nothing is on the wire, the next
             %% request may go out right away
-            gen_server:reply(From, {error, timeout}),
-            try_dispatch(State#state{queue = Rest});
+            try_dispatch(answer(From, {error, timeout}, State#state{queue = Rest}));
         _ ->
             case queue_take_timer(Timer, Queue) of
                 {ok, Request, Queue1} ->
-                    gen_server:reply(Request#request.from, {error, timeout}),
-                    {noreply, State#state{queue = Queue1}};
+                    {noreply, answer(Request#request.from, {error, timeout}, State#state{queue = Queue1})};
                 error ->
                     %% the timer was cancelled after all; the request is
                     %% on the wire (its pending slot handles it) or gone
@@ -544,8 +577,7 @@ handle_message(
     %% The HTTP response that carries a oneway: no Thrift payload in
     %% it, the call is done.
     cancel_call_timer(Timer),
-    gen_server:reply(From, ok),
-    {ok, State#state{pending = undefined}};
+    {ok, answer(From, ok, State#state{pending = undefined})};
 handle_message(_Message, #state{pending = undefined} = State) ->
     {stop, {error, unexpected_message}, State};
 handle_message(Message, #state{pending = Pending} = State) ->
@@ -556,12 +588,10 @@ handle_message(Message, #state{pending = Pending} = State) ->
     of
         {ok, CallResult} ->
             cancel_call_timer(Pending#pending.timer),
-            gen_server:reply(Pending#pending.from, CallResult),
-            {ok, State#state{pending = undefined}};
+            {ok, answer(Pending#pending.from, CallResult, State#state{pending = undefined})};
         {error, Reason} ->
             cancel_call_timer(Pending#pending.timer),
-            gen_server:reply(Pending#pending.from, {error, Reason}),
-            fail_queue(closed, State#state{pending = undefined})
+            fail_queue(closed, answer(Pending#pending.from, {error, Reason}, State#state{pending = undefined}))
     end.
 
 %% A complete reply — value, declared exception or
@@ -649,23 +679,43 @@ exception_name({_, _, _, FieldName, _}) -> FieldName.
 %% reason; everyone still queued gets closed.
 
 -spec fail_queue(term(), #state{}) -> {stop, normal, #state{}}.
-fail_queue(Reason, #state{} = State) ->
+fail_queue(Reason, #state{queue = Queue} = State) ->
     lists:foreach(
         fun(#request{from = From, timer = Timer}) ->
             cancel_call_timer(Timer),
             gen_server:reply(From, {error, Reason})
         end,
-        queue:to_list(State#state.queue)
+        queue:to_list(Queue)
     ),
-    {stop, normal, State#state{queue = queue:new()}}.
+    %% The process stops right away, so the counters are bookkeeping for
+    %% get_stats calls that raced the failure.
+    {stop, normal, State#state{
+        queue = queue:new(),
+        calls_failed = State#state.calls_failed + queue:len(Queue)
+    }}.
 
 -spec abort(term(), #state{}) -> {stop, normal, #state{}}.
 abort(Reason, #state{pending = #pending{from = From, timer = Timer}} = State) ->
     cancel_call_timer(Timer),
-    gen_server:reply(From, {error, Reason}),
-    fail_queue(closed, State#state{pending = undefined});
+    fail_queue(closed, answer(From, {error, Reason}, State#state{pending = undefined}));
 abort(_Reason, #state{pending = undefined} = State) ->
     fail_queue(closed, State).
+
+%% Every caller-facing answer funnels through here so the stats stay
+%% honest no matter which path produced them.
+
+-spec answer(gen_server:from(), term(), #state{}) -> #state{}.
+answer(From, Result, #state{calls_ok = Ok, calls_failed = Failed} = State) ->
+    gen_server:reply(From, Result),
+    case Result of
+        {ok, _} -> State#state{calls_ok = Ok + 1};
+        ok -> State#state{calls_ok = Ok + 1};
+        _ -> State#state{calls_failed = Failed + 1}
+    end.
+
+-spec stats(#state{}) -> stats().
+stats(#state{calls_ok = Ok, calls_failed = Failed}) ->
+    #{calls_ok => Ok, calls_failed => Failed}.
 
 %% The `Host:' header value from the connect options; cosmetic to this
 %% runtime's server but honest on the wire.
