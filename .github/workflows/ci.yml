@@ -48,4 +48,7 @@ jobs:
           tar -xzf /tmp/elp.tar.gz -C /usr/local/bin
           elp version
       - name: ELP lint
-        run: elp lint --rebar --as test --no-connect --ignore-app thrift
+        # The gate wrapper (fails on findings at warning severity or
+        # above; raw elp lint always exits 0) runs with --no-connect —
+        # the same deterministic standalone mode CI always used.
+        run: scripts/lint-elp
