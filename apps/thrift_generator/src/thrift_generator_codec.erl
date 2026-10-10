@@ -1083,7 +1083,7 @@ nil() ->
 
 -spec list_lit([ast()]) -> ast().
 list_lit(Elements) ->
-    lists:foldr(fun(E, Acc) -> cons(E, Acc) end, nil(), Elements).
+    lists:foldr(fun cons/2, nil(), Elements).
 
 %% The guard is an ergonomic single guard sequence (`none` or a flat
 %% test list); the modern abstract format wants `[]` for no guard and a
