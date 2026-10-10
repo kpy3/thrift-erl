@@ -16,15 +16,16 @@
 
 -moduledoc """
 Equivalence properties and the negative battery for the specialized
-binary wire codecs the generator emits into types modules.
+binary and compact wire codecs the generator emits into types modules.
 
 The specialized entry (`{struct, {ref, Module, Name}}` descriptors,
-dispatched through the module's `binary_codec/1`) must behave exactly
-like the generic engine (`{struct, {Kind, Fields}}` inline descriptors
-interpreted by `thrift_erl_binary`): identical bytes, identical values
-and identical error terms. The generic side is itself proven by the
-golden-byte tests and the golden interop suite, so equivalence here
-makes the specialized code transitively correct.
+dispatched through the module's `binary_codec/1` / `compact_codec/1`)
+must behave exactly like the generic engine (`{struct, {Kind, Fields}}`
+inline descriptors interpreted by `thrift_erl_binary` /
+`thrift_erl_compact`): identical bytes, identical values and identical
+error terms. The generic side is itself proven by the golden-byte tests
+and the golden interop suite, so equivalence here makes the specialized
+code transitively correct.
 """.
 
 -include_lib("proper/include/proper.hrl").
@@ -83,7 +84,11 @@ proper_test_() ->
         {"specialized wire codecs match the generic engine (PropEr)",
             {timeout, 300, fun() -> check(prop_wire_matches_generic()) end}},
         {"specialized wire prefixes never complete (PropEr)",
-            {timeout, 300, fun() -> check(prop_wire_prefix_never_completes()) end}}
+            {timeout, 300, fun() -> check(prop_wire_prefix_never_completes()) end}},
+        {"specialized compact codecs match the generic engine (PropEr)",
+            {timeout, 300, fun() -> check(prop_compact_matches_generic()) end}},
+        {"specialized compact prefixes never complete (PropEr)",
+            {timeout, 300, fun() -> check(prop_compact_prefix_never_completes()) end}}
     ].
 
 %% Silent success; on failure re-run with output so the shrunk
@@ -112,23 +117,30 @@ check(Prop) ->
     end.
 
 %% Random wire values of the generated structs: the specialized entry
-%% (ref descriptor -> binary_codec/1) and the generic engine (inline
+%% (ref descriptor -> the codec probe) and the generic engine (inline
 %% descriptor -> the compiled-scheme interpreter) agree byte for byte,
-%% and decode agrees on whatever encode produced.
+%% and decode agrees on whatever encode produced — for both the binary
+%% and the compact protocol.
 
 prop_wire_matches_generic() ->
+    prop_matches_generic(thrift_erl_binary).
+
+prop_compact_matches_generic() ->
+    prop_matches_generic(thrift_erl_compact).
+
+prop_matches_generic(Engine) ->
     ?FORALL(
         {Name, Value},
         ?LET(Name, oneof(?STRUCTS), {Name, wire_value_gen(Name)}),
         begin
             Inline = {struct, goldentest_types:struct_info(Name)},
             Ref = {struct, {ref, goldentest_types, Name}},
-            Generic = normalize(thrift_erl_binary:encode(Inline, Value)),
-            Specialized = normalize(thrift_erl_binary:encode(Ref, Value)),
+            Generic = normalize(Engine:encode(Inline, Value)),
+            Specialized = normalize(Engine:encode(Ref, Value)),
             case {Generic, Specialized} of
                 {{ok, Bytes}, {ok, Bytes}} ->
-                    thrift_erl_binary:decode(Inline, Bytes) =:=
-                        thrift_erl_binary:decode(Ref, Bytes);
+                    Engine:decode(Inline, Bytes) =:=
+                        Engine:decode(Ref, Bytes);
                 {Same, Same} ->
                     true;
                 {_, _} ->
@@ -141,15 +153,21 @@ prop_wire_matches_generic() ->
 %% the truncation semantics the buffered transport builds on.
 
 prop_wire_prefix_never_completes() ->
+    prop_prefix_never_completes(thrift_erl_binary, fun goldentest_types:binary_codec/1).
+
+prop_compact_prefix_never_completes() ->
+    prop_prefix_never_completes(thrift_erl_compact, fun goldentest_types:compact_codec/1).
+
+prop_prefix_never_completes(Engine, Codec) ->
     ?FORALL(
         {Name, Value},
         ?LET(Name, oneof(?STRUCTS), {Name, wire_value_gen(Name)}),
         begin
             Ref = {struct, {ref, goldentest_types, Name}},
-            case thrift_erl_binary:encode(Ref, Value) of
+            case Engine:encode(Ref, Value) of
                 {ok, IoData} ->
                     Bytes = iolist_to_binary(IoData),
-                    broken_prefixes(Name, Bytes) =:= [];
+                    broken_prefixes(Codec(Name), Bytes) =:= [];
                 _Other ->
                     %% Invalid values never produce bytes to prefix.
                     true
@@ -160,8 +178,7 @@ prop_wire_prefix_never_completes() ->
 %% The prefixes of `Bytes' that the struct's specialized decode answers
 %% with something other than `more' — the property wants none.
 
-broken_prefixes(Name, Bytes) ->
-    {ok, {_Encode, Decode}} = goldentest_types:binary_codec(Name),
+broken_prefixes({ok, {_Encode, Decode}}, Bytes) ->
     [
         binary:part(Bytes, 0, N)
      || N <- lists:seq(1, byte_size(Bytes) - 1),
@@ -288,6 +305,216 @@ deep_battery_test() ->
     ok = load_fixture(),
     lists:foreach(fun deep_struct_case/1, ?DEEP_STRUCTS).
 
+%% Compact protocol: exact error terms and wire shapes the specialized
+%% codecs must reproduce — hand-computed bytes checked against the
+%% generic engine on both sides.
+
+compact_negative_battery_test() ->
+    ok = load_fixture(),
+    Inline = fun(Name) -> {struct, goldentest_types:struct_info(Name)} end,
+    Ref = fun(Name) -> {struct, {ref, goldentest_types, Name}} end,
+    Enc = fun(Desc, Value) -> normalize(thrift_erl_compact:encode(Desc, Value)) end,
+    Dec = fun(Name, Bytes) ->
+        {thrift_erl_compact:decode(Inline(Name), Bytes), thrift_erl_compact:decode(Ref(Name), Bytes)}
+    end,
+
+    %% Known id with the wrong nibble: field_type_mismatch (Xtruct's
+    %% byte_thing sent as i32: delta 4, nibble 5, zigzag 1, stop).
+    ?assertEqual(
+        {{error, {decode, {field_type_mismatch, 4}}}, {error, {decode, {field_type_mismatch, 4}}}},
+        Dec(<<"Xtruct">>, <<16#45, 2, 0>>)
+    ),
+
+    %% Unknown field id skipped by nibble, then a non-delta id arrives
+    %% as nibble byte + zigzag varint.
+    ?assertEqual(
+        {{ok, #{<<"string_thing">> => <<"a">>}, <<>>}, {ok, #{<<"string_thing">> => <<"a">>}, <<>>}},
+        Dec(<<"Xtruct">>, <<16#24, 10, 16#08, 2, 1, $a, 0>>)
+    ),
+
+    %% Booleans ride in the header nibble (CT_TRUE/CT_FALSE), no payload.
+    ?assertEqual(
+        {
+            {ok, #{<<"im_true">> => true, <<"im_false">> => false}, <<>>},
+            {ok, #{<<"im_true">> => true, <<"im_false">> => false}, <<>>}
+        },
+        Dec(<<"Bools">>, <<16#11, 16#12, 0>>)
+    ),
+
+    %% Decode-time missing required: the stop byte alone (StructB's ab).
+    MissingStop = <<0>>,
+    ExpectedMissing = {error, {decode, {missing_required_fields, [<<"ab">>]}}},
+    ?assertEqual(
+        {ExpectedMissing, ExpectedMissing},
+        Dec(<<"StructB">>, MissingStop)
+    ),
+
+    %% Collection headers: element type mismatch carries the observed
+    %% nibble; map type mismatch and the empty-map zero byte.
+    ?assertEqual(
+        {{error, {decode, {element_type_mismatch, 8}}}, {error, {decode, {element_type_mismatch, 8}}}},
+        Dec(<<"Insanity">>, <<16#29, 16#08, 0>>)
+    ),
+    ?assertEqual(
+        {{error, {decode, map_type_mismatch}}, {error, {decode, map_type_mismatch}}},
+        Dec(<<"Insanity">>, <<16#1B, 1, 16#58, 0>>)
+    ),
+    ?assertEqual(
+        {{ok, #{<<"userMap">> => #{}}, <<>>}, {ok, #{<<"userMap">> => #{}}, <<>>}},
+        Dec(<<"Insanity">>, <<16#1B, 0, 0>>)
+    ),
+
+    %% An over-long varint is bad_varint (i64_thing: delta 11, nibble 6,
+    %% then ten continuation bytes).
+    ?assertEqual(
+        {{error, {decode, bad_varint}}, {error, {decode, bad_varint}}},
+        Dec(<<"Xtruct">>, <<16#B6, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF>>)
+    ),
+
+    %% Unknown enum integers decode to themselves (a userMap key of 99
+    %% stays 99; the value is an i64).
+    ?assertEqual(
+        {{ok, #{<<"userMap">> => #{99 => 1}}, <<>>}, {ok, #{<<"userMap">> => #{99 => 1}}, <<>>}},
+        Dec(<<"Insanity">>, <<16#1B, 1, 16#56, 198, 1, 2, 0>>)
+    ),
+
+    %% Union rules and wrong value shapes, byte-for-byte generic.
+    {union, UnionFields} = goldentest_types:struct_info(<<"SomeUnion">>),
+    [N1, N2 | _] = [FieldName || {_, _, _, FieldName, _} <- UnionFields],
+    ?assertEqual(
+        {{error, {encode, union_empty}}, {error, {encode, union_empty}}},
+        {Enc(Inline(<<"SomeUnion">>), #{}), Enc(Ref(<<"SomeUnion">>), #{})}
+    ),
+    UnionMultiple = #{N1 => true, N2 => <<"x">>},
+    ?assertEqual(
+        {{error, {encode, union_multiple}}, {error, {encode, union_multiple}}},
+        {Enc(Inline(<<"SomeUnion">>), UnionMultiple), Enc(Ref(<<"SomeUnion">>), UnionMultiple)}
+    ),
+    BadScalar = #{<<"byte_thing">> => 200},
+    ?assertEqual(
+        {
+            {error, {encode, {value_does_not_match_type, 200}}},
+            {error, {encode, {value_does_not_match_type, 200}}}
+        },
+        {Enc(Inline(<<"Xtruct">>), BadScalar), Enc(Ref(<<"Xtruct">>), BadScalar)}
+    ),
+    ?assertEqual(
+        {
+            {error, {encode, {value_does_not_match_type, 42}}},
+            {error, {encode, {value_does_not_match_type, 42}}}
+        },
+        {Enc(Inline(<<"Xtruct">>), 42), Enc(Ref(<<"Xtruct">>), 42)}
+    ),
+    ok.
+
+%% The uuid fixture: compact has no uuid encoding, so every path through
+%% a uuid type must fail exactly like the generic engine — and the
+%% uuid-free parts of the same structs must still encode and decode.
+
+uuid_compact_battery_test() ->
+    ok = load_uuid_fixture(),
+    Inline = fun(Name) -> {struct, compactuuid_types:struct_info(Name)} end,
+    Ref = fun(Name) -> {struct, {ref, compactuuid_types, Name}} end,
+    Enc = fun(Desc, Value) -> normalize(thrift_erl_compact:encode(Desc, Value)) end,
+    Dec = fun(Name, Bytes) ->
+        {thrift_erl_compact:decode(Inline(Name), Bytes), thrift_erl_compact:decode(Ref(Name), Bytes)}
+    end,
+    UuidError = {error, {encode, {type_not_supported, {base, uuid}, compact}}},
+
+    %% Any present uuid value fails the whole encode.
+    ?assertEqual(
+        {UuidError, UuidError},
+        {Enc(Inline(<<"UuidBox">>), #{<<"id">> => <<1:128>>}), Enc(Ref(<<"UuidBox">>), #{<<"id">> => <<1:128>>})}
+    ),
+    ?assertEqual(
+        {UuidError, UuidError},
+        {
+            Enc(Inline(<<"UuidBox">>), #{<<"history">> => [<<1:128>>]}),
+            Enc(Ref(<<"UuidBox">>), #{<<"history">> => [<<1:128>>]})
+        }
+    ),
+    ?assertEqual(
+        {UuidError, UuidError},
+        {
+            Enc(Inline(<<"UuidBox">>), #{<<"tags">> => #{<<2:128>> => 1}}),
+            Enc(Ref(<<"UuidBox">>), #{<<"tags">> => #{<<2:128>> => 1}})
+        }
+    ),
+
+    %% The uuid-free shape encodes: empty list header with the uuid
+    %% element nibble 0 (k_unsupported writes 0), empty map byte, stop.
+    UuidFree = #{<<"history">> => [], <<"tags">> => #{}},
+    UuidFreeBytes = <<16#39, 16#00, 16#1B, 0, 0>>,
+    ?assertEqual(
+        {{ok, UuidFreeBytes}, {ok, UuidFreeBytes}},
+        {Enc(Inline(<<"UuidBox">>), UuidFree), Enc(Ref(<<"UuidBox">>), UuidFree)}
+    ),
+
+    %% A known uuid field never matches any nibble.
+    ?assertEqual(
+        {{error, {decode, {field_type_mismatch, 1}}}, {error, {decode, {field_type_mismatch, 1}}}},
+        Dec(<<"UuidBox">>, <<16#1C, 0>>)
+    ),
+
+    %% An unknown struct-nibble id is skipped; a uuid-element list header
+    %% matches no nibble (element_type_mismatch carries the observed 0).
+    ?assertEqual(
+        {{error, {decode, {element_type_mismatch, 0}}}, {error, {decode, {element_type_mismatch, 0}}}},
+        Dec(<<"UuidBox">>, <<16#9C, 16#55, 2, 0, 16#09, 6, 16#00, 0>>)
+    ),
+
+    %% Empty maps bypass the uuid types entirely; non-empty ones fail on
+    %% the first uuid key or value.
+    ?assertEqual(
+        {{ok, #{<<"tags">> => #{}}, <<>>}, {ok, #{<<"tags">> => #{}}, <<>>}},
+        Dec(<<"UuidBox">>, <<16#4B, 0, 0>>)
+    ),
+    UuidTypeError = {error, {decode, {type_not_supported, {base, uuid}, compact}}},
+    %% map<uuid, i32> with the declared types byte (key 0, value 5):
+    %% the first pair's uuid KEY decode fails.
+    ?assertEqual(
+        {UuidTypeError, UuidTypeError},
+        Dec(<<"UuidBox">>, <<16#4B, 1, 16#05, 16#AA, 0>>)
+    ),
+    %% map<i32, uuid> with the declared types byte (key 5, value 0):
+    %% the uuid VALUE decode fails.
+    ?assertEqual(
+        {UuidTypeError, UuidTypeError},
+        Dec(<<"UuidBox">>, <<16#5B, 1, 16#50, 2, 16#AA, 0>>)
+    ),
+    %% A types byte the declaration does not carry (key i32, value uuid
+    %% against map<uuid, i32>) is a map_type_mismatch before any uuid
+    %% decode runs.
+    ?assertEqual(
+        {{error, {decode, map_type_mismatch}}, {error, {decode, map_type_mismatch}}},
+        Dec(<<"UuidBox">>, <<16#4B, 1, 16#50, 2, 16#AA, 0>>)
+    ),
+
+    %% Missing required fields: declaration order on encode, ascending
+    %% field-id order on decode — DoubleReq declares 3 before 1 on
+    %% purpose, so the two orders differ.
+    ?assertEqual(
+        {
+            {error, {encode, {missing_required_fields, [<<"first">>, <<"second">>]}}},
+            {error, {encode, {missing_required_fields, [<<"first">>, <<"second">>]}}}
+        },
+        {Enc(Inline(<<"DoubleReq">>), #{}), Enc(Ref(<<"DoubleReq">>), #{})}
+    ),
+    ?assertEqual(
+        {
+            {error, {decode, {missing_required_fields, [<<"second">>, <<"first">>]}}},
+            {error, {decode, {missing_required_fields, [<<"second">>, <<"first">>]}}}
+        },
+        Dec(<<"DoubleReq">>, <<0>>)
+    ),
+    Full = #{<<"first">> => 1, <<"second">> => <<"x">>},
+    FullBytes = <<16#35, 2, 16#08, 2, 1, $x, 0>>,
+    ?assertEqual(
+        {{ok, FullBytes}, {ok, FullBytes}},
+        {Enc(Inline(<<"DoubleReq">>), Full), Enc(Ref(<<"DoubleReq">>), Full)}
+    ),
+    ok.
+
 %% For every deep struct: a full value (every field present), a partial
 %% one (first field only) and an empty map — the specialized and generic
 %% codecs must agree on bytes, decoded values and errors alike.
@@ -306,29 +533,37 @@ deep_struct_case(Name) ->
             end,
     lists:foreach(
         fun(Value) ->
-            Inline = {struct, goldentest_types:struct_info(Name)},
-            Ref = {struct, {ref, goldentest_types, Name}},
-            Generic = normalize(thrift_erl_binary:encode(Inline, Value)),
-            Specialized = normalize(thrift_erl_binary:encode(Ref, Value)),
-            ?assertEqual(Generic, Specialized),
-            case Generic of
-                {ok, Bytes} ->
-                    ?assertEqual(
-                        thrift_erl_binary:decode(Inline, Bytes),
-                        thrift_erl_binary:decode(Ref, Bytes)
-                    ),
-                    %% Every proper prefix asks for more.
-                    {ok, {_Encode, Decode}} = goldentest_types:binary_codec(Name),
-                    lists:foreach(
-                        fun(Prefix) -> ?assertEqual(more, Decode(Prefix)) end,
-                        [binary:part(Bytes, 0, N) || N <- lists:seq(1, byte_size(Bytes) - 1)]
-                    );
-                _ ->
-                    ok
-            end
+            deep_struct_case_one(Name, Value, thrift_erl_binary, fun goldentest_types:binary_codec/1),
+            deep_struct_case_one(Name, Value, thrift_erl_compact, fun goldentest_types:compact_codec/1)
         end,
         Values
     ).
+
+%% For one value and protocol: the specialized and generic codecs must
+%% agree on bytes, decoded values and errors alike, and every proper
+%% prefix of a successful encoding asks for more.
+
+deep_struct_case_one(Name, Value, Engine, Codec) ->
+    Inline = {struct, goldentest_types:struct_info(Name)},
+    Ref = {struct, {ref, goldentest_types, Name}},
+    Generic = normalize(Engine:encode(Inline, Value)),
+    Specialized = normalize(Engine:encode(Ref, Value)),
+    ?assertEqual(Generic, Specialized),
+    case Generic of
+        {ok, Bytes} ->
+            ?assertEqual(
+                Engine:decode(Inline, Bytes),
+                Engine:decode(Ref, Bytes)
+            ),
+            %% Every proper prefix asks for more.
+            {ok, {_Encode, Decode}} = Codec(Name),
+            lists:foreach(
+                fun(Prefix) -> ?assertEqual(more, Decode(Prefix)) end,
+                [binary:part(Bytes, 0, N) || N <- lists:seq(1, byte_size(Bytes) - 1)]
+            );
+        _ ->
+            ok
+    end.
 
 value_shape([], _Shape) ->
     #{};
@@ -382,12 +617,17 @@ field_sample({struct, {ref, Module, Name}}) ->
 
 unknown_name_test() ->
     ok = load_fixture(),
-    %% binary_codec answers error for unknown names, and the ref path
-    %% falls back to the generic unknown_struct report.
+    %% binary_codec and compact_codec answer error for unknown names,
+    %% and the ref paths fall back to the generic unknown_struct report.
     ?assertEqual(error, goldentest_types:binary_codec(<<"Nope">>)),
+    ?assertEqual(error, goldentest_types:compact_codec(<<"Nope">>)),
     ?assertEqual(
         {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
         thrift_erl_binary:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
+    ),
+    ?assertEqual(
+        {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
+        thrift_erl_compact:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
     ),
     ok.
 
@@ -481,6 +721,32 @@ load_fixture() ->
             {ok, Model0} = thrift_generator_semantic:analyze(Loaded),
             Model = Model0#tg_model{
                 modules = [M#tg_module{name = <<"goldentest">>} || M <- Model0#tg_model.modules]
+            },
+            lists:foreach(
+                fun
+                    ({ok, Name, Beam}) ->
+                        {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam);
+                    ({error, Reason}) ->
+                        erlang:error({generated_compile_failed, Reason})
+                end,
+                thrift_generator_emitter:compile_sources(Model)
+            ),
+            ok
+    end.
+
+%% A second fixture exercising the uuid base type, which the golden
+%% ThriftTest variant deliberately omits (compact cannot carry uuid).
+
+load_uuid_fixture() ->
+    case code:is_loaded(compactuuid_types) of
+        {file, _} ->
+            ok;
+        false ->
+            DataDir = filename:join(code:lib_dir(thrift_generator), "test/thrift_codec_test_data"),
+            {ok, Loaded} = thrift_generator_loader:load(filename:join(DataDir, "CompactUuid.thrift")),
+            {ok, Model0} = thrift_generator_semantic:analyze(Loaded),
+            Model = Model0#tg_model{
+                modules = [M#tg_module{name = <<"compactuuid">>} || M <- Model0#tg_model.modules]
             },
             lists:foreach(
                 fun

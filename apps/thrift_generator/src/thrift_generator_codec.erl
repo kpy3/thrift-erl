@@ -51,7 +51,16 @@ options and guards have no convenient `erl_syntax` constructors — so
 everywhere else in the emitter.
 """.
 
--export([export_entries/2, module_forms/2]).
+-export([
+    export_entries/2,
+    module_forms/2,
+    enum_registry/2,
+    type_name/2,
+    typed_prefix/2,
+    current_prefix/1,
+    containers/1,
+    elem_type/1
+]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -96,6 +105,11 @@ everywhere else in the emitter.
     mismatch/1,
     literal/1,
     atom_concat/2,
+    encode_entry_clause/1,
+    encode_error_clause/0,
+    union_check/2,
+    required_check/2,
+    key_filter/3,
     t_atom/1,
     t_atom_lit/1,
     t_map_exact/0,
@@ -121,6 +135,8 @@ everywhere else in the emitter.
     | {set, wire_type()}
     | {map, wire_type(), wire_type()}
     | {struct, {ref, module(), binary()}}.
+
+-export_type([wire_type/0]).
 
 %% A raw `erl_parse' tree (stdlib exports no type for them); the doc and
 %% spec attributes and the returned form list stay syntax trees.
@@ -158,9 +174,10 @@ module_forms(Mod, Ctx) ->
         binary_codec_forms(Mod, Ctx).
 
 %% Distinct inline enum descriptors of the module, numbered by first
-%% appearance: a wire `{enum, _}` descriptor carries no IDL name and the
+%% appearance: a wire `{enum, _}' descriptor carries no IDL name and the
 %% private helpers need one for their rendered names.
 
+-doc "Shared with the compact/JSON codec emitters: numbers a module's distinct inline enum descriptors.".
 -spec enum_registry([wire_type()], #{integer() => pos_integer()}) -> #{integer() => pos_integer()}.
 enum_registry([], Acc) ->
     Acc;
@@ -197,12 +214,14 @@ wire_pair(Name, Ctx) when is_binary(Name) ->
 struct_wire_pair(Name, Ctx) ->
     wire_pair(Name, Ctx).
 
+-doc "Shared with the compact/JSON codec emitters: joins the namespace prefix with a snake-case name.".
 -spec typed_prefix(binary(), binary()) -> binary().
 typed_prefix(<<>>, Name) ->
     Name;
 typed_prefix(Prefix, Name) ->
     <<Prefix/binary, "_", Name/binary>>.
 
+-doc "Shared with the compact/JSON codec emitters: the namespace prefix of the module being generated.".
 -spec current_prefix(#ectx{}) -> binary().
 current_prefix(Ctx) ->
     (maps:get(Ctx#ectx.current, Ctx#ectx.modules))#tg_module.prefix.
@@ -211,6 +230,7 @@ current_prefix(Ctx) ->
 %% by their registry index, cross-module struct references qualify with
 %% the target module tag — collision-free within the module.
 
+-doc "Shared with the compact/JSON codec emitters: renders a wire type as a helper-name fragment.".
 -spec type_name(wire_type(), #{integer() => pos_integer()}) -> binary().
 type_name({base, B}, _Enums) ->
     atom_to_binary(B, utf8);
@@ -268,8 +288,8 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         end,
     CheckBody =
         case S#tg_struct.kind of
-            union -> union_check(S#tg_struct.fields, Entry);
-            _ -> required_check(S#tg_struct.fields, Entry)
+            union -> union_check(S#tg_struct.fields, call_local(Entry, [v("Value")]));
+            _ -> required_check(S#tg_struct.fields, call_local(Entry, [v("Value")]))
         end,
     Doc =
         <<
@@ -282,53 +302,6 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
             spec_form(Encode, 1, [t_fun([t_map_exact()], t_union([t_ok(t_atom(iodata)), t_error()]))]),
             {function, ?ANNO, Encode, 1, [encode_entry_clause(CheckBody), encode_error_clause()]}
         ] ++ chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1).
-
--spec encode_entry_clause(ast()) -> ast().
-encode_entry_clause(CheckBody) ->
-    clause([v("Value")], [remote(erlang, is_map, [v("Value")])], [CheckBody]).
-
--spec encode_error_clause() -> ast().
-encode_error_clause() ->
-    clause([v("Value")], none, [err_encode(mismatch(v("Value")))]).
-
-%% The union check counts present fields by name (declaration order);
-%% the required check collects the missing names in declaration order —
-%% both mirror check_present_fields of the generic engine.
-
--spec union_check([#tg_field{}], atom()) -> ast().
-union_check(Fields, Chain) ->
-    Names = [name_lit(F#tg_field.name) || F <- Fields],
-    'case'(
-        lc(v("N"), [{generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), true)]),
-        [
-            clause([cons(v("_"), nil())], none, [call_local(Chain, [v("Value")])]),
-            clause([nil()], none, [err_encode(at(union_empty))]),
-            clause([v("_")], none, [err_encode(at(union_multiple))])
-        ]
-    ).
-
--spec required_check([#tg_field{}], atom()) -> ast().
-required_check(Fields, Chain) ->
-    Required = [F || F <- Fields, F#tg_field.required =:= required],
-    Names = [name_lit(F#tg_field.name) || F <- Required],
-    'case'(
-        lc(v("N"), [{generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), false)]),
-        [
-            clause([nil()], none, [call_local(Chain, [v("Value")])]),
-            clause([v("Missing")], none, [
-                err_encode(tuple_t([at(missing_required_fields), v("Missing")]))
-            ])
-        ]
-    ).
-
-%% Comprehension filters are bare expressions in the abstract format —
-%% the `{filter, _}' wrapper exists only in erl_syntax trees.
-
--spec key_filter(ast(), ast(), boolean()) -> ast().
-key_filter(N, Map, true) ->
-    remote(maps, is_key, [N, Map]);
-key_filter(N, Map, false) ->
-    {op, ?ANNO, 'not', remote(maps, is_key, [N, Map])}.
 
 %% One function per field, declaration order: field K encodes its value
 %% (when present) and conses its header chunk in front of the encoding
@@ -734,12 +707,14 @@ has_string(Types) ->
         Types
     ).
 
+-doc "Shared with the compact/JSON codec emitters: every container node of a wire type, outermost first.".
 -spec containers(wire_type()) -> [wire_type()].
 containers({list, T}) -> [{list, T} | containers(T)];
 containers({set, T, _Impl}) -> [{set, T} | containers(T)];
 containers({map, K, V}) -> [{map, K, V} | containers(K) ++ containers(V)];
 containers(_) -> [].
 
+-doc "Shared with the compact/JSON codec emitters: the element type of a list or set container.".
 -spec elem_type({list, wire_type()} | {set, wire_type()}) -> wire_type().
 elem_type({list, T}) -> T;
 elem_type({set, T}) -> T.

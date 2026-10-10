@@ -47,6 +47,7 @@ width headers, length prefixes) stay in their emitters.
     mismatch_fn_tail/0,
     more_tail/0,
     other_tail/0,
+    other_clause/1,
     'case'/2,
     lc/2,
     map_exact/2,
@@ -63,6 +64,11 @@ width headers, length prefixes) stay in their emitters.
     mismatch/1,
     literal/1,
     atom_concat/2,
+    encode_entry_clause/1,
+    encode_error_clause/0,
+    union_check/2,
+    required_check/2,
+    key_filter/3,
     fun_type/2,
     t_atom/1,
     t_atom_lit/1,
@@ -76,6 +82,8 @@ width headers, length prefixes) stay in their emitters.
 ]).
 
 -define(ANNO, erl_anno:new(0)).
+
+-include("thrift_generator_model.hrl").
 
 %% A raw `erl_parse' tree (stdlib exports no type for them); the doc and
 %% spec attributes and the returned form list stay syntax trees.
@@ -182,7 +190,15 @@ more_tail() ->
 
 -spec other_tail() -> ast().
 other_tail() ->
-    clause([v("Other")], none, [v("Other")]).
+    other_clause("Other").
+
+%% The catch-all with an optional explicit name: cases that NEST (an
+%% inline element decode inside the loop case that consumes it) must not
+%% reuse the variable, or erl_lint reports the rebinding as unsafe.
+
+-spec other_clause(string()) -> ast().
+other_clause(Name) ->
+    clause([v(Name)], none, [v(Name)]).
 
 -spec 'case'(ast(), [ast()]) -> ast().
 'case'(Expr, Clauses) ->
@@ -251,6 +267,65 @@ literal(Term) when is_tuple(Term) ->
 -spec atom_concat(atom(), binary()) -> atom().
 atom_concat(Atom, Suffix) ->
     binary_to_atom(<<(atom_to_binary(Atom, utf8))/binary, Suffix/binary>>, utf8).
+
+%%--------------------------------------------------------------------
+%% Struct entry checks
+%%--------------------------------------------------------------------
+
+%% The entry clauses of a specialized encode function: the map guard with
+%% the value_does_not_match_type fallthrough, mirroring the generic
+%% engines' non-map struct handling.
+
+-spec encode_entry_clause(ast()) -> ast().
+encode_entry_clause(CheckBody) ->
+    clause([v("Value")], [remote(erlang, is_map, [v("Value")])], [CheckBody]).
+
+-spec encode_error_clause() -> ast().
+encode_error_clause() ->
+    %% The same shape as the container mismatch tail: bind the value and
+    %% report it.
+    mismatch_fn_tail().
+
+%% The union check counts present fields by name (declaration order);
+%% the required check collects the missing names in declaration order —
+%% both mirror check_present_fields of the generic engines. `Call' is
+%% the protocol-specific handoff expression (the first chain function
+%% with its arguments).
+
+-spec union_check([#tg_field{}], ast()) -> ast().
+union_check(Fields, Call) ->
+    Names = [name_lit(F#tg_field.name) || F <- Fields],
+    'case'(
+        lc(v("N"), [{generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), true)]),
+        [
+            clause([cons(v("_"), nil())], none, [Call]),
+            clause([nil()], none, [err_encode(at(union_empty))]),
+            clause([v("_")], none, [err_encode(at(union_multiple))])
+        ]
+    ).
+
+-spec required_check([#tg_field{}], ast()) -> ast().
+required_check(Fields, Call) ->
+    Required = [F || F <- Fields, F#tg_field.required =:= required],
+    Names = [name_lit(F#tg_field.name) || F <- Required],
+    'case'(
+        lc(v("N"), [{generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), false)]),
+        [
+            clause([nil()], none, [Call]),
+            clause([v("Missing")], none, [
+                err_encode(tuple_t([at(missing_required_fields), v("Missing")]))
+            ])
+        ]
+    ).
+
+%% Comprehension filters are bare expressions in the abstract format —
+%% the `{filter, _}' wrapper exists only in erl_syntax trees.
+
+-spec key_filter(ast(), ast(), boolean()) -> ast().
+key_filter(N, Map, true) ->
+    remote(maps, is_key, [N, Map]);
+key_filter(N, Map, false) ->
+    {op, ?ANNO, 'not', remote(maps, is_key, [N, Map])}.
 
 %%--------------------------------------------------------------------
 %% Type AST helpers
