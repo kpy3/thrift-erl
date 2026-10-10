@@ -42,7 +42,18 @@ _build/prod/bin/thrift_generator generate my_api.thrift -o src
 
 This generates `<mod>_types.erl` plus a `<mod>_types.hrl` include (one
 pair per IDL file) and three modules per service: `<Svc>_client.erl`,
-`<Svc>_server.erl`, `<Svc>_handler.erl`.
+`<Svc>_server.erl`, `<Svc>_handler.erl`. Files whose on-disk content
+already matches are left untouched, so regenerating an unchanged IDL
+does not churn mtimes.
+
+`--check` verifies instead of writing: it fails (exit 1, listing the
+drifted files) unless every generated artifact already exists in the
+out dir with the exact content the IDL would produce — a CI freshness
+gate:
+
+```
+_build/prod/bin/thrift_generator --check my_api.thrift -o src
+```
 
 ## rebar3 plugin
 
@@ -58,6 +69,15 @@ In the consumer project's `rebar.config`:
 
 %% regenerate before every compilation:
 {provider_hooks, [{pre, [{compile, {default, thrift}}]}]}
+```
+
+`rebar3 thrift` regenerates the sources (unchanged files are not
+rewritten). `rebar3 thrift --check` verifies freshness instead of
+writing and fails the build when any generated artifact is missing or
+stale relative to the IDL:
+
+```
+rebar3 thrift --check
 ```
 
 For local development the plugin is attached via `_checkouts/`:

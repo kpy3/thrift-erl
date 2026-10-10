@@ -27,7 +27,7 @@ paths the loader tracks.
 """.
 
 -export([tokens/1, ast/1, parse_file/1, parse_string/1]).
--export([generate/3]).
+-export([generate/3, check/3]).
 
 -include("thrift_generator.hrl").
 
@@ -49,7 +49,9 @@ write to `OutDir`.
 
 Writes one `<module>.erl` per generated module (types, and
 client/server/handler per service) and a `<mod>_types.hrl` next to
-every types module. `Opts` understands `repr` — the representation
+every types module. Files whose on-disk content already matches are
+left untouched, so regenerating an unchanged IDL does not churn mtimes
+(and recompiles). `Opts` understands `repr` — the representation
 generated for definitions without an explicit `erl.struct_type`
 annotation (`record`, the default, injects nothing; `map` and `native`
 inject their annotation the same way an explicit one would).
@@ -60,16 +62,76 @@ when one was written).
     {ok, [#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]}
     | {error, term()}.
 generate(ThriftFile, OutDir, Opts) ->
+    with_sources(ThriftFile, Opts, fun(Sources) ->
+        ok = filelib:ensure_dir(filename:join(OutDir, "x")),
+        write_all(Sources, OutDir, [])
+    end).
+
+-doc """
+The generate pipeline without writing: load (with includes), semantic
+analysis, code emission — the same in-memory sources `generate/3`
+writes.
+""".
+-spec sources(file:filename_all(), generate_opts()) ->
+    {ok, [thrift_generator_emitter:source()]} | {error, term()}.
+sources(ThriftFile, Opts) ->
     maybe
         Repr ?= repr_opt(Opts),
         {ok, Loaded} ?= thrift_generator_loader:load(ThriftFile),
         {ok, Model} ?= thrift_generator_semantic:analyze(Loaded, #{repr => Repr}),
-        ok ?= filelib:ensure_dir(filename:join(OutDir, "x")),
-        write_all(thrift_generator_emitter:sources(Model), OutDir, [])
+        {ok, thrift_generator_emitter:sources(Model)}
     else
         {error, Reason} -> {error, Reason};
         Other -> {error, Other}
     end.
+
+-doc """
+CI gate: verifies the generated sources are up to date without
+writing. Runs the same pipeline as `generate/3` and requires every
+artifact to already exist in `OutDir` with the exact content this
+input would produce. Returns `ok`, or `{error, {stale, Paths}}` with
+the drifted (missing or differing) files.
+""".
+-spec check(file:filename_all(), file:filename_all(), generate_opts()) ->
+    ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
+check(ThriftFile, OutDir, Opts) ->
+    with_sources(ThriftFile, Opts, fun(Sources) ->
+        case stale_sources(Sources, OutDir, []) of
+            [] -> ok;
+            Stale -> {error, {stale, lists:reverse(Stale)}}
+        end
+    end).
+
+with_sources(ThriftFile, Opts, Fun) ->
+    case sources(ThriftFile, Opts) of
+        {ok, Sources} -> Fun(Sources);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec stale_sources([thrift_generator_emitter:source()], file:filename_all(), [file:filename_all()]) ->
+    [file:filename_all()].
+stale_sources([#{module := Module, source := Source} = Entry | Rest], OutDir, Acc) ->
+    Base = atom_to_list(Module),
+    ErlPath = filename:join(OutDir, Base ++ ".erl"),
+    Acc1 = stale_path(ErlPath, Source, Acc),
+    case Entry of
+        #{hrl := HrlSource} when HrlSource =/= undefined ->
+            Acc2 = stale_path(hrl_path(OutDir, Base), HrlSource, Acc1),
+            stale_sources(Rest, OutDir, Acc2);
+        _ ->
+            stale_sources(Rest, OutDir, Acc1)
+    end;
+stale_sources([], _OutDir, Acc) ->
+    Acc.
+
+stale_path(Path, Source, Acc) ->
+    case disk_differs(Path, Source) of
+        true -> [Path | Acc];
+        false -> Acc
+    end.
+
+disk_differs(Path, Source) ->
+    file:read_file(Path) =/= {ok, Source}.
 
 -spec repr_opt(term()) -> record | map | native.
 repr_opt(#{repr := Repr}) when Repr =:= record; Repr =:= map; Repr =:= native ->
@@ -82,7 +144,7 @@ repr_opt(Opts) ->
 write_all([#{module := Module, source := Source} = Entry | Rest], OutDir, Acc) ->
     Base = atom_to_list(Module),
     Path = filename:join(OutDir, Base ++ ".erl"),
-    case file:write_file(Path, Source) of
+    case write_if_changed(Path, Source) of
         ok ->
             case write_hrl(Entry, OutDir, Base) of
                 {ok, HrlPath} ->
@@ -98,9 +160,20 @@ write_all([#{module := Module, source := Source} = Entry | Rest], OutDir, Acc) -
 write_all([], _OutDir, Acc) ->
     {ok, lists:reverse(Acc)}.
 
+%% An unchanged file is skipped, not rewritten: regenerating an
+%% untouched IDL keeps mtimes (and therefore downstream recompiles)
+%% stable.
+
+-spec write_if_changed(file:filename_all(), binary()) -> ok | {error, term()}.
+write_if_changed(Path, Source) ->
+    case file:read_file(Path) of
+        {ok, Source} -> ok;
+        _ -> file:write_file(Path, Source)
+    end.
+
 write_hrl(#{hrl := Source}, OutDir, Base) when Source =/= undefined ->
     Path = hrl_path(OutDir, Base),
-    case file:write_file(Path, Source) of
+    case write_if_changed(Path, Source) of
         ok -> {ok, Path};
         {error, Reason} -> {error, Reason}
     end;

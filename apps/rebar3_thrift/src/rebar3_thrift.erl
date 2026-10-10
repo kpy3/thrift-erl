@@ -25,12 +25,18 @@ in the consumer's `rebar.config`:
 ]}
 ```
 
-`rebar3 thrift` regenerates the Erlang sources for every file. To run
-it before every compilation, hook it in the consumer's `rebar.config`:
+`rebar3 thrift` regenerates the Erlang sources for every file; files
+whose content is already up to date are left untouched, so regenerating
+an unchanged IDL does not churn mtimes. To run it before every
+compilation, hook it in the consumer's `rebar.config`:
 
 ```erlang
-{provider_hooks, [{pre, [{compile, {default, thrift}}]}]}.
+{provider_hooks, [{pre, [{compile, {default, thrift}}]}]}
 ```
+
+`rebar3 thrift --check` verifies instead of writing: it fails when any
+generated artifact is missing or stale relative to the IDL — a CI
+freshness gate.
 """.
 
 -behaviour(provider).
@@ -49,7 +55,11 @@ init(State) ->
             {bare, true},
             {deps, ?DEPS},
             {example, "rebar3 thrift"},
-            {opts, []},
+            {opts, [
+                {check, $c, "check", boolean,
+                    "verify the generated sources are up to date instead of"
+                    " writing; fails on missing or stale files"}
+            ]},
             {short_desc, "Generate Erlang code from Thrift IDL files"},
             {desc,
                 "Runs thrift_generator over the IDL files listed in "
@@ -57,8 +67,10 @@ init(State) ->
         ]),
     {ok, rebar_state:add_provider(State, Provider)}.
 
--spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, {string(), term()}}.
+-spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, {rebar3_thrift, term()}}.
 do(State) ->
+    {Parsed, _Args} = rebar_state:command_parsed_args(State),
+    Check = proplists:get_value(check, Parsed, false),
     Opts = rebar_state:get(State, thrift, []),
     Files = proplists:get_value(files, Opts, []),
     OutDir = proplists:get_value(out_dir, Opts, "src"),
@@ -67,11 +79,16 @@ do(State) ->
             rebar_api:warn("~ts is configured but no thrift files are listed", [?PROVIDER]),
             {ok, State};
         _ ->
+            Action =
+                case Check of
+                    true -> fun check/2;
+                    false -> fun generate/2
+                end,
             try
-                lists:foreach(fun(File) -> generate(File, OutDir) end, Files),
+                lists:foreach(fun(File) -> Action(File, OutDir) end, Files),
                 {ok, State}
             catch
-                throw:{thrift_error, Reason} -> {error, {?PROVIDER, Reason}}
+                throw:{thrift_error, Reason} -> {error, {?MODULE, Reason}}
             end
     end.
 
@@ -88,12 +105,25 @@ generate(File, OutDir) ->
             throw({thrift_error, Reason})
     end.
 
--spec format_error({thrift, term()}) -> string().
-format_error({?PROVIDER, Reason}) ->
-    %% Renders through the CLI's formatter so the console shows the
-    %% same diagnostics the standalone tool prints.
+-spec check(file:filename_all(), file:filename_all()) -> ok.
+check(File, OutDir) ->
+    case thrift_generator:check(File, OutDir, #{}) of
+        ok ->
+            rebar_api:info("~ts: generated sources are up to date in ~ts", [File, OutDir]),
+            ok;
+        {error, {stale, Paths}} ->
+            rebar_api:debug("~ts: stale generated sources", [File]),
+            throw({thrift_error, {stale, Paths}});
+        {error, Reason} ->
+            rebar_api:debug("~ts: check failed", [File]),
+            throw({thrift_error, Reason})
+    end.
+
+-spec format_error(term()) -> string().
+%% rebar3 calls this with the reason from {error, {rebar3_thrift,
+%% Reason}} — renders through the CLI's formatter so the console shows
+%% the same diagnostics the standalone tool prints.
+format_error(Reason) ->
     unicode:characters_to_list(
         lists:flatten(thrift_generator_cli:format_error(Reason))
-    );
-format_error(Reason) ->
-    io_lib:format("~0p", [Reason]).
+    ).
