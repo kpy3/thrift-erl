@@ -73,6 +73,56 @@ UTF-8 end to end.
 - The specialized-codec cache stores only the fact of an export (not
   the funs), so eunit module reloads no longer serve purged funs.
 
+## [0.2.0] — 2026-10-10
+
+Specialized wire codecs, a file-wide set default, and the parser fixes
+that make real-world official IDL documents parse: `#` comments in
+every position, merged doc blocks, and cross-module typedef
+references.
+
+### Generator (`thrift_generator`)
+
+- Specialized binary wire codecs emitted into `<mod>_types.erl`:
+  per struct, `encode_<X>_wire/1` (wire map to iodata) and
+  `decode_<X>_wire/1` (binary to `{ok, WireMap, Rest} | more |
+  {error, _}`) with byte-for-byte the generic engine's error
+  semantics, plus a `binary_codec/1` index keyed by the wire struct
+  name. Required knowledge is decided at emit time — only required
+  fields pay the keydelete and missing-scan clauses — so small structs
+  are the win (Xtruct encode 18 vs 33 reductions/op, decode 16 vs 24)
+  while deep payloads like Insanity stay at parity, dispatch
+  amortizing over the walk.
+- Parser: the official IDL's comment forms in every position — `#`
+  line comments (still text inside string literals, the string rule
+  wins on length), doc comments before `include`/`namespace`, a
+  dangling doc at end of input, and consecutive doc blocks merged
+  into one doc token, as the official compiler does.
+- Emitter: cross-module references to typedefs resolve. A qualified
+  name landing on an included file's `typedef` used to die with
+  `{unresolved_type, Mod, Name}` at descriptor build time; the alias
+  now resolves in its defining module's context, keeping refs inside
+  the typedef body home while the result lands in the referencing
+  module's descriptor.
+- CLI: arguments parsed with the stdlib `argparse` module (shipped
+  inside stdlib since OTP 28, so no new dependency), and the CLI gains
+  `-h/--help`.
+- Sets: a `namespace erl` (or `namespace *`) header may carry
+  `erl.set = "sets" | "ordset"` as the file-wide default, injected
+  into every set type of the document (the `erl` scope wins over the
+  wildcard); record defaults of set-typed fields are wrapped in the
+  impl constructor. The global default stays `list` — parity with
+  Apache is on the wire. Writing `erl.set` after the name is now a
+  semantic error instead of a silently ignored annotation.
+
+### Runtime (`thrift_erl`)
+
+- Specialized-codec dispatch: named struct references probe the
+  generated `binary_codec/1` export (hits and misses cached) and fall
+  back to the generic engine when it is absent; `skip_by_wire/2` is
+  exported for the generated skip clauses.
+- Set implementations: the record engine covers `list`, `ordset` and
+  `sets` end to end in both directions, including nested sets.
+
 ## [0.1.0] — 2026-10-09
 
 Initial release. An alternative Apache Thrift IDL generator and the
