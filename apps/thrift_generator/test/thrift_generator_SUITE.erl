@@ -35,6 +35,8 @@
     loader_missing_include/1,
     loader_namespace_prefix/1,
     loader_namespace_error/1,
+    utf8_doc_and_const/1,
+    utf8_invalid_file_rejected/1,
     same_struct_names_coexist/1,
     cross_module_typedef/1,
     generated_loopback_buffered/1,
@@ -56,6 +58,8 @@ all() ->
         loader_missing_include,
         loader_namespace_prefix,
         loader_namespace_error,
+        utf8_doc_and_const,
+        utf8_invalid_file_rejected,
         same_struct_names_coexist,
         cross_module_typedef,
         generated_loopback_buffered,
@@ -335,6 +339,43 @@ loader_namespace_prefix(Config) ->
 
 %% A namespace that normalizes to nothing is a load error, not a
 %% silently empty prefix of a declared namespace.
+
+%% IDL text is UTF-8: Cyrillic doc comments land in -doc and Cyrillic
+%% string constants print as <<"текст">>, not latin1 byte lists (the
+%% file path — the loader — was reading bytes one per char).
+
+utf8_doc_and_const(Config) ->
+    %% /utf8 on every non-ASCII literal: erlc silently truncates plain
+    %% binary literals above byte 255, so without it both the IDL
+    %% fixture and the expected snippets arrive pre-mangled.
+    Path = write_snippet(
+        Config,
+        "cyrillic.thrift",
+        <<
+            "namespace erl demo\n"
+            "/**\n"
+            " * Значение в JSON, согласно [RFC7159].\n"
+            " */\n"
+            "struct Value { 1: optional string data }\n"
+            "/// Приветствие.\n"
+            "const string GREETING = \"привет\"\n"/utf8
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    %% single-file document: exactly one types module comes back
+    #{source := Src} = hd(thrift_generator_emitter:sources(Model)),
+    ?assertMatch({_, _}, binary:match(Src, <<"-doc(\"Значение в JSON"/utf8>>)),
+    ?assertMatch({_, _}, binary:match(Src, <<"demo_greeting() -> <<\"привет\">>."/utf8>>)),
+    ok.
+
+%% A file that is not valid UTF-8 is a clean error, not a cryptic
+%% lexer failure or silently mangled text.
+
+utf8_invalid_file_rejected(Config) ->
+    Bad = write_snippet(Config, "bad_utf8.thrift", <<255, 254, 47, 42>>),
+    ?assertMatch({error, {invalid_utf8, Bad}}, thrift_generator:parse_file(Bad)),
+    ok.
 
 loader_namespace_error(Config) ->
     Empty = write_snippet(

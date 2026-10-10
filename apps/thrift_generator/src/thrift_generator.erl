@@ -120,10 +120,23 @@ path as given.
 tokens(Filename) ->
     maybe
         {ok, Data} ?= file:read_file(Filename),
-        DataString = binary:bin_to_list(Data),
+        {ok, DataString} ?= utf8_text(Data, Filename),
         FilenameString = unicode:characters_to_list(Filename),
         Marker = "\n__file__ \"" ++ FilenameString ++ "\"",
         thrift_lexer:string(DataString ++ Marker)
+    end.
+
+%% IDL text is UTF-8 by spec; the lexer wants codepoints, so the file
+%% bytes decode once here — reading them byte-per-char (latin1) would
+%% double-encode every doc comment and string constant downstream. An
+%% invalid file is a clean error, not a cryptic lexer failure.
+
+-spec utf8_text(binary(), file:filename_all()) ->
+    {ok, string()} | {error, {invalid_utf8, file:filename_all()}}.
+utf8_text(Data, Filename) ->
+    case unicode:characters_to_list(Data, utf8) of
+        Text when is_list(Text) -> {ok, Text};
+        _ -> {error, {invalid_utf8, Filename}}
     end.
 
 -doc "Parses a token list into a document AST node.".
