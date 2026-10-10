@@ -505,6 +505,34 @@ Introspection in the spirit of the official generator: `struct_info/1`,
 `enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`,
 `tag_index/0` and `convert/2` in `<mod>_types.erl`.
 
+## Differences from Apache Thrift
+
+Parity with Apache Thrift is on the wire; where the in-process contract
+differs, it is deliberate:
+
+- Wire compatibility is covered by golden interop tests against the
+  vendored official runtime: binary protocol on buffered and framed
+  transports (both directions), compact and JSON protocols against
+  official clients, and the HTTP transport against the official
+  `thrift_http_transport`.
+- In-process representations are this library's axis — records
+  (default), maps, structs, or EEP-79 native records per struct — not
+  the official runtime's dict/list-based structures. Sets decode to
+  plain lists by default; `erl.set = "sets"` reproduces the official
+  `sets:set()` per type or file-wide (see Codegen annotations). The
+  native representation requires OTP 29; older releases answer
+  `{error, {unsupported_repr, native}}`.
+- Field defaults live in the generated record literals, not in decode:
+  a missing optional field decodes as `undefined`; the default value is
+  what a hand-constructed record carries.
+- An unknown enum value on the wire passes through decode as the raw
+  integer (forward compatibility with newer schemas); encode rejects
+  values with no enum member (`{error, {unknown_enum_value, V}}`).
+- The HTTP transport speaks an HTTP/1.1 subset with Content-Length
+  framing only — no chunked encoding — and a oneway call is still a
+  request/response exchange: the server answers 200 before running the
+  handler, so the client and server never desynchronize.
+
 ## Performance
 
 The codec hot path is benchmarked against the vendored official Apache
