@@ -25,7 +25,7 @@ Requires Erlang/OTP 28+.
 
 ```
 rebar3 compile
-rebar3 eunit        # unit tests + 5 PropEr codec properties
+rebar3 eunit        # unit tests + 10 PropEr codec properties
 rebar3 ct           # loopback scenarios + golden interop
 rebar3 dialyzer
 rebar3 xref
