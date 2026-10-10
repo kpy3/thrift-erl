@@ -21,7 +21,8 @@
 
 -export([
     format_error_test/0,
-    format_error_list_test/0
+    format_error_list_test/0,
+    format_error_stale_test/0
 ]).
 
 %% Lexer/parser errors format through the originating module's own
@@ -61,6 +62,21 @@ format_error_list_test() ->
                 {"a.thrift", 3, "bad thing"},
                 {"b.thrift", 7, "worse thing"}
             ])
+        )
+    ),
+    ok.
+
+%% The check gate's drift report: one indented path per line, so the
+%% rebar3 plugin (which renders through this formatter) shows exactly
+%% which artifacts to refresh.
+
+format_error_stale_test() ->
+    ?assertEqual(
+        "generated sources are out of date (run the generator to refresh):\n"
+        "  src/a_types.erl\n"
+        "  src/a_types.hrl\n",
+        lists:flatten(
+            thrift_generator_cli:format_error({stale, ["src/a_types.erl", "src/a_types.hrl"]})
         )
     ),
     ok.

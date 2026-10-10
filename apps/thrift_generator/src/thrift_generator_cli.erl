@@ -18,8 +18,8 @@
 Command-line front end (escript entry point).
 
 ```
-thrift_generator <file.thrift> [-o <out_dir>] [--repr record|map|native]
-thrift_generator generate <file.thrift> [-o <out_dir>] [--repr record|map|native]
+thrift_generator <file.thrift> [-o <out_dir>] [--repr record|map|native] [--check]
+thrift_generator generate <file.thrift> [-o <out_dir>] [--repr record|map|native] [--check]
 ```
 
 Argument parsing rides on the stdlib `argparse` module (usage/help
@@ -29,11 +29,16 @@ includes, semantic analysis, emit) and writes the generated Erlang
 sources to `out_dir` (default: the current directory). `--repr` picks
 the value representation generated for definitions without an explicit
 `erl.struct_type` annotation (`record`, the default, `map` or
-`native`).
+`native`). `--check` verifies instead of writing: every generated
+artifact must already exist in `out_dir` with the exact content this
+input would produce — drift (missing or stale files) exits 1, so the
+flag works as a CI freshness gate.
 """.
 
 -export([main/1]).
 -export([format_error/1]).
+
+-define(PROGNAME, "thrift_generator").
 
 -spec main([string()]) -> no_return().
 main(RawArgs) ->
@@ -42,7 +47,7 @@ main(RawArgs) ->
             ["generate" | Rest] -> Rest;
             _ -> RawArgs
         end,
-    Options = #{progname => "thrift_generator"},
+    Options = #{progname => ?PROGNAME},
     %% argparse has no built-in help switch, and a required positional
     %% would win over `-h', so `file' is optional in the spec and both
     %% the help request and its presence are checked here.
@@ -53,16 +58,22 @@ main(RawArgs) ->
                     io:put_chars([argparse:help(command(), Options), $\n]),
                     halt(0);
                 false ->
-                    case Parsed of
-                        #{file := File} ->
-                            run(File, maps:get(out_dir, Parsed, <<".">>), maps:get(repr, Parsed, record));
-                        _ ->
-                            parse_error("missing <file.thrift> operand", Options)
-                    end
+                    run_parsed(Parsed, Options)
             end;
         {error, Reason} ->
             parse_error(argparse:format_error(Reason), Options)
     end.
+
+-spec run_parsed(argparse:arg_map(), #{progname => string()}) -> no_return().
+run_parsed(#{file := File} = Parsed, _Options) ->
+    OutDir = maps:get(out_dir, Parsed, <<".">>),
+    Repr = maps:get(repr, Parsed, record),
+    case maps:get(check, Parsed, false) of
+        true -> check(File, OutDir, Repr);
+        false -> run(File, OutDir, Repr)
+    end;
+run_parsed(_Parsed, Options) ->
+    parse_error("missing <file.thrift> operand", Options).
 
 -spec parse_error(unicode:chardata(), #{progname => string()}) -> no_return().
 parse_error(Message, Options) ->
@@ -107,6 +118,15 @@ command() ->
                         "representation for definitions without an explicit"
                         " erl.struct_type annotation (default: record)"
                     ]}
+            },
+            #{
+                name => check,
+                long => "-check",
+                type => boolean,
+                help => [
+                    "verify the generated sources are up to date instead"
+                    " of writing; exits 1 on drift (missing or stale files)"
+                ]
             }
         ]
     }.
@@ -135,6 +155,29 @@ run(File, OutDir, Repr) ->
             halt(1)
     end.
 
+check(File, OutDir, Repr) ->
+    case thrift_generator:check(File, OutDir, #{repr => Repr}) of
+        ok ->
+            io:format("~ts: generated sources are up to date in ~ts~n", [
+                unicode:characters_to_list(File), unicode:characters_to_list(OutDir)
+            ]),
+            halt(0);
+        {error, {stale, Paths}} ->
+            io:format(standard_error, "thrift_generator: ~ts: stale generated sources:~n", [
+                unicode:characters_to_list(File)
+            ]),
+            lists:foreach(
+                fun(Path) ->
+                    io:format(standard_error, "  ~ts~n", [unicode:characters_to_list(Path)])
+                end,
+                Paths
+            ),
+            halt(1);
+        {error, Reason} ->
+            io:format(standard_error, "thrift_generator: ~ts~n", [format_error(Reason)]),
+            halt(1)
+    end.
+
 format_error({parse, Path, {Line, Module, Term}}) when is_integer(Line) ->
     io_lib:format("~ts:~b: ~ts", [Path, Line, Module:format_error(Term)]);
 format_error({parse, Path, Reason}) ->
@@ -150,5 +193,10 @@ format_error(Errors) when is_list(Errors) ->
     );
 format_error({write_error, Path, Reason}) ->
     io_lib:format("cannot write ~ts: ~0p", [Path, Reason]);
+format_error({stale, Paths}) ->
+    io_lib:format(
+        "generated sources are out of date (run the generator to refresh):~n~ts",
+        [[io_lib:format("  ~ts~n", [Path]) || Path <- Paths]]
+    );
 format_error(Reason) ->
     io_lib:format("~0p", [Reason]).
