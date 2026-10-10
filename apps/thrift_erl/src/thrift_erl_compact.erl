@@ -46,6 +46,9 @@ Like the binary codec, descriptors are compiled before use — compact
 type nibbles precomputed, struct fields indexed by id — with `{ref, ...}`
 schemas cached in `persistent_term` and inline descriptors memoized per
 process. See `thrift_erl_binary`'s moduledoc for the caching contract.
+Ref descriptors also probe the generated module's `compact_codec/1`
+first and dispatch to its specialized per-struct codecs, falling back
+to the interpreter here when the export is missing.
 """.
 
 -export([
@@ -54,7 +57,8 @@ process. See `thrift_erl_binary`'s moduledoc for the caching contract.
     encode_message/4,
     decode_message/1,
     encode_application_exception/2,
-    decode_application_exception/1
+    decode_application_exception/1,
+    skip_nibble/2
 ]).
 
 -behaviour(thrift_erl_protocol).
@@ -153,14 +157,21 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
     end.
 
 %% The shared resolve-then-encode shape of the top-level ref entry and
-%% the nested `k_ref' encoding.
+%% the nested `k_ref' encoding. A generated module's specialized compact
+%% codec (found through the `compact_codec/1' probe) takes precedence
+%% over the compiled-scheme interpreter.
 -spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
 encode_resolved(Module, Name, Value) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            encode_struct_k(Compiled, Value);
+    case compact_codec(Module, Name) of
+        {ok, Encode, _Decode} ->
+            Encode(Value);
         error ->
-            {error, {encode, {unknown_struct, {Module, Name}}}}
+            case resolve_struct(Module, Name) of
+                {ok, Compiled} ->
+                    encode_struct_k(Compiled, Value);
+                error ->
+                    {error, {encode, {unknown_struct, {Module, Name}}}}
+            end
     end.
 
 -spec encode_k(k_type(), term()) -> {ok, iodata()} | {error, term()}.
@@ -646,6 +657,14 @@ decode_pairs_k(CKey, CVal, N, Bin, Acc) ->
 %% Wire-type skipping (forward compatibility)
 %%--------------------------------------------------------------------
 
+-doc """
+Skips one value of the given compact type nibble — the element nibble
+inside a collection header for lists, sets and maps.
+
+Exported for the specialized codecs the generator emits: their decode
+loops skip unknown struct fields through this function, keeping
+skip-on-unknown-field semantics in one place.
+""".
 -spec skip_nibble(non_neg_integer(), binary()) -> {ok, binary()} | more | {error, term()}.
 skip_nibble(N, Bin) when N =:= ?CT_TRUE; N =:= ?CT_FALSE ->
     {ok, Bin};
@@ -904,11 +923,71 @@ resolve_struct(Module, Name) ->
 
 -spec decode_ref_struct(module(), binary(), binary()) -> decode_result(thrift_erl_binary:struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            decode_struct_k(Compiled, Bin);
+    case compact_codec(Module, Name) of
+        {ok, _Encode, Decode} ->
+            Decode(Bin);
         error ->
-            {error, {decode, {unknown_struct, {Module, Name}}}}
+            case resolve_struct(Module, Name) of
+                {ok, Compiled} ->
+                    decode_struct_k(Compiled, Bin);
+                error ->
+                    {error, {decode, {unknown_struct, {Module, Name}}}}
+            end
+    end.
+
+%% The specialized-codec probe: generated types modules export
+%% `compact_codec/1` handing out their per-struct wire function pairs.
+%% The persistent_term cache stores only whether the module exports the
+%% lookup — the funs themselves come fresh from the module on every
+%% call, so reloading a types module (as the test suite does) never
+%% leaves a fun from a purged version in the cache. The export fact is
+%% still cached once, so a module without the export pays the probe
+%% once. Version drift between a cached export and the current module
+%% remains the documented no-hot-swap scenario (see the moduledoc).
+
+-spec compact_codec(module(), binary()) -> {ok, fun(), fun()} | error.
+compact_codec(Module, Name) ->
+    Key = {?MODULE, codec_export, Module},
+    case persistent_term:get(Key, probe) of
+        yes ->
+            case probe_codec(Module, Name) of
+                {ok, _, _} = Found ->
+                    Found;
+                none ->
+                    error
+            end;
+        no ->
+            error;
+        probe ->
+            Found = probe_codec(Module, Name),
+            persistent_term:put(
+                Key,
+                case Found of
+                    {ok, _, _} -> yes;
+                    none -> no
+                end
+            ),
+            case Found of
+                {ok, _, _} -> Found;
+                none -> error
+            end
+    end.
+
+-spec probe_codec(module(), binary()) -> {ok, fun(), fun()} | none.
+probe_codec(Module, Name) ->
+    Loaded =
+        case code:ensure_loaded(Module) of
+            {module, Module} -> true;
+            {error, _} -> false
+        end,
+    case Loaded andalso erlang:function_exported(Module, compact_codec, 1) of
+        true ->
+            case Module:compact_codec(Name) of
+                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
+                error -> none
+            end;
+        false ->
+            none
     end.
 
 -spec memo_compiled(thrift_erl_binary:type_desc(), struct | union | exception, [
