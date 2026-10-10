@@ -26,7 +26,7 @@ mechanism.
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/1, port/1]).
+-export([start_link/1, stop/1, port/1, drain/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -65,7 +65,13 @@ mechanism.
     max_connections :: pos_integer(),
     %% exactly one accept is in flight whenever below the cap
     accepting = false :: boolean(),
-    connections = #{} :: #{reference() := pid()}
+    connections = #{} :: #{reference() := pid()},
+    %% drain: the listener is closed, no new connections are accepted,
+    %% and the drain caller is answered once every connection is gone
+    %% (or the deadline passes)
+    draining = false :: boolean(),
+    drain_from = undefined :: undefined | {pid(), gen_server:reply_tag()},
+    drain_timer = undefined :: reference() | undefined
 }).
 
 -doc """
@@ -86,6 +92,23 @@ stop(Pid) ->
 -spec port(pid()) -> {ok, inet:port_number()}.
 port(Pid) ->
     gen_server:call(Pid, port).
+
+-doc """
+Drains the listener: closes the listen socket, accepts nothing new, and
+tells every live connection to stop — an idle one exits at once, one
+with an in-flight request right after it answered. The drain completes
+when the last connection is gone, or at the `Timeout` deadline
+(`infinity` allowed); the deadline never fails the call: once it
+passes, whatever is still connected is swept by the supervisor stop
+that follows. The reply must be deferred (not answered from
+`handle_call`) because observing connection exits requires the
+`'DOWN'` messages only a live gen_server loop processes.
+""".
+-spec drain(pid(), timeout()) -> ok.
+drain(Pid, infinity) ->
+    gen_server:call(Pid, {drain, infinity}, infinity);
+drain(Pid, Timeout) when is_integer(Timeout), Timeout >= 0 ->
+    gen_server:call(Pid, {drain, Timeout}, Timeout + 5000).
 
 %% gen_server callbacks
 
@@ -134,6 +157,30 @@ handle_call(port, _From, #state{listen_socket = {tcp, ListenSocket}} = State) ->
 handle_call(port, _From, #state{listen_socket = {ssl, ListenSocket}} = State) ->
     {ok, {_Ip, Port}} = ssl:sockname(ListenSocket),
     {reply, {ok, Port}, State};
+handle_call({drain, _Timeout}, _From, #state{draining = true} = State) ->
+    {reply, ok, State};
+handle_call({drain, Timeout}, From, State0) ->
+    thrift_erl_socket:close(State0#state.listen_socket),
+    Timer =
+        case Timeout of
+            infinity ->
+                undefined;
+            _ when is_integer(Timeout), Timeout >= 0 ->
+                erlang:send_after(Timeout, self(), drain_deadline)
+        end,
+    State = State0#state{draining = true, drain_from = From, drain_timer = Timer},
+    %% Every live connection is told to stop: the message queues behind
+    %% the request it is processing (dispatch is synchronous inside its
+    %% loop), so a busy connection finishes and answers the current
+    %% exchange first, an idle one exits at once. Their exits are what
+    %% complete the drain below.
+    lists:foreach(fun(Pid) -> Pid ! drain end, maps:values(State#state.connections)),
+    case map_size(State#state.connections) of
+        0 ->
+            {noreply, finish_drain(From, State)};
+        _ ->
+            {noreply, State}
+    end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported}, State}.
 
@@ -144,6 +191,11 @@ handle_cast(_Request, State) ->
 
 -doc false.
 -spec handle_info(term(), #state{}) -> {noreply, #state{}} | {stop, normal, #state{}}.
+handle_info(accept, #state{draining = true} = State) ->
+    %% Drain: the listen socket is closed. A pending accept message from
+    %% before the drain lands here and must not open a new connection
+    %% (or, with the socket gone, restart the accept loop).
+    {noreply, State#state{accepting = false}};
 handle_info(accept, #state{} = State) ->
     %% The in-flight accept is consumed: reset before (maybe) rescheduling.
     State0 = State#state{accepting = false},
@@ -165,13 +217,26 @@ handle_info(accept, #state{} = State) ->
             ?LOG_ERROR(#{domain => [thrift], msg => "accept failed", reason => Reason}),
             {noreply, schedule_accept(State0)}
     end;
-handle_info({'DOWN', Ref, process, _Pid, _Reason}, #state{connections = Connections} = State) ->
+handle_info({'DOWN', Ref, process, _Pid, _Reason}, #state{connections = Connections} = State0) ->
     case maps:take(Ref, Connections) of
         {_Monitored, Connections1} ->
-            {noreply, schedule_accept(State#state{connections = Connections1})};
+            State = State0#state{connections = Connections1},
+            Drained =
+                State#state.draining andalso
+                    State#state.drain_from =/= undefined andalso
+                    map_size(Connections1) =:= 0,
+            case Drained of
+                true -> {noreply, finish_drain(State#state.drain_from, State)};
+                false -> {noreply, schedule_accept(State)}
+            end;
         error ->
-            {noreply, State}
+            {noreply, State0}
     end;
+handle_info(drain_deadline, #state{drain_from = undefined} = State) ->
+    %% A deadline that raced the drain completing.
+    {noreply, State};
+handle_info(drain_deadline, State) ->
+    {noreply, finish_drain(State#state.drain_from, State)};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -225,6 +290,21 @@ start_connection(Socket, #state{connections = Connections} = State) ->
 
 %% Schedules the next accept when below the connection cap; at the cap
 %% stays silent — the next 'DOWN' resumes accepting.
+
+-spec finish_drain(undefined | {pid(), gen_server:reply_tag()}, #state{}) -> #state{}.
+finish_drain(From, #state{drain_timer = Timer} = State) ->
+    case Timer of
+        undefined -> ok;
+        _ -> erlang:cancel_timer(Timer)
+    end,
+    reply_drain(From),
+    State#state{drain_from = undefined, drain_timer = undefined}.
+
+-spec reply_drain(undefined | {pid(), gen_server:reply_tag()}) -> ok.
+reply_drain(undefined) ->
+    ok;
+reply_drain(From) ->
+    gen_server:reply(From, ok).
 
 -spec schedule_accept(#state{}) -> #state{}.
 schedule_accept(#state{accepting = true} = State) ->

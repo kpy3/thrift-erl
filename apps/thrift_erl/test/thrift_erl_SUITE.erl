@@ -38,7 +38,10 @@
     multiplexed_calls/1,
     multiplexed_unknown_service/1,
     plain_client_to_multiplexed_server/1,
-    prefixed_name_to_plain_server/1
+    prefixed_name_to_plain_server/1,
+    drain_waits_for_inflight_call/1,
+    drain_deadline_expires/1,
+    drain_closes_listener_and_idle_connections/1
 ]).
 
 all() ->
@@ -58,7 +61,10 @@ all() ->
         multiplexed_calls,
         multiplexed_unknown_service,
         plain_client_to_multiplexed_server,
-        prefixed_name_to_plain_server
+        prefixed_name_to_plain_server,
+        drain_waits_for_inflight_call,
+        drain_deadline_expires,
+        drain_closes_listener_and_idle_connections
     ].
 
 -define(SERVICE, thrift_erl_test_service).
@@ -264,8 +270,216 @@ prefixed_name_to_plain_server(_Config) ->
         thrift_erl_server:stop(Server)
     end.
 
+%% Drain: the in-flight call is answered first, only then the stop
+%% completes. The handler blocks on an ETS gate, so the scenario is
+%% deterministic: while the gate is closed the drain cannot finish.
+%% The handler module must be loaded up front: the connection resolves
+%% `slow' with binary_to_existing_atom, and in a filtered run these
+%% cases are the first to touch the handler at all.
+
+drain_waits_for_inflight_call(_Config) ->
+    {module, ?HANDLER} = code:ensure_loaded(?HANDLER),
+    gate_on(),
+    {ok, Server} = thrift_erl_server:start_link(#{port => 0, handler => ?HANDLER, service => ?SERVICE}),
+    try
+        {ok, Port} = thrift_erl_server:port(Server),
+        {ok, Client} = thrift_erl_client:start_link(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+        try
+            Self = self(),
+            %% Unlinked workers reporting back: a late crash after the
+            %% case must not poison the next one, and a caught crash is
+            %% still visible in the received value.
+            spawn(fun() ->
+                Self !
+                    {slow_result,
+                        try
+                            call(Client, <<"slow">>, [])
+                        catch
+                            C:R -> {crashed, C, R}
+                        end}
+            end),
+            wait_gate_entered(),
+            spawn(fun() ->
+                Self !
+                    {stop_result,
+                        try
+                            thrift_erl_server:stop(Server, #{drain => 5000})
+                        catch
+                            C:R -> {crashed, C, R}
+                        end}
+            end),
+            receive
+                {stop_result, _} -> erlang:error(drain_finished_early)
+            after 300 ->
+                ok
+            end,
+            ets:insert(thrift_erl_drain_gate, {go, true}),
+            receive
+                {slow_result, Result} -> ?assertEqual({ok, <<"done">>}, Result)
+            after 5000 ->
+                erlang:error(no_call_result)
+            end,
+            receive
+                {stop_result, Stopped} -> ?assertEqual(ok, Stopped)
+            after 5000 ->
+                erlang:error(no_stop_result)
+            end
+        after
+            %% The drained connection stops the client process too.
+            try
+                thrift_erl_client:stop(Client)
+            catch
+                _:_ -> ok
+            end
+        end
+    after
+        try
+            thrift_erl_server:stop(Server)
+        catch
+            _:_ -> ok
+        end,
+        gate_off()
+    end.
+
+%% The deadline is a best-effort release, not a failure: with an
+%% exchange still running, drain returns on schedule — and the
+%% supervisor stop that follows still lets the busy connection answer
+%% (the sweep is a graceful gen_server stop, not a kill).
+
+drain_deadline_expires(_Config) ->
+    {module, ?HANDLER} = code:ensure_loaded(?HANDLER),
+    gate_on(),
+    {ok, Server} = thrift_erl_server:start_link(#{port => 0, handler => ?HANDLER, service => ?SERVICE}),
+    try
+        {ok, Port} = thrift_erl_server:port(Server),
+        {ok, Client} = thrift_erl_client:start_link(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+        try
+            Self = self(),
+            spawn(fun() ->
+                Self !
+                    {slow_result,
+                        try
+                            call(Client, <<"slow">>, [])
+                        catch
+                            C:R -> {crashed, C, R}
+                        end}
+            end),
+            wait_gate_entered(),
+            {_, Acceptor, worker, [thrift_erl_acceptor]} =
+                lists:keyfind(acceptor, 1, supervisor:which_children(Server)),
+            T0 = erlang:monotonic_time(millisecond),
+            ok = thrift_erl_acceptor:drain(Acceptor, 200),
+            ?assert(erlang:monotonic_time(millisecond) - T0 < 1000),
+            %% The exchange did not finish: the gate is still closed.
+            receive
+                {slow_result, _} -> erlang:error(call_finished_early)
+            after 0 ->
+                ok
+            end,
+            ets:insert(thrift_erl_drain_gate, {go, true}),
+            receive
+                {slow_result, Result} -> ?assertEqual({ok, <<"done">>}, Result)
+            after 5000 ->
+                erlang:error(no_call_result)
+            end
+        after
+            try
+                thrift_erl_client:stop(Client)
+            catch
+                _:_ -> ok
+            end
+        end
+    after
+        try
+            thrift_erl_server:stop(Server)
+        catch
+            _:_ -> ok
+        end,
+        gate_off()
+    end.
+
+%% Drain closes the listener and disconnects the idle connections: a
+%% new client is refused, the connected one is dropped, and the stop
+%% completes without waiting for any deadline.
+
+drain_closes_listener_and_idle_connections(_Config) ->
+    {ok, Server} = thrift_erl_server:start_link(#{port => 0, handler => ?HANDLER, service => ?SERVICE}),
+    try
+        {ok, Port} = thrift_erl_server:port(Server),
+        {ok, Client} = thrift_erl_client:start_link(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+        try
+            Self = self(),
+            spawn(fun() ->
+                Self !
+                    {stop_result,
+                        try
+                            thrift_erl_server:stop(Server, #{drain => 5000})
+                        catch
+                            C:R -> {crashed, C, R}
+                        end}
+            end),
+            receive
+                {stop_result, Stopped} -> ?assertEqual(ok, Stopped)
+            after 5000 ->
+                erlang:error(no_stop_result)
+            end,
+            ?assertMatch(
+                {error, _},
+                thrift_erl_client:start_link(#{host => "127.0.0.1", port => Port, service => ?SERVICE})
+            ),
+            Monitor = monitor(process, Client),
+            receive
+                {'DOWN', Monitor, process, Client, _Reason} -> ok
+            after 2000 ->
+                erlang:error(client_not_disconnected)
+            end
+        after
+            try
+                thrift_erl_client:stop(Client)
+            catch
+                _:_ -> ok
+            end
+        end
+    after
+        try
+            thrift_erl_server:stop(Server)
+        catch
+            _:_ -> ok
+        end
+    end.
+
 %%--------------------------------------------------------------------
 %% Helpers
+
+%% The ETS gate the `slow' handler polls: `{go, false}' until the case
+%% opens it, plus an `entered' counter the cases wait on to know the
+%% handler is inside the call.
+
+-spec gate_on() -> ok.
+gate_on() ->
+    _ = ets:new(thrift_erl_drain_gate, [named_table, public, set]),
+    ets:insert(thrift_erl_drain_gate, {go, false}),
+    ok.
+
+-spec gate_off() -> ok.
+gate_off() ->
+    ets:delete(thrift_erl_drain_gate),
+    ok.
+
+-spec wait_gate_entered() -> ok.
+wait_gate_entered() ->
+    wait_gate_entered(500).
+
+wait_gate_entered(0) ->
+    erlang:error(handler_did_not_enter);
+wait_gate_entered(Tries) ->
+    case ets:lookup(thrift_erl_drain_gate, entered) of
+        [{entered, N}] when N >= 1 ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            wait_gate_entered(Tries - 1)
+    end.
 
 protocol_calls(Overrides) ->
     with_server(Overrides, fun(Client) ->

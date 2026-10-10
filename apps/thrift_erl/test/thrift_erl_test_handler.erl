@@ -25,7 +25,8 @@
     ping/0,
     boom/0,
     boomInternal/0,
-    notify/1
+    notify/1,
+    slow/0
 ]).
 
 -spec add(integer(), integer()) -> {ok, integer()}.
@@ -67,4 +68,27 @@ notify(M) ->
         Pid ->
             Pid ! {notified, M},
             ok
+    end.
+
+%% Blocks until the ETS gate `thrift_erl_drain_gate` says `go` (or the
+%% 10 s deadline passes, so a broken latch fails the case with a reply
+%% instead of hanging a connection). Lets drain tests hold an in-flight
+%% call for as long as they want.
+
+-spec slow() -> {ok, binary()}.
+slow() ->
+    Gate = thrift_erl_drain_gate,
+    ets:update_counter(Gate, entered, {2, 1}, {entered, 0}),
+    wait_gate(Gate, 100).
+
+-spec wait_gate(atom(), non_neg_integer()) -> {ok, binary()}.
+wait_gate(_Gate, 0) ->
+    {ok, <<"gave up">>};
+wait_gate(Gate, Tries) ->
+    case ets:lookup(Gate, go) of
+        [{go, true}] ->
+            {ok, <<"done">>};
+        _ ->
+            timer:sleep(20),
+            wait_gate(Gate, Tries - 1)
     end.

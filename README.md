@@ -162,6 +162,20 @@ ok = 'Ping_server':stop(Server).
   per-call timeouts ride the call itself; `connect_timeout` overrides
   the umbrella), `max_frame_size`, `active_n`.
 
+A plain `stop/1` takes the server down at once. `stop/2` with
+`#{drain => Timeout}` shuts down gracefully first: the listen socket
+closes, idle connections are dropped, and connections with an
+in-flight request answer it before exiting. The call returns when the
+last connection is gone — or at the deadline (`infinity` allowed; the
+deadline never fails the call, whatever it leaves over is then
+swept by the normal supervised stop, which lets a still-running
+exchange finish and fails the calls only of connections that cannot
+finish):
+
+```erlang
+ok = 'Ping_server':stop(Server, #{drain => 10_000}).
+```
+
 ## Representations and protocols
 
 Structs live in two independent axes. The **protocol** axis picks the
