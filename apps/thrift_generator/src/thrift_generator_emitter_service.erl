@@ -106,8 +106,11 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
     thrift_generator_emitter_syntax:header(HandlerMod, Mod#tg_module.path) ++
         thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [
-            %% Records here appear only in -callback spec types, which
-            %% the compiler does not count as usage.
+            %% Only parameter types reach the -callback specs (the reply
+            %% is hidden behind thrift_erl_service:handler_result(),
+            %% declared exceptions never appear there), so records
+            %% reachable only through replies or throws are unused as
+            %% far as the compiler can see.
             thrift_generator_emitter_syntax:nowarn_unused_record_form()
         ] ++
         Records ++
