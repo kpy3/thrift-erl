@@ -324,8 +324,13 @@ loader_namespace_prefix(Config) ->
             hrl := Hrl
         }
     ] = Sources,
-    ?assertMatch({match, _}, re:run(Src, <<"-record\\(demo_app2_point, \\{x\\}\\)\\.">>)),
-    ?assertMatch({match, _}, re:run(Hrl, <<"-type demo_app2_point\\(\\) :: #demo_app2_point\\{\\}\\.">>)),
+    ?assertMatch(
+        {match, _},
+        re:run(Src, <<"-record\\(demo_app2_point,\\{x :: integer\\(\\) \\| undefined\\}\\)\\.">>)
+    ),
+    %% the alias keeps the IDL name; the prefix lands on the record tag
+    ?assertMatch({match, _}, re:run(Src, <<"-type 'Point'\\(\\) :: #demo_app2_point\\{\\}\\.">>)),
+    ?assertMatch(nomatch, re:run(Hrl, <<"-type ">>)),
     ok.
 
 %% A namespace that normalizes to nothing is a load error, not a
@@ -473,7 +478,14 @@ generated_map_mode(Config) ->
         ),
     ?assertMatch(
         {match, _},
-        re:run(Hrl, <<"-record\\(mapmode_nest,\\{p :: map\\(\\), b :: map\\(\\)\\}\\)\\.">>)
+        re:run(
+            Hrl,
+            <<"-record\\(mapmode_nest,\\{p :: mapmode_types:'Point'\\(\\) \\| undefined,">>
+        )
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(Hrl, <<"b :: mapmode_types:'BinPoint'\\(\\) \\| undefined\\}\\)\\.">>)
     ),
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_point">>)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_binpoint">>)),

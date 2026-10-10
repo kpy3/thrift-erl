@@ -93,13 +93,16 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
     %% only those, so generated handlers compile warning-free even when
     %% the IDL declares many unused structs.
     Needed = service_struct_names(Svc, Mod),
-    Records = [
-        thrift_generator_emitter:record_form(S, Mod#tg_module.prefix)
+    %% Handler specs and record fields name types from the defining
+    %% types module — the handler declares no local types itself.
+    Ctx1 = Ctx#ectx{qualify = true},
+    Records = lists:append([
+        thrift_generator_emitter:record_form(S, Mod#tg_module.prefix, Ctx1)
      || S <- Mod#tg_module.structs,
-        thrift_generator_emitter:record_mode(S),
+        thrift_generator_emitter:has_record(S),
         lists:member(S#tg_struct.name, Needed)
-    ],
-    Callbacks = lists:append([callback_form(F, Ctx) || F <- Svc#tg_service.functions]),
+    ]),
+    Callbacks = lists:append([callback_form(F, Ctx1) || F <- Svc#tg_service.functions]),
     thrift_generator_emitter_syntax:header(HandlerMod, Mod#tg_module.path) ++
         thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [
