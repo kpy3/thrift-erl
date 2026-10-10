@@ -95,6 +95,12 @@ service_info() ->
                     {struct, [
                         {1, default, {base, string}, <<"m">>, undefined}
                     ]}}
+        },
+        <<"slow">> => #{
+            name => <<"slow">>,
+            oneway => false,
+            params => {struct, {struct, []}},
+            reply => {base, string}
         }
     }.
 

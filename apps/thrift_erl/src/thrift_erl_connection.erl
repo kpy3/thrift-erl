@@ -209,6 +209,12 @@ handle_cast(_Request, State) ->
 handle_info(go, #state{socket = Socket, active_n = ActiveN} = State) ->
     ok = thrift_erl_socket:set_active(Socket, ActiveN),
     {noreply, arm_idle_timer(State)};
+%% The acceptor drains: whatever is being processed right now finishes
+%% first (this message is only reached when the loop comes back), then
+%% the connection exits and closes the socket. Requests the peer sends
+%% after the drain began go with it.
+handle_info(drain, State) ->
+    {stop, normal, State};
 handle_info({tcp, Socket, Data}, #state{socket = {tcp, Socket}} = State) ->
     State1 = cancel_idle_timer(State),
     handle_stream(State1#state{buffer = <<(State#state.buffer)/binary, Data/binary>>});

@@ -44,7 +44,7 @@ Multiplexed (several services on one port, clients opt in with the
 
 -behaviour(supervisor).
 
--export([start_link/1, stop/1, port/1]).
+-export([start_link/1, stop/1, stop/2, port/1]).
 
 -export([init/1]).
 
@@ -61,6 +61,24 @@ start_link(Opts) ->
 -spec stop(pid() | atom()) -> ok.
 stop(Server) ->
     supervisor:stop(Server).
+
+-doc """
+Stops the server, optionally draining first.
+
+With `#{drain := Timeout}` the acceptor closes the listen socket, lets
+in-flight calls finish (up to `Timeout`; `infinity` allowed) and lets
+pending accepts unwind, then the supervision tree is stopped as by
+`stop/1` — whatever the deadline leaves over is terminated the normal
+supervised way, so a connection stuck past the deadline fails its
+calls. Without the key this is plain `stop/1`.
+""".
+-spec stop(pid() | atom(), #{drain => timeout()}) -> ok.
+stop(Server, #{drain := Timeout}) ->
+    Acceptor = whereis_acceptor(Server),
+    ok = thrift_erl_acceptor:drain(Acceptor, Timeout),
+    supervisor:stop(Server);
+stop(Server, _Opts) ->
+    stop(Server).
 
 -doc "Returns the bound port (useful with `port = 0`).".
 -spec port(pid() | atom()) -> {ok, inet:port_number()}.
