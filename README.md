@@ -30,6 +30,7 @@ rebar3 ct           # loopback scenarios + golden interop
 rebar3 dialyzer
 rebar3 xref
 rebar3 fmt
+scripts/lint-elp    # ELP static analysis gate (needs the elp binary)
 ./scripts/bench     # manual codec benchmark (not part of the suites)
 ```
 
