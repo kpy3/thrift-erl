@@ -160,11 +160,6 @@ types_forms(Mod, Ctx) ->
             thrift_generator_emitter_syntax:exports_forms(enum_helper_entries(Mod)) ++
             thrift_generator_emitter_syntax:exports_forms(const_entries(Mod)),
     thrift_generator_emitter_syntax:header(TypesMod, Mod#tg_module.path) ++
-        [
-            %% The types module declares every record for consumers;
-            %% introspection forms reference them by name, not usage.
-            thrift_generator_emitter_syntax:nowarn_unused_record_form()
-        ] ++
         Exports ++
         struct_type_forms(Mod, Ctx) ++
         struct_info_forms(Mod, Ctx) ++
