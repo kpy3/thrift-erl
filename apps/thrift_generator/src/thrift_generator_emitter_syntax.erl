@@ -281,8 +281,12 @@ wildcard() ->
 -spec abstract(term()) -> erl_syntax:syntaxTree().
 abstract(Term) when is_binary(Term) ->
     case printable(Term) of
-        true -> erl_syntax:binary([erl_syntax:binary_field(erl_syntax:string(unicode:characters_to_list(Term)))]);
-        false -> erl_syntax:abstract(Term)
+        true ->
+            erl_syntax:binary([
+                erl_syntax:binary_field(erl_syntax:string(unicode:characters_to_list(Term, utf8)))
+            ]);
+        false ->
+            erl_syntax:abstract(Term)
     end;
 abstract(Term) when is_tuple(Term) ->
     erl_syntax:tuple([abstract(Element) || Element <- tuple_to_list(Term)]);
@@ -296,13 +300,16 @@ abstract(Term) when is_map(Term) ->
 abstract(Term) ->
     erl_syntax:abstract(Term).
 
+%% Printable per the unicode range: UTF-8 text (Cyrillic doc strings,
+%% string constants) prints as `<<"текст">>', raw byte strings fall back
+%% to the byte-list form.
+
 -spec printable(binary()) -> boolean().
-printable(<<>>) ->
-    true;
-printable(<<C, Rest/binary>>) when C >= 32, C =< 126 ->
-    printable(Rest);
-printable(_) ->
-    false.
+printable(Bin) ->
+    case unicode:characters_to_list(Bin, utf8) of
+        Chars when is_list(Chars) -> io_lib:printable_unicode_list(Chars);
+        _ -> false
+    end.
 
 -spec map_field(atom(), erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
 map_field(Key, Value) ->
