@@ -365,7 +365,11 @@ after pooler:return_member(ping, Client, ok) end.
 `stop/1` answers outstanding calls with `{error, closed}` instead of
 leaving them hanging. Sockets run in `{active, N}` delivery mode, so a
 dead peer is noticed even on an idle connection. Calls are serialized
-per connection; concurrent callers queue in order.
+per connection; concurrent callers queue in order. Each worker also
+carries counters for pool health checks:
+`thrift_erl_client:get_stats/1` answers `#{calls_ok, calls_failed}`
+(every `{error, _}` answer counts failed, a declared exception
+included) and `get_and_reset_stats/1` zeroes them.
 
 ## Reconnecting client
 

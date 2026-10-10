@@ -41,7 +41,9 @@
     prefixed_name_to_plain_server/1,
     drain_waits_for_inflight_call/1,
     drain_deadline_expires/1,
-    drain_closes_listener_and_idle_connections/1
+    drain_closes_listener_and_idle_connections/1,
+    client_stats/1,
+    client_stats_queue_full/1
 ]).
 
 all() ->
@@ -64,7 +66,9 @@ all() ->
         prefixed_name_to_plain_server,
         drain_waits_for_inflight_call,
         drain_deadline_expires,
-        drain_closes_listener_and_idle_connections
+        drain_closes_listener_and_idle_connections,
+        client_stats,
+        client_stats_queue_full
     ].
 
 -define(SERVICE, thrift_erl_test_service).
@@ -448,6 +452,94 @@ drain_closes_listener_and_idle_connections(_Config) ->
         end
     end.
 
+%% Per-connection counters: every caller-facing answer is counted by
+%% outcome, and get_and_reset_stats zeroes them.
+
+client_stats(_Config) ->
+    with_server(#{}, fun(Client) ->
+        ?assertEqual(#{calls_ok => 0, calls_failed => 0}, thrift_erl_client:get_stats(Client)),
+        ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
+        ok = thrift_erl_client:oneway(Client, <<"notify">>, [<<"x">>], 5000),
+        ?assertEqual({error, unknown_function}, call(Client, <<"nope">>, [])),
+        ?assertEqual(
+            {error, {exception, <<"boom">>, #{<<"message">> => <<"as declared">>}}},
+            call(Client, <<"boom">>, [])
+        ),
+        ?assertEqual(#{calls_ok => 2, calls_failed => 2}, thrift_erl_client:get_stats(Client)),
+        ?assertEqual(
+            #{calls_ok => 2, calls_failed => 2}, thrift_erl_client:get_and_reset_stats(Client)
+        ),
+        ?assertEqual(#{calls_ok => 0, calls_failed => 0}, thrift_erl_client:get_stats(Client))
+    end).
+
+%% A call refused at the door (max_queue_depth) is a failed answer too;
+%% the two queued calls still complete once the head moves.
+
+client_stats_queue_full(_Config) ->
+    {module, ?HANDLER} = code:ensure_loaded(?HANDLER),
+    gate_on(),
+    {ok, Server} = thrift_erl_server:start_link(#{port => 0, handler => ?HANDLER, service => ?SERVICE}),
+    try
+        {ok, Port} = thrift_erl_server:port(Server),
+        {ok, Client} =
+            thrift_erl_client:start_link(#{
+                host => "127.0.0.1", port => Port, service => ?SERVICE, max_queue_depth => 1
+            }),
+        try
+            Self = self(),
+            spawn(fun() ->
+                Self !
+                    {r1,
+                        try
+                            call(Client, <<"slow">>, [])
+                        catch
+                            C:R -> {crashed, C, R}
+                        end}
+            end),
+            wait_gate_entered(),
+            spawn(fun() ->
+                Self !
+                    {r2,
+                        try
+                            call(Client, <<"slow">>, [])
+                        catch
+                            C:R -> {crashed, C, R}
+                        end}
+            end),
+            timer:sleep(200),
+            spawn(fun() ->
+                Self !
+                    {r3,
+                        try
+                            call(Client, <<"slow">>, [])
+                        catch
+                            C:R -> {crashed, C, R}
+                        end}
+            end),
+            timer:sleep(200),
+            ?assertEqual(#{calls_ok => 0, calls_failed => 1}, thrift_erl_client:get_stats(Client)),
+            ets:insert(thrift_erl_drain_gate, {go, true}),
+            Results = [recv(r1), recv(r2), recv(r3)],
+            ?assertEqual({ok, <<"done">>}, lists:nth(1, Results)),
+            ?assertEqual({ok, <<"done">>}, lists:nth(2, Results)),
+            ?assertEqual({error, queue_full}, lists:nth(3, Results)),
+            ?assertEqual(#{calls_ok => 2, calls_failed => 1}, thrift_erl_client:get_stats(Client))
+        after
+            try
+                thrift_erl_client:stop(Client)
+            catch
+                _:_ -> ok
+            end
+        end
+    after
+        try
+            thrift_erl_server:stop(Server)
+        catch
+            _:_ -> ok
+        end,
+        gate_off()
+    end.
+
 %%--------------------------------------------------------------------
 %% Helpers
 
@@ -479,6 +571,16 @@ wait_gate_entered(Tries) ->
         _ ->
             timer:sleep(10),
             wait_gate_entered(Tries - 1)
+    end.
+
+%% Waits for an unlinked worker's tagged result.
+
+-spec recv(atom()) -> term().
+recv(Tag) ->
+    receive
+        {Tag, Value} -> Value
+    after 5000 ->
+        erlang:error({no_result, Tag})
     end.
 
 protocol_calls(Overrides) ->
