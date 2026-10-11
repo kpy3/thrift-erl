@@ -261,6 +261,10 @@ literal(Term) when is_atom(Term) ->
     at(Term);
 literal(Term) when is_binary(Term) ->
     bin_lit(Term);
+literal(Term) when is_integer(Term) ->
+    i(Term);
+literal(Term) when is_list(Term) ->
+    list_lit([literal(Element) || Element <- Term]);
 literal(Term) when is_tuple(Term) ->
     tuple_t([literal(Element) || Element <- tuple_to_list(Term)]).
 
