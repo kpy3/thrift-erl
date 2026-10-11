@@ -43,10 +43,15 @@
 %% vocabulary is shared): inline `{struct, {Kind, Fields}}` descriptors
 %% are memoized per process under exact equality, `{struct, {ref, M,
 %% N}}` schemas resolve through `M:struct_info/1` into a
-%% `persistent_term` cache. Decoding is strict — declared fields whose
-%% type tag disagrees with the descriptor are rejected, unknown fields
-%% are skipped by their wire tag, required fields must be present,
-%% trailing bytes answer `{error, trailing}`.
+%% `persistent_term` cache. Generated types modules also probe their
+%% specialized `json_codec/1` pair — the encode side everywhere, the
+%% decode side carries the non-folding struct body and the bracket
+%% fold is applied by whichever top-level entry calls it (`decode/2`,
+%% never {@link decode_nested/2}). Decoding is
+%% strict — declared fields whose type tag disagrees with the
+%% descriptor are rejected, unknown fields are skipped by their wire
+%% tag, required fields must be present, trailing bytes answer
+%% `{error, trailing}`.
 
 -module(thrift_erl_json).
 
@@ -55,10 +60,12 @@
 -export([
     encode/2,
     decode/2,
+    decode_nested/2,
     encode_message/4,
     decode_message/1,
     encode_application_exception/2,
-    decode_application_exception/1
+    decode_application_exception/1,
+    skip_by_tag/2
 ]).
 
 -export_type([j_type/0, j_struct/0, decode_result/1]).
@@ -118,12 +125,19 @@ after the struct proper (see the moduledoc).
 """.
 -spec decode(thrift_erl_binary:type_desc(), binary()) -> decode_result(term()).
 decode({struct, {ref, Module, Name}}, Bin) ->
-    case resolve_compiled(Module, Name) of
-        {ok, Compiled} ->
-            %% Top level: the envelope's closing bracket is folded in.
-            decode_struct_top(Compiled, Bin);
-        {error, _} = Error ->
-            Error
+    case json_codec(Module, Name) of
+        {ok, _Encode, Decode} ->
+            %% The generated pair decodes the struct proper; the
+            %% envelope's closing bracket folds here, exactly like
+            %% decode_struct_top below.
+            fold_bracket(Decode(Bin));
+        error ->
+            case resolve_compiled(Module, Name) of
+                {ok, Compiled} ->
+                    decode_struct_top(Compiled, Bin);
+                {error, _} = Error ->
+                    Error
+            end
     end;
 decode({struct, {Kind, Fields}}, Bin) when is_atom(Kind), is_list(Fields) ->
     decode_struct_top(memo_compiled(Kind, Fields), Bin);
@@ -136,6 +150,28 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
     end;
 decode(_TypeDesc, _Bin) ->
     more.
+
+-doc """
+Non-folding struct decode for refs nested inside containers and struct
+fields: probes the generated JSON codec pair and falls back to the
+generic nested decode.
+
+The envelope's closing `]` is NOT consumed — only the top-level
+`decode/2` entry points fold it (see the moduledoc).
+""".
+-spec decode_nested(thrift_erl_binary:type_desc(), binary()) -> decode_result(term()).
+decode_nested({struct, {ref, Module, Name}}, Bin) ->
+    case json_codec(Module, Name) of
+        {ok, _Encode, Decode} ->
+            Decode(Bin);
+        error ->
+            case resolve_compiled(Module, Name) of
+                {ok, Compiled} ->
+                    decode_struct_j(Compiled, Bin);
+                {error, _} = Error ->
+                    Error
+            end
+    end.
 
 -doc """
 Encodes a message envelope around `Payload` (already encoded as a
@@ -443,12 +479,13 @@ all_present(Names, Map) ->
 %% (see the moduledoc); nested struct decodes never see one.
 -spec decode_struct_top(j_struct(), binary()) -> decode_result(struct_value()).
 decode_struct_top(Compiled, Bin) ->
-    case decode_struct_j(Compiled, Bin) of
-        {ok, Map, <<"]", Rest/binary>>} ->
-            {ok, Map, Rest};
-        Other ->
-            Other
-    end.
+    fold_bracket(decode_struct_j(Compiled, Bin)).
+
+-spec fold_bracket(decode_result(struct_value())) -> decode_result(struct_value()).
+fold_bracket({ok, Map, <<"]", Rest/binary>>}) ->
+    {ok, Map, Rest};
+fold_bracket(Other) ->
+    Other.
 
 -spec decode_struct_j(j_struct(), binary()) -> decode_result(struct_value()).
 decode_struct_j(#{by_id := ById, required := Required}, Bin) ->
@@ -872,6 +909,13 @@ message_type(_) ->
 %% Skipping unknown values by wire tag
 %%--------------------------------------------------------------------
 
+-doc """
+Skips one JSON value of wire tag `Tag` (e.g. `<<"i32">>`, `<<"lst">>`)
+at the front of `Binary`; the rest comes back, `more` marks a valid but
+truncated input. Exported for generated JSON codecs: their decode loops
+skip unknown struct fields through this function, keeping
+skip-on-unknown-field semantics in one place.
+""".
 -spec skip_by_tag(binary(), binary()) -> {ok, binary()} | more | {error, term()}.
 skip_by_tag(<<"tf">>, Bin) ->
     case skip_ws(Bin) of
@@ -1273,14 +1317,22 @@ resolve_struct(Module, Name) ->
     thrift_erl_protocol:resolve_struct(?MODULE, Module, Name, fun compile_struct/2).
 
 %% The shared resolve-then-encode shape of the top-level ref entry and
-%% the nested `j_ref' encoding.
+%% the nested `j_ref' encoding. A generated module's specialized JSON
+%% codec (found through the `json_codec/1' probe) takes precedence over
+%% the compiled-scheme interpreter; JSON encode has no envelope-fold
+%% asymmetry, so the same pair serves top-level and nested refs.
 -spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
 encode_resolved(Module, Name, Value) ->
-    case resolve_struct(Module, Name) of
-        {ok, Compiled} ->
-            encode_struct_j(Compiled, Value);
+    case json_codec(Module, Name) of
+        {ok, Encode, _Decode} ->
+            Encode(Value);
         error ->
-            {error, {encode, {unknown_struct, {Module, Name}}}}
+            case resolve_struct(Module, Name) of
+                {ok, Compiled} ->
+                    encode_struct_j(Compiled, Value);
+                error ->
+                    {error, {encode, {unknown_struct, {Module, Name}}}}
+            end
     end.
 
 %% The decode counterpart; callers pick the fold or no-fold struct
@@ -1292,6 +1344,63 @@ resolve_compiled(Module, Name) ->
             {ok, Compiled};
         error ->
             {error, {decode, {unknown_struct, {Module, Name}}}}
+    end.
+
+%% The specialized-codec probe: generated types modules export
+%% `json_codec/1` handing out their per-struct wire function pairs. The
+%% persistent_term cache stores only whether the module exports the
+%% lookup — the funs themselves come fresh from the module on every
+%% call, so reloading a types module (as the test suite does) never
+%% leaves a fun from a purged version in the cache. The export fact is
+%% still cached once, so a module without the export pays the probe
+%% once. Version drift between a cached export and the current module
+%% remains the documented no-hot-swap scenario (see the moduledoc).
+%% The decode fun of a pair folds the envelope's closing `]` — nested
+%% refs therefore stay on the generic engine (see the moduledoc).
+
+-spec json_codec(module(), binary()) -> {ok, fun(), fun()} | error.
+json_codec(Module, Name) ->
+    Key = {?MODULE, codec_export, Module},
+    case persistent_term:get(Key, probe) of
+        yes ->
+            case probe_codec(Module, Name) of
+                {ok, _, _} = Found ->
+                    Found;
+                none ->
+                    error
+            end;
+        no ->
+            error;
+        probe ->
+            Found = probe_codec(Module, Name),
+            persistent_term:put(
+                Key,
+                case Found of
+                    {ok, _, _} -> yes;
+                    none -> no
+                end
+            ),
+            case Found of
+                {ok, _, _} -> Found;
+                none -> error
+            end
+    end.
+
+-spec probe_codec(module(), binary()) -> {ok, fun(), fun()} | none.
+probe_codec(Module, Name) ->
+    Loaded =
+        case code:ensure_loaded(Module) of
+            {module, Module} -> true;
+            {error, _} -> false
+        end,
+    case Loaded andalso erlang:function_exported(Module, json_codec, 1) of
+        true ->
+            case Module:json_codec(Name) of
+                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
+                error -> none
+            end;
+        false ->
+            none
     end.
 
 %% Inline `{Kind, Fields}` descriptors (params structs of

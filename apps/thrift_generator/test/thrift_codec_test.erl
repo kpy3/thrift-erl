@@ -16,16 +16,18 @@
 
 -moduledoc """
 Equivalence properties and the negative battery for the specialized
-binary and compact wire codecs the generator emits into types modules.
+binary, compact and JSON wire codecs the generator emits into types
+modules.
 
 The specialized entry (`{struct, {ref, Module, Name}}` descriptors,
-dispatched through the module's `binary_codec/1` / `compact_codec/1`)
-must behave exactly like the generic engine (`{struct, {Kind, Fields}}`
-inline descriptors interpreted by `thrift_erl_binary` /
-`thrift_erl_compact`): identical bytes, identical values and identical
-error terms. The generic side is itself proven by the golden-byte tests
-and the golden interop suite, so equivalence here makes the specialized
-code transitively correct.
+dispatched through the module's `binary_codec/1` / `compact_codec/1` /
+`json_codec/1`) must behave exactly like the generic engine
+(`{struct, {Kind, Fields}}` inline descriptors interpreted by
+`thrift_erl_binary` / `thrift_erl_compact` / `thrift_erl_json`):
+identical bytes, identical values and identical error terms. The
+generic side is itself proven by the golden-byte tests and the golden
+interop suite, so equivalence here makes the specialized code
+transitively correct.
 """.
 
 -include_lib("proper/include/proper.hrl").
@@ -88,7 +90,11 @@ proper_test_() ->
         {"specialized compact codecs match the generic engine (PropEr)",
             {timeout, 300, fun() -> check(prop_compact_matches_generic()) end}},
         {"specialized compact prefixes never complete (PropEr)",
-            {timeout, 300, fun() -> check(prop_compact_prefix_never_completes()) end}}
+            {timeout, 300, fun() -> check(prop_compact_prefix_never_completes()) end}},
+        {"specialized json codecs match the generic engine (PropEr)",
+            {timeout, 300, fun() -> check(prop_json_matches_generic()) end}},
+        {"specialized json prefixes never complete (PropEr)",
+            {timeout, 300, fun() -> check(prop_json_prefix_never_completes()) end}}
     ].
 
 %% Silent success; on failure re-run with output so the shrunk
@@ -153,12 +159,32 @@ prop_matches_generic(Engine) ->
 %% the truncation semantics the buffered transport builds on.
 
 prop_wire_prefix_never_completes() ->
-    prop_prefix_never_completes(thrift_erl_binary, fun goldentest_types:binary_codec/1).
+    prop_prefix_never_completes(thrift_erl_binary, fun goldentest_types:binary_codec/1, fun not_more/1).
 
 prop_compact_prefix_never_completes() ->
-    prop_prefix_never_completes(thrift_erl_compact, fun goldentest_types:compact_codec/1).
+    prop_prefix_never_completes(
+        thrift_erl_compact, fun goldentest_types:compact_codec/1, fun not_more/1
+    ).
 
-prop_prefix_never_completes(Engine, Codec) ->
+prop_json_matches_generic() ->
+    prop_matches_generic(thrift_erl_json).
+
+prop_json_prefix_never_completes() ->
+    %% Unlike binary/compact, a JSON prefix cut inside a literal (`tru')
+    %% errors in the generic engine too — the broken answer is a
+    %% completed decode, not a non-`more' one.
+    prop_prefix_never_completes(thrift_erl_json, fun goldentest_types:json_codec/1, fun completed/1).
+
+not_more(Answer) ->
+    Answer =/= more.
+
+completed(Answer) ->
+    case Answer of
+        {ok, _, _} -> true;
+        _ -> false
+    end.
+
+prop_prefix_never_completes(Engine, Codec, Broken) ->
     ?FORALL(
         {Name, Value},
         ?LET(Name, oneof(?STRUCTS), {Name, wire_value_gen(Name)}),
@@ -167,7 +193,7 @@ prop_prefix_never_completes(Engine, Codec) ->
             case Engine:encode(Ref, Value) of
                 {ok, IoData} ->
                     Bytes = iolist_to_binary(IoData),
-                    broken_prefixes(Codec(Name), Bytes) =:= [];
+                    broken_prefixes(Codec(Name), Bytes, Broken) =:= [];
                 _Other ->
                     %% Invalid values never produce bytes to prefix.
                     true
@@ -176,14 +202,14 @@ prop_prefix_never_completes(Engine, Codec) ->
     ).
 
 %% The prefixes of `Bytes' that the struct's specialized decode answers
-%% with something other than `more' — the property wants none.
+%% with a broken value (per `Broken') — the property wants none.
 
-broken_prefixes({ok, {_Encode, Decode}}, Bytes) ->
+broken_prefixes({ok, {_Encode, Decode}}, Bytes, Broken) ->
     [
         binary:part(Bytes, 0, N)
      || N <- lists:seq(1, byte_size(Bytes) - 1),
         P <- [binary:part(Bytes, 0, N)],
-        Decode(P) =/= more
+        Broken(Decode(P))
     ].
 
 %%--------------------------------------------------------------------
@@ -515,6 +541,215 @@ uuid_compact_battery_test() ->
     ),
     ok.
 
+%% JSON protocol: hand-computed wire documents checked against the
+%% generic engine on both sides, plus the envelope-bracket rules — the
+%% top-level decode folds one optional `]', the nested entry
+%% (decode_nested/2, what generated cross-module refs call) never does.
+
+json_negative_battery_test() ->
+    ok = load_fixture(),
+    Inline = fun(Name) -> {struct, goldentest_types:struct_info(Name)} end,
+    Ref = fun(Name) -> {struct, {ref, goldentest_types, Name}} end,
+    Enc = fun(Desc, Value) -> normalize(thrift_erl_json:encode(Desc, Value)) end,
+    Dec = fun(Name, Doc) ->
+        {thrift_erl_json:decode(Inline(Name), Doc), thrift_erl_json:decode(Ref(Name), Doc)}
+    end,
+
+    %% Missing required fields: declaration order on encode, ascending
+    %% field-id order on decode (CrazyNesting's list_field, StructB's ab).
+    Crazy = <<"CrazyNesting">>,
+    MissingValue = #{<<"string_field">> => <<"x">>, <<"binary_field">> => <<"b">>},
+    MissingError = {error, {encode, {missing_required_fields, [<<"list_field">>]}}},
+    ?assertEqual(
+        {MissingError, MissingError},
+        {Enc(Inline(Crazy), MissingValue), Enc(Ref(Crazy), MissingValue)}
+    ),
+    ?assertEqual(
+        {
+            {error, {decode, {missing_required_fields, [<<"ab">>]}}},
+            {error, {decode, {missing_required_fields, [<<"ab">>]}}}
+        },
+        Dec(<<"StructB">>, <<"{}">>)
+    ),
+
+    %% Known id with the wrong type tag: field_type_mismatch.
+    ?assertEqual(
+        {{error, {decode, {field_type_mismatch, 4}}}, {error, {decode, {field_type_mismatch, 4}}}},
+        Dec(<<"Xtruct">>, <<"{\"4\":{\"i32\":1}}">>)
+    ),
+
+    %% Unknown field ids are skipped by their wire tag.
+    SkipDoc = <<"{\"99\":{\"i64\":1},\"1\":{\"str\":\"a\"}}">>,
+    ExpectedSkip = {ok, #{<<"string_thing">> => <<"a">>}, <<>>},
+    ?assertEqual({ExpectedSkip, ExpectedSkip}, Dec(<<"Xtruct">>, SkipDoc)),
+
+    %% The envelope bracket: the top-level decode folds one optional
+    %% `]' (message payloads), decode_nested/2 never does.
+    Folded = <<"{\"1\":{\"str\":\"a\"}}]">>,
+    ?assertEqual(
+        {{ok, #{<<"string_thing">> => <<"a">>}, <<>>}, {ok, #{<<"string_thing">> => <<"a">>}, <<>>}},
+        Dec(<<"Xtruct">>, Folded)
+    ),
+    ?assertEqual(
+        {ok, #{<<"string_thing">> => <<"a">>}, <<"]">>},
+        thrift_erl_json:decode_nested(Ref(<<"Xtruct">>), Folded)
+    ),
+    Trailing = <<"{\"1\":{\"str\":\"a\"}}x">>,
+    ?assertEqual(
+        {{ok, #{<<"string_thing">> => <<"a">>}, <<"x">>}, {ok, #{<<"string_thing">> => <<"a">>}, <<"x">>}},
+        Dec(<<"Xtruct">>, Trailing)
+    ),
+
+    %% Container headers: element mismatches carry the observed tag
+    %% (binary), float sizes are bad_sequence_size, unsupported key
+    %% texts are bad_map_key, non-numbers are bad_number.
+    ?assertEqual(
+        {{error, {decode, {element_type_mismatch, <<"i64">>}}}, {error, {decode, {element_type_mismatch, <<"i64">>}}}},
+        Dec(<<"Insanity">>, <<"{\"1\":{\"map\":[\"i64\",\"i64\",1,{\"1\":2}]}}">>)
+    ),
+    ?assertEqual(
+        {{error, {decode, {element_type_mismatch, <<"i32">>}}}, {error, {decode, {element_type_mismatch, <<"i32">>}}}},
+        Dec(<<"Insanity">>, <<"{\"2\":{\"lst\":[\"i32\",1,1]}}">>)
+    ),
+    ?assertEqual(
+        {{error, {decode, bad_sequence_size}}, {error, {decode, bad_sequence_size}}},
+        Dec(<<"Insanity">>, <<"{\"2\":{\"lst\":[\"rec\",1.5,2]}}">>)
+    ),
+    ?assertEqual(
+        {{error, {decode, bad_map_key}}, {error, {decode, bad_map_key}}},
+        Dec(<<"VersioningTestV2">>, <<"{\"10\":{\"map\":[\"i32\",\"i32\",1,{\"x\":5}]}}">>)
+    ),
+    ?assertEqual(
+        {{error, {decode, bad_number}}, {error, {decode, bad_number}}},
+        Dec(<<"Xtruct">>, <<"{\"4\":{\"i8\":true}}">>)
+    ),
+
+    %% Distinct map keys whose JSON texts collide (the enum atom 'ONE'
+    %% and the integer 1 both write "1") are refused on encode.
+    DuplicateKeys = #{<<"userMap">> => #{'ONE' => 2, 1 => 3}, <<"xtructs">> => []},
+    DuplicateError = {error, {encode, duplicate_json_keys}},
+    ?assertEqual(
+        {DuplicateError, DuplicateError},
+        {Enc(Inline(<<"Insanity">>), DuplicateKeys), Enc(Ref(<<"Insanity">>), DuplicateKeys)}
+    ),
+
+    %% Union rules and wrong value shapes, document for document generic.
+    {union, UnionFields} = goldentest_types:struct_info(<<"SomeUnion">>),
+    [N1, N2 | _] = [FieldName || {_, _, _, FieldName, _} <- UnionFields],
+    ?assertEqual(
+        {{error, {encode, union_empty}}, {error, {encode, union_empty}}},
+        {Enc(Inline(<<"SomeUnion">>), #{}), Enc(Ref(<<"SomeUnion">>), #{})}
+    ),
+    UnionMultiple = #{N1 => true, N2 => <<"x">>},
+    ?assertEqual(
+        {{error, {encode, union_multiple}}, {error, {encode, union_multiple}}},
+        {Enc(Inline(<<"SomeUnion">>), UnionMultiple), Enc(Ref(<<"SomeUnion">>), UnionMultiple)}
+    ),
+    BadScalar = #{<<"byte_thing">> => 200},
+    ?assertEqual(
+        {
+            {error, {encode, {value_does_not_match_type, 200}}},
+            {error, {encode, {value_does_not_match_type, 200}}}
+        },
+        {Enc(Inline(<<"Xtruct">>), BadScalar), Enc(Ref(<<"Xtruct">>), BadScalar)}
+    ),
+    ok.
+
+%% The uuid fixture through the JSON protocol: like compact, every path
+%% through a uuid type must fail exactly like the generic engine — a
+%% uuid-keyed map is refused whole (even empty), while a uuid-valued
+%% map and a uuid-element list keep their machinery and fail per pair
+%% or per element.
+
+uuid_json_battery_test() ->
+    ok = load_uuid_fixture(),
+    Inline = fun(Name) -> {struct, compactuuid_types:struct_info(Name)} end,
+    Ref = fun(Name) -> {struct, {ref, compactuuid_types, Name}} end,
+    Enc = fun(Desc, Value) -> normalize(thrift_erl_json:encode(Desc, Value)) end,
+    Dec = fun(Name, Doc) ->
+        {thrift_erl_json:decode(Inline(Name), Doc), thrift_erl_json:decode(Ref(Name), Doc)}
+    end,
+    UuidError = {error, {encode, {type_not_supported, {base, uuid}, json}}},
+
+    %% Any present uuid field fails the whole encode.
+    ?assertEqual(
+        {UuidError, UuidError},
+        {Enc(Inline(<<"UuidBox">>), #{<<"id">> => <<1:128>>}), Enc(Ref(<<"UuidBox">>), #{<<"id">> => <<1:128>>})}
+    ),
+    ?assertEqual(
+        {UuidError, UuidError},
+        {
+            Enc(Inline(<<"UuidBox">>), #{<<"history">> => [<<1:128>>]}),
+            Enc(Ref(<<"UuidBox">>), #{<<"history">> => [<<1:128>>]})
+        }
+    ),
+    ?assertEqual(
+        {UuidError, UuidError},
+        {
+            Enc(Inline(<<"UuidBox">>), #{<<"tags_rev">> => #{1 => <<1:128>>}}),
+            Enc(Ref(<<"UuidBox">>), #{<<"tags_rev">> => #{1 => <<1:128>>}})
+        }
+    ),
+
+    %% A uuid-KEYED map is refused whole — even the empty map compiles
+    %% to j_unsupported and carries the map descriptor in the error.
+    MapError = {error, {encode, {type_not_supported, {map, {base, uuid}, {base, i32}}, json}}},
+    ?assertEqual(
+        {MapError, MapError},
+        {
+            Enc(Inline(<<"UuidBox">>), #{<<"tags">> => #{}}),
+            Enc(Ref(<<"UuidBox">>), #{<<"tags">> => #{}})
+        }
+    ),
+
+    %% The uuid-free shape encodes: empty uuid-element list header with
+    %% the empty tag, empty uuid-valued map with the empty value tag.
+    UuidFree = #{<<"history">> => [], <<"tags_rev">> => #{}},
+    {ok, UuidFreeIo} = thrift_erl_json:encode(Inline(<<"UuidBox">>), UuidFree),
+    UuidFreeDoc = iolist_to_binary(UuidFreeIo),
+    ?assertEqual(
+        {{ok, UuidFreeDoc}, {ok, UuidFreeDoc}},
+        {Enc(Inline(<<"UuidBox">>), UuidFree), Enc(Ref(<<"UuidBox">>), UuidFree)}
+    ),
+
+    %% A declared uuid field matches only the empty tag; any real tag is
+    %% a field_type_mismatch before the uuid error can fire.
+    UuidTypeError = {error, {decode, {type_not_supported, {base, uuid}, json}}},
+    ?assertEqual(
+        {{ok, #{<<"history">> => []}, <<>>}, {ok, #{<<"history">> => []}, <<>>}},
+        Dec(<<"UuidBox">>, <<"{\"3\":{\"lst\":[\"\",0]}}">>)
+    ),
+    ?assertEqual(
+        {UuidTypeError, UuidTypeError},
+        Dec(<<"UuidBox">>, <<"{\"3\":{\"lst\":[\"\",1,{\"\":{}}}]}}">>)
+    ),
+    ?assertEqual(
+        {UuidTypeError, UuidTypeError},
+        Dec(<<"UuidBox">>, <<"{\"1\":{\"\":{}}}">>)
+    ),
+    ?assertEqual(
+        {{error, {decode, {field_type_mismatch, 1}}}, {error, {decode, {field_type_mismatch, 1}}}},
+        Dec(<<"UuidBox">>, <<"{\"1\":{\"str\":\"x\"}}">>)
+    ),
+
+    %% The uuid-keyed map's empty tag matches its header, then the whole
+    %% value is refused; an empty uuid-VALUED map decodes fine and a
+    %% pair fails on the uuid value.
+    UuidMapError = {error, {decode, {type_not_supported, {map, {base, uuid}, {base, i32}}, json}}},
+    ?assertEqual(
+        {UuidMapError, UuidMapError},
+        Dec(<<"UuidBox">>, <<"{\"4\":{\"\":[\"\",\"i32\",0,{}]}}">>)
+    ),
+    ?assertEqual(
+        {{ok, #{<<"tags_rev">> => #{}}, <<>>}, {ok, #{<<"tags_rev">> => #{}}, <<>>}},
+        Dec(<<"UuidBox">>, <<"{\"5\":{\"map\":[\"i32\",\"\",0,{}]}}">>)
+    ),
+    ?assertEqual(
+        {UuidTypeError, UuidTypeError},
+        Dec(<<"UuidBox">>, <<"{\"5\":{\"map\":[\"i32\",\"\",1,{\"1\":{\"\":{}}}]}}">>)
+    ),
+    ok.
+
 %% For every deep struct: a full value (every field present), a partial
 %% one (first field only) and an empty map — the specialized and generic
 %% codecs must agree on bytes, decoded values and errors alike.
@@ -534,14 +769,16 @@ deep_struct_case(Name) ->
     lists:foreach(
         fun(Value) ->
             deep_struct_case_one(Name, Value, thrift_erl_binary, fun goldentest_types:binary_codec/1),
-            deep_struct_case_one(Name, Value, thrift_erl_compact, fun goldentest_types:compact_codec/1)
+            deep_struct_case_one(Name, Value, thrift_erl_compact, fun goldentest_types:compact_codec/1),
+            deep_struct_case_one(Name, Value, thrift_erl_json, fun goldentest_types:json_codec/1)
         end,
         Values
     ).
 
 %% For one value and protocol: the specialized and generic codecs must
 %% agree on bytes, decoded values and errors alike, and every proper
-%% prefix of a successful encoding asks for more.
+%% prefix of a successful encoding asks for more (binary/compact) or at
+%% least never completes (json — a cut inside a literal errors there).
 
 deep_struct_case_one(Name, Value, Engine, Codec) ->
     Inline = {struct, goldentest_types:struct_info(Name)},
@@ -555,10 +792,16 @@ deep_struct_case_one(Name, Value, Engine, Codec) ->
                 Engine:decode(Inline, Bytes),
                 Engine:decode(Ref, Bytes)
             ),
-            %% Every proper prefix asks for more.
+            %% Every proper prefix stays incomplete.
             {ok, {_Encode, Decode}} = Codec(Name),
             lists:foreach(
-                fun(Prefix) -> ?assertEqual(more, Decode(Prefix)) end,
+                fun(Prefix) ->
+                    case Decode(Prefix) of
+                        more -> ok;
+                        {error, _} when Engine =:= thrift_erl_json -> ok;
+                        Other -> ?assertEqual(more, Other)
+                    end
+                end,
                 [binary:part(Bytes, 0, N) || N <- lists:seq(1, byte_size(Bytes) - 1)]
             );
         _ ->
@@ -617,10 +860,12 @@ field_sample({struct, {ref, Module, Name}}) ->
 
 unknown_name_test() ->
     ok = load_fixture(),
-    %% binary_codec and compact_codec answer error for unknown names,
-    %% and the ref paths fall back to the generic unknown_struct report.
+    %% binary_codec, compact_codec and json_codec answer error for
+    %% unknown names, and the ref paths fall back to the generic
+    %% unknown_struct report.
     ?assertEqual(error, goldentest_types:binary_codec(<<"Nope">>)),
     ?assertEqual(error, goldentest_types:compact_codec(<<"Nope">>)),
+    ?assertEqual(error, goldentest_types:json_codec(<<"Nope">>)),
     ?assertEqual(
         {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
         thrift_erl_binary:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
@@ -628,6 +873,10 @@ unknown_name_test() ->
     ?assertEqual(
         {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
         thrift_erl_compact:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
+    ),
+    ?assertEqual(
+        {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
+        thrift_erl_json:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<"{}">>)
     ),
     ok.
 
