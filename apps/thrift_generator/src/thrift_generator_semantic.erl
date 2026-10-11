@@ -914,6 +914,10 @@ analyze_functions(Nodes, Ctx) ->
 validate_throws(Fields, Line, Ctx) ->
     lists:foldl(
         fun
+            %% Apache Thrift rejects `required` in a throws clause
+            %% (0.18, THRIFT-5669): the flag has no wire meaning there.
+            (#tg_field{name = Name, required = required}, C) ->
+                err(Line, "throw field ~ts cannot be required", [Name], C);
             (#tg_field{type = {ref, Ref, _}}, C) ->
                 case resolve_type_ref(Ref, C) of
                     {ok, {_, _, exception}} ->
