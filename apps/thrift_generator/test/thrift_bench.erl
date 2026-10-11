@@ -19,10 +19,13 @@ Manual codec-level benchmark of the protocol implementations in the
 repository, measured with erlperf and driven from the same ThriftTest
 fixture as the golden interop suite:
 
-- **ours (binary)** — `thrift_erl_binary` over the introspection
-  descriptors of the in-memory generated `goldentest_types` module;
-- **ours (compact)** — `thrift_erl_compact` over the same descriptors;
-- **ours (json)** — `thrift_erl_json` over the same descriptors;
+- **ours (binary)** — `thrift_erl_binary` over the ref descriptors of
+  the in-memory generated `goldentest_types` module, which engages the
+  specialized per-struct wire codecs (the path generated code takes);
+- **ours (compact)** — `thrift_erl_compact` over the same ref
+  descriptors and its specialized codecs;
+- **ours (json)** — `thrift_erl_json` over the same ref descriptors
+  and its specialized codecs;
 - **reference (binary)** — the vendored Apache Thrift 0.25.0 Erlang
   runtime (`thrift_binary_protocol` over `thrift_membuffer_transport`)
   with the committed officially generated `thrift_test_types`;
@@ -30,16 +33,24 @@ fixture as the golden interop suite:
   `thrift_compact_protocol`;
 - **reference (json)** — the same runtime's `thrift_json_protocol`.
 
-Each case first proves the codecs agree: our bytes must decode back
-through the official reader of the same protocol into the expected
-record (both directions of wire compatibility, one per protocol), and
-each of the four codecs must round-trip its own encoding. Only then
-are encode and decode benchmarked separately, in erlperf continuous
-mode: one discarded warmup sample followed by three 500 ms samples,
-concurrency 1; the reported number is erlperf's average iterations per
-second with the sample stddev. Encode numbers measure the write cost
-only — the official membuffer transport keeps its bytes private,
-identically for both protocols.
+Each case first proves the codecs agree: the specialized and the
+generic encoding of the same value must be byte-identical, our bytes
+must decode back through the official reader of the same protocol into
+the expected record (both directions of wire compatibility, one per
+protocol), and each of the six codec paths must round-trip its own
+encoding. Only then are encode and decode benchmarked separately, in
+erlperf continuous mode: one discarded warmup sample followed by three
+500 ms samples, concurrency 1; the reported number is erlperf's
+average iterations per second with the sample stddev.
+
+The report has two blocks. The `ours` vs `reference` rows measure the
+specialized path against the official runtime. The trailing `generic
+vs specialized` rows isolate the codec-emission axis inside our own
+runtime: the same protocol engine over an inline descriptor (always
+the generic interpreter, with its per-process schema memo) against the
+ref descriptor (the specialized codec probe). Encode numbers measure
+the write cost only — the official membuffer transport keeps its bytes
+private, identically for both protocols.
 
 This is a hand-run script, not a test: run it with `scripts/bench` (or
 `erl -pa _build/test/lib/*/ebin -run thrift_bench main`). Knobs come
@@ -48,7 +59,7 @@ from the environment: `BENCH_WARMUP` (default 1), `BENCH_SAMPLES`
 a fresh membuffer transport and protocol per operation — that API has
 no way to decode a bare binary, so the construction is part of its
 codec cost. The official JSON reader primes on a whole message array,
-so the JSON decode row measures `decode_message` + struct decode on
+so the JSON decode rows measure `decode_message` + struct decode on
 our side and `read(message_begin)` + struct read on the reference
 side; the encode rows stay at bare-struct level like every protocol.
 Throughput is hardware-dependent; only the speedup ratios between the
@@ -152,45 +163,70 @@ insanity() ->
 run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     #{our_value := OurValue, official_value := OfficialValue, official_check := Check} = Spec,
     Desc = {struct, goldentest_types:struct_info(Name)},
-    %% The binary side measures the specialized wire codecs: the ref
-    %% descriptor engages thrift_erl_binary's binary_codec/1 probe.
-    %% Compact and json have no specialized codecs and stay on the
-    %% generic descriptor path.
+    %% The ref descriptor engages the per-protocol codec probe
+    %% (`binary_codec/1' and friends), so these encode through the
+    %% specialized codecs — the path generated code takes. The inline
+    %% `Desc' is always the generic interpreter.
     BinDesc = {struct, {ref, goldentest_types, Name}},
     {ok, Encoded} = thrift_erl_binary:encode(BinDesc, OurValue),
     BinaryWire = iolist_to_binary(Encoded),
-    {ok, CompactEncoded} = thrift_erl_compact:encode(Desc, OurValue),
+    {ok, CompactEncoded} = thrift_erl_compact:encode(BinDesc, OurValue),
     CompactWire = iolist_to_binary(CompactEncoded),
-    {ok, JsonEncoded} = thrift_erl_json:encode(Desc, OurValue),
+    {ok, JsonEncoded} = thrift_erl_json:encode(BinDesc, OurValue),
     JsonWire = iolist_to_binary(JsonEncoded),
     %% The official JSON reader's unit is the message array (it primes
     %% its parser on `read(message_begin)'), so the JSON decode side is
     %% measured at message level for both implementations.
     JsonMessage = iolist_to_binary(thrift_erl_json:encode_message(call, <<"bench">>, 0, JsonWire)),
 
-    %% Correctness before timing. Each codec round-trips its own
-    %% encoding, and the official reader of each protocol must accept
-    %% our bytes for that protocol — the same wire-compatibility proof
-    %% the golden suite runs over TCP, here at the codec level.
+    %% Correctness before timing. The specialized and generic paths of
+    %% the same protocol must produce identical bytes, every codec path
+    %% round-trips its own encoding, and the official reader of each
+    %% protocol must accept our bytes for that protocol — the same
+    %% wire-compatibility proof the golden suite runs over TCP, here at
+    %% the codec level.
+    {ok, GenericBinary} = thrift_erl_binary:encode(Desc, OurValue),
+    ?assertEqual(BinaryWire, iolist_to_binary(GenericBinary)),
+    {ok, GenericCompact} = thrift_erl_compact:encode(Desc, OurValue),
+    ?assertEqual(CompactWire, iolist_to_binary(GenericCompact)),
+    {ok, GenericJson} = thrift_erl_json:encode(Desc, OurValue),
+    ?assertEqual(JsonWire, iolist_to_binary(GenericJson)),
     {ok, OurDecoded, <<>>} = thrift_erl_binary:decode(BinDesc, BinaryWire),
     ?assertEqual(OurValue, OurDecoded),
     {_, {ok, OfficialDecoded}} = official_decode(BinaryWire, binary, OfficialName),
     Check(OfficialDecoded),
-    {ok, OurCompactDecoded, <<>>} = thrift_erl_compact:decode(Desc, CompactWire),
+    {ok, OurCompactDecoded, <<>>} = thrift_erl_compact:decode(BinDesc, CompactWire),
     ?assertEqual(OurValue, OurCompactDecoded),
     {_, {ok, CompactDecoded}} = official_decode(CompactWire, compact, OfficialName),
     Check(CompactDecoded),
-    {ok, OurJsonDecoded, <<>>} = thrift_erl_json:decode(Desc, JsonWire),
+    {ok, OurJsonDecoded, <<>>} = thrift_erl_json:decode(BinDesc, JsonWire),
     ?assertEqual(OurValue, OurJsonDecoded),
     {_, {ok, JsonDecoded}} = official_decode_message(JsonMessage, OfficialName),
     Check(JsonDecoded),
 
-    OursEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(BinDesc, OurValue) end),
-    OursDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(BinDesc, BinaryWire) end),
-    OursCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(Desc, OurValue) end),
-    OursCompactDecode = erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(Desc, CompactWire) end),
-    OursJsonEncode = erlbench(fun() -> {ok, _} = thrift_erl_json:encode(Desc, OurValue) end),
-    OursJsonDecode =
+    %% Ours: the specialized codecs (ref descriptors).
+    SpecBinaryEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(BinDesc, OurValue) end),
+    SpecBinaryDecode =
+        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(BinDesc, BinaryWire) end),
+    SpecCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(BinDesc, OurValue) end),
+    SpecCompactDecode =
+        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(BinDesc, CompactWire) end),
+    SpecJsonEncode = erlbench(fun() -> {ok, _} = thrift_erl_json:encode(BinDesc, OurValue) end),
+    SpecJsonDecode =
+        erlbench(fun() ->
+            {ok, _, _, _, Payload} = thrift_erl_json:decode_message(JsonMessage),
+            {ok, _, <<>>} = thrift_erl_json:decode(BinDesc, Payload)
+        end),
+    %% Ours: the generic interpreter over inline descriptors — what a
+    %% caller with hand-written struct_info tuples gets.
+    GenBinaryEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(Desc, OurValue) end),
+    GenBinaryDecode =
+        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(Desc, BinaryWire) end),
+    GenCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(Desc, OurValue) end),
+    GenCompactDecode =
+        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(Desc, CompactWire) end),
+    GenJsonEncode = erlbench(fun() -> {ok, _} = thrift_erl_json:encode(Desc, OurValue) end),
+    GenJsonDecode =
         erlbench(fun() ->
             {ok, _, _, _, Payload} = thrift_erl_json:decode_message(JsonMessage),
             {ok, _, <<>>} = thrift_erl_json:decode(Desc, Payload)
@@ -208,12 +244,20 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     ReferenceJsonDecode = erlbench(fun() -> {_, {ok, _}} = official_decode_message(JsonMessage, OfficialName) end),
 
     Rows = [
-        {<<"binary/encode">>, {measured, OursEncode}, {measured, ReferenceBinaryEncode}},
-        {<<"binary/decode">>, {measured, OursDecode}, {measured, ReferenceBinaryDecode}},
-        {<<"compact/encode">>, {measured, OursCompactEncode}, {measured, ReferenceCompactEncode}},
-        {<<"compact/decode">>, {measured, OursCompactDecode}, {measured, ReferenceCompactDecode}},
-        {<<"json/encode">>, {measured, OursJsonEncode}, {measured, ReferenceJsonEncode}},
-        {<<"json/decode">>, {measured, OursJsonDecode}, {measured, ReferenceJsonDecode}}
+        {<<"binary/encode">>, {measured, SpecBinaryEncode}, {measured, ReferenceBinaryEncode}},
+        {<<"binary/decode">>, {measured, SpecBinaryDecode}, {measured, ReferenceBinaryDecode}},
+        {<<"compact/encode">>, {measured, SpecCompactEncode}, {measured, ReferenceCompactEncode}},
+        {<<"compact/decode">>, {measured, SpecCompactDecode}, {measured, ReferenceCompactDecode}},
+        {<<"json/encode">>, {measured, SpecJsonEncode}, {measured, ReferenceJsonEncode}},
+        {<<"json/decode">>, {measured, SpecJsonDecode}, {measured, ReferenceJsonDecode}}
+    ],
+    AxisRows = [
+        {<<"binary/encode">>, {measured, GenBinaryEncode}, {measured, SpecBinaryEncode}},
+        {<<"binary/decode">>, {measured, GenBinaryDecode}, {measured, SpecBinaryDecode}},
+        {<<"compact/encode">>, {measured, GenCompactEncode}, {measured, SpecCompactEncode}},
+        {<<"compact/decode">>, {measured, GenCompactDecode}, {measured, SpecCompactDecode}},
+        {<<"json/encode">>, {measured, GenJsonEncode}, {measured, SpecJsonEncode}},
+        {<<"json/decode">>, {measured, GenJsonDecode}, {measured, SpecJsonDecode}}
     ],
     io:put_chars([
         format_report(
@@ -223,7 +267,8 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
                 {compact, byte_size(CompactWire)},
                 {json, byte_size(JsonWire)}
             ],
-            Rows
+            Rows,
+            AxisRows
         ),
         $\n
     ]),
@@ -351,8 +396,10 @@ erlbench(Fun) ->
     #{result := #{average := Average, stddev := StdDev}} = erlperf:run(Fun, bench_options()),
     #{average => Average, stddev => StdDev}.
 
--spec format_report(binary(), [{binary | compact | json, non_neg_integer()}], [row()]) -> string().
-format_report(Name, WireSizes, Rows) ->
+-spec format_report(
+    binary(), [{binary | compact | json, non_neg_integer()}], [row()], [row()]
+) -> string().
+format_report(Name, WireSizes, Rows, AxisRows) ->
     Sizes = [
         io_lib:format("~ts ~p B", [Proto, Size])
      || {Proto, Size} <- WireSizes
@@ -360,21 +407,50 @@ format_report(Name, WireSizes, Rows) ->
     Header =
         io_lib:format("thrift_bench[~ts: ~ts]", [Name, lists:join(", ", Sizes)]),
     Lines = [row_line(Row) || Row <- Rows],
-    lists:flatten([Header, $\n, lists:join($\n, Lines)]).
+    AxisLines = [axis_line(Row) || Row <- AxisRows],
+    lists:flatten([
+        Header,
+        $\n,
+        lists:join($\n, Lines),
+        $\n,
+        "  generic vs specialized (ref descriptor vs inline):",
+        $\n,
+        lists:join($\n, AxisLines)
+    ]).
 
 -type row() :: {binary(), {measured, throughput()}, {measured, throughput()}}.
 
 -spec row_line(row()) -> string().
 row_line({Label, Ours, Reference}) ->
+    labelled_line(Label, ours, Ours, reference, Reference).
+
+%% The codec-emission axis inside our runtime: same engine, the two
+%% descriptor shapes.
+
+-spec axis_line(row()) -> string().
+axis_line({Label, Generic, Specialized}) ->
+    labelled_line(Label, generic, Generic, specialized, Specialized).
+
+-spec labelled_line(
+    binary(),
+    ours | reference | generic | specialized,
+    {measured, throughput()},
+    ours | reference | generic | specialized,
+    {measured, throughput()}
+) ->
+    string().
+labelled_line(Label, LeftName, Left, RightName, Right) ->
     lists:flatten([
         "  ",
         string:pad(Label, 15, trailing),
-        "ours ",
-        pad_side(Ours),
-        "   reference ",
-        pad_side(Reference),
+        %% the widest side name is `specialized'
+        string:pad(atom_to_list(LeftName), 12, trailing),
+        pad_side(Left),
         "   ",
-        speedup_note(Ours, Reference)
+        string:pad(atom_to_list(RightName), 12, trailing),
+        pad_side(Right),
+        "   ",
+        speedup_note(Left, Right)
     ]).
 
 %% A literal percent sign in a format string needs no escaping (Erlang
