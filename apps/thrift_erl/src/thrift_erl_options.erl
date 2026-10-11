@@ -43,7 +43,8 @@ default.
     active_n/1,
     http_path/1,
     backlog/1,
-    max_connections/1
+    max_connections/1,
+    on_event/1
 ]).
 
 -define(DEFAULT_TIMEOUT, 5000).
@@ -131,3 +132,21 @@ backlog(Opts) ->
 -spec max_connections(map()) -> pos_integer().
 max_connections(Opts) ->
     maps:get(max_connections, Opts, ?DEFAULT_MAX_CONNECTIONS).
+
+-doc """
+The `on_event` observability handler, default `undefined`; see
+`thrift_erl_events`. A malformed value fails the start, not the first
+emit: the returned reason is `{on_event, Value}`.
+""".
+-spec on_event(map()) -> {ok, thrift_erl_events:handler()} | {error, {on_event, term()}}.
+on_event(Opts) ->
+    case maps:get(on_event, Opts, undefined) of
+        undefined ->
+            {ok, undefined};
+        Fun when is_function(Fun, 1) ->
+            {ok, Fun};
+        {Module, Function, Args} when is_atom(Module), is_atom(Function), is_list(Args) ->
+            {ok, {Module, Function, Args}};
+        Bad ->
+            {error, {on_event, Bad}}
+    end.

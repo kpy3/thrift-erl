@@ -54,7 +54,8 @@ buffers plus the send/listen/accept/connect helpers.
     connect/4,
     set_active/2,
     controlling_process/2,
-    close/1
+    close/1,
+    peername/1
 ]).
 
 -export_type([transport/0, socket/0]).
@@ -72,6 +73,13 @@ send({tcp, Socket}, Data) ->
     gen_tcp:send(Socket, Data);
 send({ssl, Socket}, Data) ->
     ssl:send(Socket, Data).
+
+-doc "The remote endpoint of the socket, for the connection events.".
+-spec peername(socket()) -> {ok, {inet:ip_address(), inet:port_number()}} | {error, term()}.
+peername({tcp, Socket}) ->
+    inet:peername(Socket);
+peername({ssl, Socket}) ->
+    ssl:peername(Socket).
 
 %%--------------------------------------------------------------------
 %% Frame splitting

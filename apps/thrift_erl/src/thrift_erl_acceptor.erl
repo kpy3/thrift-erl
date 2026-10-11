@@ -48,6 +48,9 @@ mechanism.
     handshake_timeout => pos_integer() | infinity,
     idle_timeout => pos_integer() | infinity,
     active_n => pos_integer(),
+    %% passes down to every connection; the server-side events
+    %% (connection_open/closed, handler_error) come from there
+    on_event => thrift_erl_events:handler(),
     %% record representation bridge for handlers (see thrift_erl_record)
     record_api => boolean(),
     types => module(),
@@ -120,8 +123,8 @@ init(Opts) ->
     %% live connections — without it they would survive the stop as
     %% orphans.
     process_flag(trap_exit, true),
-    case thrift_erl_socket:listen(Opts) of
-        {ok, ListenSocket} ->
+    case {thrift_erl_socket:listen(Opts), thrift_erl_options:on_event(Opts)} of
+        {{ok, ListenSocket}, {ok, _Handler}} ->
             ConnectionOpts = maps:with(
                 [
                     handler,
@@ -133,6 +136,7 @@ init(Opts) ->
                     timeout,
                     idle_timeout,
                     active_n,
+                    on_event,
                     record_api,
                     types
                 ],
@@ -146,7 +150,10 @@ init(Opts) ->
                 },
             self() ! accept,
             {ok, State#state{accepting = true}};
-        {error, Reason} ->
+        {{ok, ListenSocket}, {error, Reason}} ->
+            thrift_erl_socket:close(ListenSocket),
+            {stop, Reason};
+        {{error, Reason}, _} ->
             {stop, Reason}
     end.
 

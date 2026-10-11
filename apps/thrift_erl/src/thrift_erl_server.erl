@@ -51,11 +51,20 @@ Multiplexed (several services on one port, clients opt in with the
 -export_type([options/0]).
 
 -type options() :: thrift_erl_acceptor:options().
--doc "Starts the server supervision tree.".
+-doc """
+Starts the server supervision tree.
+
+A failed init answers `{error, Reason}` only: the trapping around the
+start shields the caller from the failed supervisor's exit race, the
+same dance `thrift_erl_client` does.
+""".
 -spec start_link(options()) -> {ok, pid()} | ignore | {error, term()}.
 start_link(Opts) ->
     Name = maps:get(name, Opts, ?MODULE),
-    supervisor:start_link({local, Name}, ?MODULE, Opts).
+    process_flag(trap_exit, true),
+    Result = supervisor:start_link({local, Name}, ?MODULE, Opts),
+    process_flag(trap_exit, false),
+    Result.
 
 -doc "Stops the server: the acceptor and, through it, all connections.".
 -spec stop(pid() | atom()) -> ok.
