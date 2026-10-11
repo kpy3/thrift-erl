@@ -5,6 +5,89 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-10-11
+
+Specialized codecs for every protocol, an observability surface, and
+the operational niceties pools ask for: graceful drains, per-worker
+statistics and event callbacks. The bench now measures what generated
+code actually runs.
+
+### Generator (`thrift_generator`)
+
+- Specialized compact wire codecs: per struct `encode_<X>_compact/1` /
+  `decode_<X>_compact/1` with the generic engine's byte-for-byte error
+  semantics (declaration-order missing-required on encode,
+  ascending-id on decode, `varint` returning `[Byte | Rest]` so the
+  term shape — and with it the map-key sort order — stays identical),
+  plus a `compact_codec/1` index keyed by the wire struct name.
+  Equivalence is pinned by PropEr (roundtrip and prefix properties on
+  both protocols) and a hand-computed negative battery.
+- Specialized JSON wire codecs: the same contract with the `_json`
+  suffix and a `json_codec/1` index. The envelope's closing `]` folds
+  only at top-level entry points: the pair's decode side is the
+  non-folding struct body, `thrift_erl_json:decode/2` applies the
+  fold, and the new `thrift_erl_json:decode_nested/2` serves generated
+  cross-module references fold-free (nested same-module references
+  are local `_body` calls). Map keys outside the JSON object model
+  (uuid, struct, list, set, map) answer constant `type_not_supported`
+  errors even when the map is empty; uuid values under a supported
+  key fail at the pair level.
+- Plugin: `rebar3 thrift --check` (and the CLI `--check` flag)
+  verifies that the generated sources are fresh — the same pipeline
+  without writing, answering `{error, {stale, Paths}}` on drift.
+  `write_all` skips unchanged files, so regeneration no longer bumps
+  mtimes of identical outputs (no spurious recompiles).
+
+### Runtime (`thrift_erl`)
+
+- Observability callbacks: the `on_event` option (absent, a 1-arity
+  fun, or `{M, F, A}` with the event appended to the arguments) on the
+  client, the reconnecting wrapper (passed down to its child) and the
+  server (whitelisted through the acceptor into every connection).
+  Dispatch is synchronous in the emitting process and crash-isolated;
+  the default absent-handler path costs one pattern match and builds
+  no event map. Events: `call_ok` / `call_error` — exactly one per
+  caller-facing answer, counters matching `get_stats`; `connected` /
+  `connect_failed` / `disconnected` on the wrapper's connection axis;
+  `connection_open` / `connection_closed` / `handler_error` (handler
+  crashes and unsupported results only — declared exceptions are
+  protocol answers, not errors) on the server side. The option is
+  validated at start, not at the first emit.
+- Graceful server stop: `stop(Server, #{drain => Timeout})` closes
+  the listen socket, tells every live connection to finish its
+  in-flight request and exit, and answers `ok` once no connections
+  remain or the deadline passes. The deadline never fails a call; a
+  connection stuck past it is reaped by the supervised stop.
+- Client statistics: `get_stats/1` and `get_and_reset_stats/1` report
+  `#{calls_ok, calls_failed}` per worker — the same accounting the
+  reconnecting wrapper aggregates, without the connection axis. A
+  pending call closed by a connection failure counts as failed (the
+  funnel covers terminate and queue-failure paths too).
+- The reconnecting wrapper's and the server's `start_link` shield the
+  caller from the failed-init exit race (the same trapping dance the
+  plain client already did): a bad option answers `{error, Reason}`
+  instead of killing the caller with the child's exit signal after
+  the answer arrived.
+
+### Testing and tooling
+
+- The elp lint gate fails on findings: the wrapper filters
+  `--severity warning` out of the pinned release's JSON (elp itself
+  always exits 0) and runs the deterministic `--no-connect` mode, the
+  same one CI uses.
+- CI publishes a coverage report; the README gained a
+  differences-from-Apache section.
+- PropEr properties for compact and JSON join the binary ones:
+  roundtrip, prefix (always-`more` for binary and compact,
+  never-completing for JSON) and representation conversion, plus deep
+  batteries that run all three protocols.
+- The codec benchmark measures the specialized path for all three
+  protocols (ref descriptors through the codec probes) against the
+  official runtime, and adds a generic-vs-specialized block per case —
+  inline descriptor (the generic interpreter with its per-process
+  schema memo) against the ref descriptor — with a byte-equality gate
+  between the two paths before any timing.
+
 ## [0.3.0] — 2026-10-10
 
 Generated code that reads like it was written: typed records and
