@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Project
+
+- Renamed the project **thrift-erl**, after the flagship runtime
+  library `thrift_erl`: it has been a full Thrift stack for Erlang
+  (IDL compiler, runtime, rebar3 plugin) for a while, not just a
+  generator. Application and module names are unchanged — `thrift_erl`
+  is baked into all generated code and stays the public contract. The
+  README now opens with a "Why over the official Apache Thrift
+  runtime" summary.
+
 ## [0.4.0] — 2026-10-11
 
 Specialized codecs for every protocol, an observability surface, and
