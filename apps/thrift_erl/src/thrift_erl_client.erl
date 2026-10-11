@@ -67,7 +67,11 @@ both:
   message names are prefixed `<<"Service:function">>` (the reply keeps
   the plain function name, so nothing else changes). Only the name on
   the wire is touched; pass the same plain function names to
-  `call/4`/`oneway/4`.
+  `call/4`/`oneway/4`;
+- `on_event` — an observability callback (`undefined` by default): a
+  1-arity fun or `{M, F, A}` receiving one event map per caller-facing
+  answer — `call_ok` / `call_error`, the same accounting
+  `get_stats/1` reports; see `thrift_erl_events`.
 """.
 
 -behaviour(gen_server).
@@ -93,7 +97,9 @@ both:
     active_n => pos_integer(),
     %% how many calls may wait while another is on the wire; `infinity`
     %% (the default) keeps the classic unbounded queue
-    max_queue_depth => pos_integer() | infinity
+    max_queue_depth => pos_integer() | infinity,
+    %% the observability handler; see `thrift_erl_events'
+    on_event => thrift_erl_events:handler()
 }.
 
 -type call_result() ::
@@ -120,7 +126,10 @@ both:
     %% timer is armed at enqueue time, not when the request reaches the
     %% wire, so a call stuck behind a slow head still times out on time
     timeout :: pos_integer() | infinity,
-    timer :: undefined | reference()
+    timer :: undefined | reference(),
+    %% when the call was accepted: the event duration covers the same
+    %% span as the deadline (queue wait plus the wire round-trip)
+    started :: integer()
 }).
 
 %% The request currently on the wire.
@@ -133,7 +142,8 @@ both:
     %% an HTTP oneway waits for the (empty) response and answers ok
     %% without any Thrift decoding
     oneway = false :: boolean(),
-    timer :: undefined | reference()
+    timer :: undefined | reference(),
+    started :: integer()
 }).
 
 -record(state, {
@@ -155,7 +165,8 @@ both:
     %% every `{error, _}' failed (a declared exception included, same
     %% accounting as `thrift_erl_reconnecting_client')
     calls_ok = 0 :: non_neg_integer(),
-    calls_failed = 0 :: non_neg_integer()
+    calls_failed = 0 :: non_neg_integer(),
+    handler :: thrift_erl_events:handler()
 }).
 
 -doc """
@@ -239,6 +250,13 @@ get_and_reset_stats(Pid) ->
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
+    case thrift_erl_options:on_event(Opts) of
+        {ok, Handler} -> init(Opts, Handler);
+        {error, Reason} -> {stop, Reason}
+    end.
+
+-spec init(options(), thrift_erl_events:handler()) -> {ok, #state{}} | {stop, term()}.
+init(Opts, Handler) ->
     Timeout = thrift_erl_options:connect_timeout(Opts),
     Connect =
         thrift_erl_socket:connect(
@@ -259,7 +277,8 @@ init(Opts) ->
                 http_path = thrift_erl_options:http_path(Opts),
                 host_value = host_value(maps:get(host, Opts), maps:get(port, Opts)),
                 active_n = ActiveN,
-                max_queue_depth = maps:get(max_queue_depth, Opts, infinity)
+                max_queue_depth = maps:get(max_queue_depth, Opts, infinity),
+                handler = Handler
             }};
         {{error, Reason}, _} ->
             {stop, Reason};
@@ -278,11 +297,16 @@ handle_call({Kind, Function, Args, Timeout}, From, #state{} = State) ->
                 from = From,
                 function = Function,
                 args = Args,
-                timeout = Timeout
+                timeout = Timeout,
+                started = erlang:monotonic_time(microsecond)
             }),
             try_dispatch(State#state{queue = queue:in(Request, State#state.queue)});
         false ->
-            {reply, {error, queue_full}, State#state{calls_failed = State#state.calls_failed + 1}}
+            State1 = State#state{calls_failed = State#state.calls_failed + 1},
+            emit_outcome(
+                State1#state.handler, error, {error, queue_full}, Function, false, erlang:monotonic_time(microsecond)
+            ),
+            {reply, {error, queue_full}, State1}
     end;
 handle_call(get_stats, _From, State) ->
     {reply, stats(State), State};
@@ -324,10 +348,10 @@ handle_info({timeout, Timer, call_timer}, #state{pending = undefined} = State) -
 handle_info(
     {timeout, Timer, call_timer},
     #state{
-        pending = #pending{timer = Timer, from = From}
+        pending = Pending = #pending{timer = Timer, from = From}
     } = State
 ) ->
-    fail_queue(closed, answer(From, {error, timeout}, State#state{pending = undefined}));
+    fail_queue(closed, answer(From, {error, timeout}, Pending, State#state{pending = undefined}));
 handle_info({timeout, Timer, call_timer}, State) ->
     %% a queued request's deadline while another call is on the wire
     queue_timer_fired(Timer, State);
@@ -337,11 +361,14 @@ handle_info(_Info, State) ->
 -doc false.
 -spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{socket = Socket} = State) ->
-    case State#state.pending of
-        #pending{from = From} -> gen_server:reply(From, {error, closed});
-        undefined -> ok
-    end,
-    fail_queue(closed, State),
+    State1 =
+        case State#state.pending of
+            Pending = #pending{from = From} ->
+                answer(From, {error, closed}, Pending, State#state{pending = undefined});
+            undefined ->
+                State
+        end,
+    fail_queue(closed, State1),
     thrift_erl_socket:close(Socket),
     ok.
 
@@ -361,7 +388,7 @@ try_dispatch(#state{pending = undefined, queue = Queue} = State) ->
             case prepare(Request, SeqId, State) of
                 {reply, Reply} ->
                     cancel_call_timer(Request#request.timer),
-                    try_dispatch(answer(Request#request.from, Reply, State#state{queue = Rest}));
+                    try_dispatch(answer(Request#request.from, Reply, Request, State#state{queue = Rest}));
                 {ok, Message} ->
                     dispatch_request(Request, Message, SeqId, State#state{queue = Rest})
             end
@@ -384,17 +411,18 @@ dispatch_request(
             seqid = SeqId,
             info = request_info(Request, State),
             oneway = true,
-            timer = Request#request.timer
+            timer = Request#request.timer,
+            started = Request#request.started
         },
     case send_message(Message, State#state{seqid = SeqId, pending = Pending}) of
         #state{} = Sent -> {noreply, Sent};
         Stop -> Stop
     end;
-dispatch_request(#request{kind = oneway, from = From}, Message, SeqId, State) ->
+dispatch_request(#request{kind = oneway, from = From} = Request, Message, SeqId, State) ->
     case send_message(Message, State) of
         #state{} = Sent ->
             %% Answered as soon as the bytes are out; no reply follows.
-            try_dispatch(answer(From, ok, Sent#state{seqid = SeqId}));
+            try_dispatch(answer(From, ok, Request, Sent#state{seqid = SeqId}));
         Stop ->
             Stop
     end;
@@ -405,7 +433,8 @@ dispatch_request(Request, Message, SeqId, State) ->
             function = Request#request.function,
             seqid = SeqId,
             info = request_info(Request, State),
-            timer = Request#request.timer
+            timer = Request#request.timer,
+            started = Request#request.started
         },
     case send_message(Message, State#state{seqid = SeqId, pending = Pending}) of
         #state{} = Sent -> {noreply, Sent};
@@ -485,14 +514,14 @@ arm_request(#request{timeout = Timeout} = Request) ->
 -spec queue_timer_fired(reference(), #state{}) -> {noreply, #state{}}.
 queue_timer_fired(Timer, #state{queue = Queue} = State) ->
     case queue:out(Queue) of
-        {{value, #request{timer = Timer, from = From}}, Rest} ->
+        {{value, Request = #request{timer = Timer, from = From}}, Rest} ->
             %% head of the queue: nothing is on the wire, the next
             %% request may go out right away
-            try_dispatch(answer(From, {error, timeout}, State#state{queue = Rest}));
+            try_dispatch(answer(From, {error, timeout}, Request, State#state{queue = Rest}));
         _ ->
             case queue_take_timer(Timer, Queue) of
                 {ok, Request, Queue1} ->
-                    {noreply, answer(Request#request.from, {error, timeout}, State#state{queue = Queue1})};
+                    {noreply, answer(Request#request.from, {error, timeout}, Request, State#state{queue = Queue1})};
                 error ->
                     %% the timer was cancelled after all; the request is
                     %% on the wire (its pending slot handles it) or gone
@@ -572,12 +601,12 @@ handle_stream(#state{buffer = Buffer} = State) ->
 -spec handle_message(binary(), #state{}) ->
     {ok, #state{}} | {stop, term(), #state{}}.
 handle_message(
-    _Body, #state{pending = #pending{oneway = true, from = From, timer = Timer}} = State
+    _Body, #state{pending = Pending = #pending{oneway = true, from = From, timer = Timer}} = State
 ) ->
     %% The HTTP response that carries a oneway: no Thrift payload in
     %% it, the call is done.
     cancel_call_timer(Timer),
-    {ok, answer(From, ok, State#state{pending = undefined})};
+    {ok, answer(From, ok, Pending, State#state{pending = undefined})};
 handle_message(_Message, #state{pending = undefined} = State) ->
     {stop, {error, unexpected_message}, State};
 handle_message(Message, #state{pending = Pending} = State) ->
@@ -588,10 +617,13 @@ handle_message(Message, #state{pending = Pending} = State) ->
     of
         {ok, CallResult} ->
             cancel_call_timer(Pending#pending.timer),
-            {ok, answer(Pending#pending.from, CallResult, State#state{pending = undefined})};
+            {ok, answer(Pending#pending.from, CallResult, Pending, State#state{pending = undefined})};
         {error, Reason} ->
             cancel_call_timer(Pending#pending.timer),
-            fail_queue(closed, answer(Pending#pending.from, {error, Reason}, State#state{pending = undefined}))
+            fail_queue(
+                closed,
+                answer(Pending#pending.from, {error, Reason}, Pending, State#state{pending = undefined})
+            )
     end.
 
 %% A complete reply — value, declared exception or
@@ -680,38 +712,85 @@ exception_name({_, _, _, FieldName, _}) -> FieldName.
 
 -spec fail_queue(term(), #state{}) -> {stop, normal, #state{}}.
 fail_queue(Reason, #state{queue = Queue} = State) ->
-    lists:foreach(
-        fun(#request{from = From, timer = Timer}) ->
+    State1 = lists:foldl(
+        fun(#request{from = From, timer = Timer} = Request, St) ->
             cancel_call_timer(Timer),
-            gen_server:reply(From, {error, Reason})
+            answer(From, {error, Reason}, Request, St)
         end,
+        State#state{queue = queue:new()},
         queue:to_list(Queue)
     ),
     %% The process stops right away, so the counters are bookkeeping for
     %% get_stats calls that raced the failure.
-    {stop, normal, State#state{
-        queue = queue:new(),
-        calls_failed = State#state.calls_failed + queue:len(Queue)
-    }}.
+    {stop, normal, State1}.
 
 -spec abort(term(), #state{}) -> {stop, normal, #state{}}.
-abort(Reason, #state{pending = #pending{from = From, timer = Timer}} = State) ->
+abort(Reason, #state{pending = Pending = #pending{from = From, timer = Timer}} = State) ->
     cancel_call_timer(Timer),
-    fail_queue(closed, answer(From, {error, Reason}, State#state{pending = undefined}));
+    fail_queue(closed, answer(From, {error, Reason}, Pending, State#state{pending = undefined}));
 abort(_Reason, #state{pending = undefined} = State) ->
     fail_queue(closed, State).
 
 %% Every caller-facing answer funnels through here so the stats stay
-%% honest no matter which path produced them.
+%% honest and one event goes out per answer, whatever path produced it.
 
--spec answer(gen_server:from(), term(), #state{}) -> #state{}.
-answer(From, Result, #state{calls_ok = Ok, calls_failed = Failed} = State) ->
+-spec answer(gen_server:from(), term(), #pending{} | #request{}, #state{}) -> #state{}.
+answer(From, Result, #pending{function = Function, oneway = Oneway, started = Started}, State) ->
+    answer(From, Result, Function, Oneway, Started, State);
+answer(From, Result, #request{function = Function, kind = Kind, started = Started}, State) ->
+    answer(From, Result, Function, Kind =:= oneway, Started, State).
+
+-spec answer(gen_server:from(), term(), binary(), boolean(), integer(), #state{}) -> #state{}.
+answer(From, Result, Function, Oneway, Started, #state{handler = Handler} = State) ->
     gen_server:reply(From, Result),
-    case Result of
-        {ok, _} -> State#state{calls_ok = Ok + 1};
-        ok -> State#state{calls_ok = Ok + 1};
-        _ -> State#state{calls_failed = Failed + 1}
-    end.
+    Outcome =
+        case Result of
+            {ok, _} -> ok;
+            ok -> ok;
+            _ -> error
+        end,
+    State1 =
+        case Outcome of
+            ok -> State#state{calls_ok = State#state.calls_ok + 1};
+            error -> State#state{calls_failed = State#state.calls_failed + 1}
+        end,
+    case Handler of
+        undefined -> ok;
+        _ -> emit_outcome(Handler, Outcome, Result, Function, Oneway, Started)
+    end,
+    State1.
+
+%% The event map is only built when a handler is set — the default
+%% (`undefined') path costs one pattern match per answer.
+
+-spec emit_outcome(
+    thrift_erl_events:handler(), ok | error, term(), binary(), boolean(), integer()
+) -> ok.
+emit_outcome(Handler, ok, _Result, Function, Oneway, Started) ->
+    thrift_erl_events:emit(Handler, call_ok, #{
+        function => Function, duration_us => elapsed_us(Started), oneway => Oneway
+    });
+emit_outcome(Handler, error, Result, Function, Oneway, Started) ->
+    thrift_erl_events:emit(Handler, call_error, #{
+        function => Function,
+        reason => error_reason(Result),
+        duration_us => elapsed_us(Started),
+        oneway => Oneway
+    }).
+
+%% The event carries the inner reason — what the caller received
+%% inside `{error, _}' — so event counts line up with the answer
+%% shapes.
+
+-spec error_reason(term()) -> term().
+error_reason({error, Reason}) ->
+    Reason;
+error_reason(Reason) ->
+    Reason.
+
+-spec elapsed_us(integer()) -> non_neg_integer().
+elapsed_us(Started) ->
+    erlang:max(0, erlang:monotonic_time(microsecond) - Started).
 
 -spec stats(#state{}) -> stats().
 stats(#state{calls_ok = Ok, calls_failed = Failed}) ->

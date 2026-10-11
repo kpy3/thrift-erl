@@ -46,6 +46,11 @@ server that is down and keeps trying.
 `get_and_reset_stats/1` returns the same map and zeroes the counters
 (`connected` stays live). Options are the `thrift_erl_client` map plus
 `reconnect_min` and `reconnect_max` (milliseconds).
+
+The `on_event` handler passes through to the wrapped client unchanged,
+so it sees the call-level `call_ok` / `call_error` events; the
+connection axis adds this wrapper's own events — `connected`,
+`connect_failed`, `disconnected` (see `thrift_erl_events`).
 """.
 
 -behaviour(gen_server).
@@ -80,7 +85,10 @@ server that is down and keeps trying.
     multiplex => binary(),
     active_n => pos_integer(),
     reconnect_min => pos_integer(),
-    reconnect_max => pos_integer()
+    reconnect_max => pos_integer(),
+    %% passes through to `thrift_erl_client'; this wrapper adds the
+    %% connection-axis events on top
+    on_event => thrift_erl_events:handler()
 }.
 
 -type stats() :: #{
@@ -105,7 +113,8 @@ server that is down and keeps trying.
     calls_ok = 0 :: non_neg_integer(),
     calls_failed = 0 :: non_neg_integer(),
     connects = 0 :: non_neg_integer(),
-    connect_failures = 0 :: non_neg_integer()
+    connect_failures = 0 :: non_neg_integer(),
+    handler :: thrift_erl_events:handler()
 }).
 
 -doc """
@@ -113,11 +122,17 @@ Starts the reconnecting client and links it to the caller.
 
 The initial connect attempt blocks for at most the `timeout` option,
 but a server that is down does not fail the start — the wrapper keeps
-retrying in the background.
+retrying in the background. A failed init (a bad protocol or
+`on_event` option) answers `{error, Reason}` only: the trapping around
+the start shields the caller from the failed child's exit race, the
+same dance `thrift_erl_client` does.
 """.
 -spec start_link(options()) -> gen_server:start_ret().
 start_link(Opts) ->
-    gen_server:start_link(?MODULE, Opts, []).
+    process_flag(trap_exit, true),
+    Result = gen_server:start_link(?MODULE, Opts, []),
+    process_flag(trap_exit, false),
+    Result.
 
 -doc """
 Starts the reconnecting client without linking — for owners that
@@ -168,18 +183,21 @@ init(Opts) ->
     %% A bad protocol is a configuration error: fail the start the same
     %% way the plain client would. A dead server is not: this wrapper
     %% exists to outlive it.
-    case thrift_erl_options:protocol_module(Opts) of
-        {ok, Protocol} ->
+    case {thrift_erl_options:protocol_module(Opts), thrift_erl_options:on_event(Opts)} of
+        {{ok, Protocol}, {ok, Handler}} ->
             State =
                 #state{
                     opts = Opts,
                     protocol = Protocol,
                     reconnect_min = maps:get(reconnect_min, Opts, ?DEFAULT_RECONNECT_MIN),
-                    reconnect_max = maps:get(reconnect_max, Opts, ?DEFAULT_RECONNECT_MAX)
+                    reconnect_max = maps:get(reconnect_max, Opts, ?DEFAULT_RECONNECT_MAX),
+                    handler = Handler
                 },
             {ok, connect(State)};
-        {error, Reason} ->
-            {stop, {protocol, Reason}}
+        {{error, Reason}, _} ->
+            {stop, {protocol, Reason}};
+        {_, {error, Reason}} ->
+            {stop, Reason}
     end.
 
 -doc false.
@@ -224,8 +242,13 @@ handle_cast(_Request, State) ->
 %% The client dies on every connection failure by contract; this is
 %% the reconnect trigger.
 
-handle_info({'DOWN', Monitor, process, _Child, _Reason}, #state{monitor = Monitor} = State) ->
-    {noreply, schedule_reconnect(State#state{child = undefined, monitor = undefined})};
+handle_info({'DOWN', Monitor, process, _Child, Reason}, #state{monitor = Monitor} = State) ->
+    Delay = next_delay(State),
+    thrift_erl_events:emit(State#state.handler, disconnected, #{
+        reason => Reason, retry_in_ms => Delay
+    }),
+    erlang:send_after(Delay, self(), reconnect),
+    {noreply, State#state{child = undefined, monitor = undefined, reconnect_delay = Delay}};
 handle_info(reconnect, #state{child = undefined} = State) ->
     {noreply, connect(State)};
 handle_info(reconnect, State) ->
@@ -264,10 +287,11 @@ child_call(Fun) ->
     end.
 
 -spec connect(#state{}) -> #state{}.
-connect(#state{protocol = Protocol} = State) ->
+connect(#state{protocol = Protocol, handler = Handler} = State) ->
     Opts = (State#state.opts)#{protocol => Protocol},
     case thrift_erl_client:start(Opts) of
         {ok, Child} ->
+            thrift_erl_events:emit(Handler, connected, #{}),
             State#state{
                 child = Child,
                 monitor = monitor(process, Child),
@@ -282,6 +306,9 @@ connect(#state{protocol = Protocol} = State) ->
                 reason => Reason,
                 retry_in => Delay
             }),
+            thrift_erl_events:emit(Handler, connect_failed, #{
+                reason => Reason, retry_in_ms => Delay
+            }),
             erlang:send_after(Delay, self(), reconnect),
             State#state{
                 child = undefined,
@@ -294,12 +321,6 @@ connect(#state{protocol = Protocol} = State) ->
 %% Schedules the first retry after a client death: the delay counter
 %% was reset by the last successful connect, so this starts at the
 %% minimum.
-
--spec schedule_reconnect(#state{}) -> #state{}.
-schedule_reconnect(State) ->
-    Delay = next_delay(State),
-    erlang:send_after(Delay, self(), reconnect),
-    State#state{reconnect_delay = Delay}.
 
 -spec next_delay(#state{}) -> pos_integer().
 next_delay(#state{reconnect_delay = 0, reconnect_min = Min}) ->

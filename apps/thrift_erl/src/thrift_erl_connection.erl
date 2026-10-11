@@ -89,7 +89,9 @@ Exactly one service mode is required:
     types => module(),
     handler => module(),
     service => module(),
-    services => #{binary() => service_entry()}
+    services => #{binary() => service_entry()},
+    %% the observability handler; see `thrift_erl_events'
+    on_event => thrift_erl_events:handler()
 }.
 
 %% Handler + descriptor per dispatch key: `<<>>' in single-service
@@ -105,6 +107,7 @@ Exactly one service mode is required:
     active_n :: pos_integer(),
     record_api :: module() | undefined,
     idle_timer :: undefined | reference(),
+    handler :: thrift_erl_events:handler(),
     buffer = <<>> :: binary()
 }).
 
@@ -134,8 +137,8 @@ stop(Pid) ->
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
     Timeout = thrift_erl_options:idle_timeout(Opts),
-    case {thrift_erl_options:protocol_module(Opts), services(Opts)} of
-        {{ok, Protocol}, {ok, Services}} ->
+    case {thrift_erl_options:protocol_module(Opts), services(Opts), thrift_erl_options:on_event(Opts)} of
+        {{ok, Protocol}, {ok, Services}, {ok, Handler}} ->
             Socket = maps:get(socket, Opts),
             ActiveN = thrift_erl_options:active_n(Opts),
             %% The socket arrives owned by the acceptor and still
@@ -155,13 +158,27 @@ init(Opts) ->
                         case maps:get(record_api, Opts, false) of
                             true -> maps:get(types, Opts);
                             false -> undefined
-                        end
+                        end,
+                    handler = Handler
                 },
+            thrift_erl_events:emit(Handler, connection_open, #{peer => peer(Socket)}),
             {ok, State0};
-        {{error, Reason}, _} ->
+        {{error, Reason}, _, _} ->
             {stop, {protocol, Reason}};
-        {_, {error, Reason}} ->
+        {_, {error, Reason}, _} ->
+            {stop, Reason};
+        {_, _, {error, Reason}} ->
             {stop, Reason}
+    end.
+
+%% The remote endpoint for the `connection_open' event; a socket whose
+%% peer is already gone reports `undefined' rather than failing init.
+
+-spec peer(thrift_erl_socket:socket()) -> {inet:ip_address(), inet:port_number()} | undefined.
+peer(Socket) ->
+    case thrift_erl_socket:peername(Socket) of
+        {ok, Peer} -> Peer;
+        {error, _} -> undefined
     end.
 
 %% Resolves the service-mode options into the dispatch table. A
@@ -244,7 +261,8 @@ handle_info(_Info, State) ->
 
 -doc false.
 -spec terminate(term(), #state{}) -> ok.
-terminate(_Reason, #state{socket = Socket}) ->
+terminate(Reason, #state{socket = Socket, handler = Handler}) ->
+    thrift_erl_events:emit(Handler, connection_closed, #{reason => Reason}),
     thrift_erl_socket:close(Socket),
     ok.
 
@@ -385,6 +403,7 @@ dispatch(Function, Handler, SeqId, Tail, Info, #state{} = State) ->
                                 name => Function,
                                 result => Other
                             }),
+                            emit_handler_error(State, Function, {bad_result, Other}),
                             reply_application_exception(
                                 Function, SeqId, <<"internal error">>, 6, State
                             )
@@ -399,6 +418,7 @@ dispatch(Function, Handler, SeqId, Tail, Info, #state{} = State) ->
                         reason => Reason,
                         stack => Stacktrace
                     }),
+                    emit_handler_error(State, Function, Reason),
                     reply_application_exception(Function, SeqId, <<"internal error">>, 6, State)
             end;
         {error, Reason} ->
@@ -410,6 +430,13 @@ dispatch(Function, Handler, SeqId, Tail, Info, #state{} = State) ->
             }),
             reply_application_exception(Function, SeqId, <<"protocol error">>, 7, State)
     end.
+
+%% A handler crash or an unsupported handler result. Declared
+%% exceptions and protocol errors are answers, not handler errors.
+
+-spec emit_handler_error(#state{}, binary(), term()) -> ok.
+emit_handler_error(#state{handler = Handler}, Function, Reason) ->
+    thrift_erl_events:emit(Handler, handler_error, #{function => Function, reason => Reason}).
 
 -spec handle_oneway_message(binary(), binary(), #state{}) -> #state{}.
 handle_oneway_message(Name, Tail, #state{} = State) ->
@@ -430,6 +457,7 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
                                 reason => Reason,
                                 stack => Stacktrace
                             }),
+                            emit_handler_error(State, Function, Reason),
                             ok
                     end,
                     State;
