@@ -1,10 +1,78 @@
-# thrift-generator
+# thrift-erl
 
-An alternative Apache Thrift generator and runtime library for Erlang.
-It takes Thrift IDL and generates Erlang code for types, clients and
-servers that is binary-protocol compatible with the stock Apache Thrift
-implementation (verified both ways by golden interop tests against the
-official 0.25.0 runtime over buffered and framed transports).
+A complete Apache Thrift stack for Erlang: an IDL compiler, a runtime
+library and a rebar3 plugin. What the compiler emits — and the runtime
+that code depends on — is wire-compatible with the stock Apache Thrift
+implementation, verified both ways by golden interop tests against the
+official 0.25.0 runtime over buffered and framed transports, and
+against its official compact, JSON, HTTP and multiplexed clients.
+
+## Contents
+
+- [Why over the official Apache Thrift runtime](#why-over-the-official-apache-thrift-runtime)
+- [Layout](#layout)
+- [Build and tests](#build-and-tests)
+- [CLI](#cli)
+- [rebar3 plugin](#rebar3-plugin)
+- [Example](#example)
+- [Representations and protocols](#representations-and-protocols)
+  - [One struct, four representations](#one-struct-four-representations)
+  - [The compact protocol](#the-compact-protocol)
+  - [The JSON protocol](#the-json-protocol)
+- [The HTTP transport](#the-http-transport)
+- [Pooling](#pooling)
+- [Reconnecting client](#reconnecting-client)
+- [Observability](#observability)
+- [Multiplexed services](#multiplexed-services)
+- [TLS](#tls)
+- [Namespaces](#namespaces)
+- [Codegen annotations](#codegen-annotations)
+- [Differences from Apache Thrift](#differences-from-apache-thrift)
+- [Performance](#performance)
+- [License](#license)
+
+## Why over the official Apache Thrift runtime
+
+Wire compatibility with Apache Thrift is the hard requirement here,
+not the selling point — everything below sits on top of it.
+
+- **Specialized codecs on the hot path.** The emitter compiles a
+  per-struct wire codec into every generated module, and named struct
+  references dispatch straight into it — no descriptor interpretation
+  at runtime (the generic engine remains for introspection, inline
+  descriptors and as the equivalence reference). Measured 4–7× on the
+  binary protocol, 2.4–6× on compact and up to 10× on JSON encode
+  against the official 0.25.0 Erlang runtime (see Performance;
+  reproducible with `./scripts/bench`).
+- **Compatibility is tested, not assumed.** Two-way golden interop
+  against the vendored official runtime: binary, compact and JSON
+  protocols over buffered, framed and HTTP transports, multiplexed
+  services included. PropEr properties pin the specialized codecs
+  byte-for-byte to the generic engine on every protocol.
+- **Errors are values.** Decoding answers `{error, trailing}` /
+  `{error, truncated}` instead of throwing; a declared server
+  exception comes back to the client typed, as
+  `{error, {exception, Name, Record}}`.
+- **Four in-process representations.** Records (default), plain atom
+  maps, tagged struct-maps, or EEP-79 native records on OTP 29 —
+  selectable per struct, uniform all the way down, reshaped without
+  touching bytes via `convert/2`. Sum-typed unions, atom enums and a
+  selectable set implementation come with the IDL mapping.
+- **A runtime with no dependencies.** `thrift_erl` stands on kernel
+  and stdlib alone, generated code depends on nothing else, and the
+  generator itself never ships to production.
+- **Modern OTP.** Requires OTP 28+ (CI matrix: 28, 29): `{active, N}`
+  socket I/O with no passive recv loops, supervised behaviours instead
+  of bare processes, `-nominal` typedefs, and `-doc`/`-moduledoc`
+  propagated from IDL doc comments into the generated modules.
+- **Operational surface.** Graceful drain on server stop, a
+  reconnecting client with backoff, per-worker statistics for pool
+  health checks, crash-isolated `on_event` observability callbacks —
+  on top of TLS, multiplexed services and an HTTP/1.1 transport.
+- **Codegen tooling.** A rebar3 plugin with a `--check` freshness gate
+  for CI, unchanged-file skipping so regeneration does not churn
+  mtimes, and introspection exports (`struct_info/1`, `enum_info/1`,
+  `function_info/2`, ...).
 
 ## Layout
 
@@ -85,8 +153,8 @@ For local development the plugin is attached via `_checkouts/`:
 
 ```
 mkdir -p _checkouts
-ln -s /path/to/thrift-generator/apps/rebar3_thrift _checkouts/rebar3_thrift
-ln -s /path/to/thrift-generator/apps/thrift_generator _checkouts/thrift_generator
+ln -s /path/to/thrift-erl/apps/rebar3_thrift _checkouts/rebar3_thrift
+ln -s /path/to/thrift-erl/apps/thrift_generator _checkouts/thrift_generator
 ```
 
 ## Example
@@ -160,7 +228,9 @@ ok = 'Ping_server':stop(Server).
   specifically), `active_n`, `backlog`;
 - client: `host`, `port`, `timeout` (connect and TLS handshake;
   per-call timeouts ride the call itself; `connect_timeout` overrides
-  the umbrella), `max_frame_size`, `active_n`.
+  the umbrella), `max_frame_size`, `active_n`;
+- both: `on_event` — the observability callback (see
+  [Observability](#observability)).
 
 A plain `stop/1` takes the server down at once. `stop/2` with
 `#{drain => Timeout}` shuts down gracefully first: the listen socket
@@ -191,6 +261,53 @@ wire format (`binary`, `compact` and `json` are built in; any
   from the struct descriptor, no compiled definitions needed to read
   it (`records:get/2`, `records:get_name/1`, ...). Older releases
   answer `{error, {unsupported_repr, native}}`.
+
+### One struct, four representations
+
+Decoding the same `PingRequest` bytes in the four representations —
+only the record needs its hrl include, the maps and the native record
+need nothing:
+
+```erlang
+{ok, Req}    = ping_api_types:ping_api_decode_pingrequest(Bin),         %% record (the default)
+{ok, Map}    = ping_api_types:ping_api_decode_pingrequest(Bin, map),    %% plain atom-key map
+{ok, Struct} = ping_api_types:ping_api_decode_pingrequest(Bin, struct), %% tagged map
+{ok, Native} = ping_api_types:ping_api_decode_pingrequest(Bin, native), %% EEP-79 (OTP 29+)
+```
+
+The value each binding carries:
+
+```erlang
+Req = #ping_api_pingrequest{message = <<"hi">>},
+Map = #{message => <<"hi">>},
+Struct = #{__struct__ => ping_api_pingrequest, message => <<"hi">>},
+%% Native is a native record: pattern-matching it takes a compiled
+%% -record declaration, reading it takes nothing:
+<<"hi">> = records:get(message, Native).
+```
+
+Details worth knowing: a field absent on the wire is absent from the
+maps (the record carries `undefined` in its slot instead), the
+`__struct__` tag is the same record tag the record repr uses, and
+every form encodes back to the same bytes — the input representation
+is auto-detected:
+
+```erlang
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req),
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Map),
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Struct),
+{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Native).
+```
+
+The facade adds options on top — `strict => true` fails a map/struct
+input carrying keys that match no declared field, instead of dropping
+them silently:
+
+```erlang
+{error, {unknown_fields, [extra]}} =
+    thrift_erl:encode(ping_api_types:struct_info(<<"PingRequest">>),
+                      #{message => <<"hi">>, extra => 1}, binary, #{strict => true}).
+```
 
 `encode/2` accepts any representation and auto-detects it; `decode/3`
 produces the requested one. `thrift_erl:encode/4` takes an options map
@@ -400,6 +517,56 @@ thrift_erl_reconnecting_client:get_and_reset_stats(Client).
 Server-reported exceptions are protocol replies: they come back
 unchanged and never reconnect. Every failed retry is logged at
 warning level (`domain => [thrift]`).
+
+## Observability
+
+Clients, reconnecting wrappers and servers accept `on_event`: an
+observability callback — `undefined` (the default), a fun of arity 1,
+or `{Module, Function, Args}` (the event is appended to `Args`, so the
+handler can carry its own context — a pool id, an ETS table). Dispatch
+is synchronous in the emitting process and crash-isolated: a handler
+exception is discarded and never reaches the caller, the client or the
+server. Handlers must still be fast — they run on the call path.
+
+```erlang
+%% a client: one event per caller-facing answer, a plain fun
+{ok, Client} = thrift_erl_client:start_link(#{
+    host => "localhost", port => 9090, service => 'Ping_server',
+    on_event => fun(#{type := Type, function := Fun, duration_us := Us}) ->
+                        logger:info("thrift ~ts ~ts: ~p us", [Type, Fun, Us])
+                end}),
+
+%% a server: {M, F, Args} carries context, the event rides last
+%% (the call becomes my_metrics:record(<<"Ping">>, Event))
+{ok, Server} = thrift_erl_server:start_link(#{
+    port => 9090, handler => ping_handler, service => 'Ping_server',
+    on_event => {my_metrics, record, [<<"Ping">>]}}).
+```
+
+The catalogue — one map per event, `type` first (the full contract
+lives in the `thrift_erl_events` moduledoc):
+
+- **client** — exactly one event per caller-facing answer, so counting
+  them reproduces `get_stats/1`: `#{type => call_ok, function => Fun,
+  duration_us => N, oneway => boolean()}` (the span covers the queue
+  wait plus the wire round-trip — the same one the per-call timeout
+  arms over) and `#{type => call_error, function => Fun, reason => R,
+  duration_us => N, oneway => boolean()}`, where `reason` is exactly
+  what the caller receives (`closed`, a timeout, a protocol error, a
+  declared exception tuple, ...);
+- **reconnecting wrapper** — the connection axis only (call events
+  come from the wrapped client, which gets the same handler):
+  `#{type => connected}`, `#{type => connect_failed, reason => R,
+  retry_in_ms => N}`, `#{type => disconnected, reason => R,
+  retry_in_ms => N}`;
+- **server connection** — `#{type => connection_open, peer => Peer |
+  undefined}`, `#{type => connection_closed, reason => R}` and
+  `#{type => handler_error, function => Fun, reason => R}` — a handler
+  crash or an unsupported handler result; declared exceptions and
+  protocol errors are answers, not handler errors.
+
+The generated client and server take `on_event` unchanged — their
+`start_link/1` accepts the same options map as the runtime modules.
 
 ## Multiplexed services
 
