@@ -43,7 +43,8 @@
     oneway_test/0,
     implicit_field_ids_left_undefined_test/0,
     reserved_keyword_error_test/0,
-    syntax_error_test/0
+    syntax_error_test/0,
+    keyword_field_names_test/0
 ]).
 
 namespace_annotations_test() ->
@@ -278,4 +279,20 @@ reserved_keyword_error_test() ->
 
 syntax_error_test() ->
     ?assertMatch({error, _}, thrift_generator:parse_string(<<"struct">>)),
+    ok.
+
+%% Apache Thrift 0.18+ (THRIFT-5626) accepts IDL keywords as field
+%% names; the field keeps the keyword's literal text.
+
+keyword_field_names_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        <<"struct S { 1: required i32 oneway, 2: optional string type, 3: list<bool> map, 4: binary i8 }">>
+    ),
+    #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
+    #thrift_generator_struct{fields = Fields} = Struct#thrift_generator_node.payload,
+    Names = [
+        (Field#thrift_generator_node.payload)#thrift_generator_field.name
+     || Field <- Fields
+    ],
+    ?assertEqual([<<"oneway">>, <<"type">>, <<"map">>, <<"i8">>], Names),
     ok.

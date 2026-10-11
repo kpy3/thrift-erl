@@ -28,6 +28,7 @@
     union_required_field_error_test/0,
     oneway_shape_error_test/0,
     throw_not_exception_error_test/0,
+    throw_required_field_error_test/0,
     unknown_type_error_test/0,
     const_enum_ref_test/0,
     const_chain_and_cycle_test/0,
@@ -98,6 +99,16 @@ throw_not_exception_error_test() ->
     ?assertMatch(
         {error, [{<<"t.thrift">>, _, <<"throw field must be an exception, got T">>}]},
         analyze(<<"struct T { 1: i32 x }\nservice S { void f() throws (1: T t) }">>)
+    ),
+    ok.
+
+%% Apache Thrift rejects `required` in a throws clause (0.18,
+%% THRIFT-5669).
+
+throw_required_field_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"throw field e cannot be required">>}]},
+        analyze(<<"exception E { 1: string m }\nservice S { void f() throws (1: required E e) }">>)
     ),
     ok.
 

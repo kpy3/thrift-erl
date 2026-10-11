@@ -31,7 +31,7 @@ Nonterminals
     Enum EnumList EnumValue
     Service Extends
     FunctionList Function Oneway ReturnType Throws
-    FieldList Field FieldIdentifier FieldRequired FieldDefault
+    FieldList Field FieldName FieldIdentifier FieldRequired FieldDefault
     FieldType BaseType MapType SetType ListType
     Annotations Annotation AnnotationList
     Doc Separator.
@@ -181,10 +181,46 @@ Throws -> throws '(' FieldList ')': '$3'.
 FieldList -> '$empty': [].
 FieldList -> Field FieldList: ['$1'|'$2'].
 
-Field -> Doc FieldIdentifier FieldRequired FieldType Annotations ident FieldDefault Annotations Separator:
+%% Field names accept IDL keywords, following Apache Thrift 0.18
+%% (THRIFT-5626): `1: i32 oneway` names the field "oneway". Function,
+%% const, enum and type names keep the plain-identifier rule, as in
+%% upstream.
+
+Field -> Doc FieldIdentifier FieldRequired FieldType Annotations FieldName FieldDefault Annotations Separator:
     set_doc('$1',
             build_node(thrift_generator_field, line('$6'), '$8',
                        ['$2', '$3', merge_type_annotations('$4', '$5'), unwrap('$6'), '$7'])).
+
+FieldName -> ident: '$1'.
+FieldName -> namespace: keyword_ident('$1').
+FieldName -> cpp_include: keyword_ident('$1').
+FieldName -> include: keyword_ident('$1').
+FieldName -> void: keyword_ident('$1').
+FieldName -> bool: keyword_ident('$1').
+FieldName -> byte: keyword_ident('$1').
+FieldName -> i8: keyword_ident('$1').
+FieldName -> i16: keyword_ident('$1').
+FieldName -> i32: keyword_ident('$1').
+FieldName -> i64: keyword_ident('$1').
+FieldName -> double: keyword_ident('$1').
+FieldName -> string: keyword_ident('$1').
+FieldName -> binary: keyword_ident('$1').
+FieldName -> uuid: keyword_ident('$1').
+FieldName -> map: keyword_ident('$1').
+FieldName -> list: keyword_ident('$1').
+FieldName -> set: keyword_ident('$1').
+FieldName -> oneway: keyword_ident('$1').
+FieldName -> typedef: keyword_ident('$1').
+FieldName -> struct: keyword_ident('$1').
+FieldName -> union: keyword_ident('$1').
+FieldName -> exception: keyword_ident('$1').
+FieldName -> extends: keyword_ident('$1').
+FieldName -> throws: keyword_ident('$1').
+FieldName -> service: keyword_ident('$1').
+FieldName -> enum: keyword_ident('$1').
+FieldName -> const: keyword_ident('$1').
+FieldName -> required: keyword_ident('$1').
+FieldName -> optional: keyword_ident('$1').
 
 FieldIdentifier -> int ':': unwrap('$1').
 FieldIdentifier -> '$empty': undefined.
@@ -286,6 +322,12 @@ line({_Token, Line, _Value}) -> Line.
 
 unwrap({V, _}) when is_atom(V) -> V;
 unwrap({_,_,V}) -> V.
+
+% An IDL keyword serving as a field name is re-wrapped as an ident
+% token carrying the keyword's literal text, so Field consumes one
+% uniform token shape.
+
+keyword_ident({Key, Line}) -> {ident, Line, atom_to_binary(Key, utf8)}.
 
 % Merge annotations written after a type into the type tuple itself, so that
 % every type shape carries its annotations.

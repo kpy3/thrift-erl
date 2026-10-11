@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   README now opens with a "Why over the official Apache Thrift
   runtime" summary.
 
+### Generator (`thrift_generator`)
+
+- IDL keywords are accepted as field names, matching Apache Thrift
+  0.18+ (THRIFT-5626): `1: i32 oneway` names the field `oneway`.
+  Function, const, enum and type names keep the plain-identifier rule,
+  as upstream.
+- `required` in a `throws` clause is rejected by the semantic pass
+  (`throw field X cannot be required`), matching Apache Thrift 0.18+
+  (THRIFT-5669); `optional` and the default requiredness stay valid.
+
 ## [0.4.0] — 2026-10-11
 
 Specialized codecs for every protocol, an observability surface, and
