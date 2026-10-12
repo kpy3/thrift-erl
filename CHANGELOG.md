@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-12
+
+Schema-shape freedom: the generator accepts legal, common Thrift it
+used to reject — field atoms shared by several sum unions, same-named
+methods across services of one file — and cross-module references
+resolve by the included file's base name, the Apache Thrift spelling.
+The invocation-wide option axes grow from one (`--repr`) to four and
+reach the rebar3 plugin, which finally honors `repr` too. The CI gate
+is clean on both OTP 28 and 29.
+
 ### Generator (`thrift_generator`)
 
 - Three new invocation-wide option axes next to `--repr`, each applying
