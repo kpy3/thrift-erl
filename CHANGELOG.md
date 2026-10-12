@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Generator (`thrift_generator`)
 
+- Located errors (lexer/parser and semantic findings) render as
+  rebar3/elp-style source excerpts by default — the offending line
+  under a gutter, a `╰──` marker naming the problem. Unreadable
+  sources and unlocated errors fall back to the compact
+  `path:line: message` line, which is also what the new
+  `--compact-errors` CLI switch forces; the rebar3 plugin renders
+  through the same formatter.
 - The generated client and handler module docs word the boundary per
   the representations the service actually passes — `records`, `maps`,
   `native records`, `tagged tuples` for sum unions, or a neutral

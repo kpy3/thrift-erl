@@ -33,6 +33,11 @@ the value representation generated for definitions without an explicit
 artifact must already exist in `out_dir` with the exact content this
 input would produce — drift (missing or stale files) exits 1, so the
 flag works as a CI freshness gate.
+
+Errors render as rebar3/elp-style source excerpts (the offending line
+under a gutter, a `╰──` marker naming the problem); `--compact-errors`
+switches to one-line `path:line: message` entries. The rendering is
+shared with the rebar3 plugin through `format_error/1`.
 """.
 
 -export([main/1]).
@@ -68,9 +73,14 @@ main(RawArgs) ->
 run_parsed(#{file := File} = Parsed, _Options) ->
     OutDir = maps:get(out_dir, Parsed, <<".">>),
     Repr = maps:get(repr, Parsed, record),
+    Resolver =
+        case maps:get(compact_errors, Parsed, false) of
+            true -> fun(_Path) -> {error, compact_errors} end;
+            false -> auto
+        end,
     case maps:get(check, Parsed, false) of
-        true -> check(File, OutDir, Repr);
-        false -> run(File, OutDir, Repr)
+        true -> check(File, OutDir, Repr, Resolver);
+        false -> run(File, OutDir, Repr, Resolver)
     end;
 run_parsed(_Parsed, Options) ->
     parse_error("missing <file.thrift> operand", Options).
@@ -127,11 +137,20 @@ command() ->
                     "verify the generated sources are up to date instead"
                     " of writing; exits 1 on drift (missing or stale files)"
                 ]
+            },
+            #{
+                name => compact_errors,
+                long => "-compact-errors",
+                type => boolean,
+                help => [
+                    "print errors as one-line path:line: message entries"
+                    " instead of the default source-excerpt blocks"
+                ]
             }
         ]
     }.
 
-run(File, OutDir, Repr) ->
+run(File, OutDir, Repr, Resolver) ->
     case thrift_generator:generate(File, OutDir, #{repr => Repr}) of
         {ok, Generated} ->
             io:format("Generated ~b module(s) in ~ts:~n", [
@@ -151,11 +170,11 @@ run(File, OutDir, Repr) ->
             ),
             halt(0);
         {error, Reason} ->
-            io:format(standard_error, "thrift_generator: ~ts~n", [format_error(Reason)]),
+            io:format(standard_error, "~ts~n", [thrift_generator_diagnostic:format(Reason, Resolver)]),
             halt(1)
     end.
 
-check(File, OutDir, Repr) ->
+check(File, OutDir, Repr, Resolver) ->
     case thrift_generator:check(File, OutDir, #{repr => Repr}) of
         ok ->
             io:format("~ts: generated sources are up to date in ~ts~n", [
@@ -163,40 +182,15 @@ check(File, OutDir, Repr) ->
             ]),
             halt(0);
         {error, {stale, Paths}} ->
-            io:format(standard_error, "thrift_generator: ~ts: stale generated sources:~n", [
-                unicode:characters_to_list(File)
-            ]),
-            lists:foreach(
-                fun(Path) ->
-                    io:format(standard_error, "  ~ts~n", [unicode:characters_to_list(Path)])
-                end,
-                Paths
-            ),
+            io:format(standard_error, "~ts~n", [thrift_generator_diagnostic:format({stale, Paths}, Resolver)]),
             halt(1);
         {error, Reason} ->
-            io:format(standard_error, "thrift_generator: ~ts~n", [format_error(Reason)]),
+            io:format(standard_error, "~ts~n", [thrift_generator_diagnostic:format(Reason, Resolver)]),
             halt(1)
     end.
 
-format_error({parse, Path, {Line, Module, Term}}) when is_integer(Line) ->
-    io_lib:format("~ts:~b: ~ts", [Path, Line, Module:format_error(Term)]);
-format_error({parse, Path, Reason}) ->
-    io_lib:format("~ts: ~0p", [Path, Reason]);
-format_error({cycle, Path}) ->
-    io_lib:format("include cycle involving ~ts", [Path]);
-format_error({duplicate_module, Name, First, Second}) ->
-    io_lib:format("module ~ts declared twice: ~ts and ~ts", [Name, First, Second]);
-format_error(Errors) when is_list(Errors) ->
-    lists:join(
-        "\n",
-        [io_lib:format("~ts:~b: ~ts", [File, Line, Message]) || {File, Line, Message} <- Errors]
-    );
-format_error({write_error, Path, Reason}) ->
-    io_lib:format("cannot write ~ts: ~0p", [Path, Reason]);
-format_error({stale, Paths}) ->
-    io_lib:format(
-        "generated sources are out of date (run the generator to refresh):~n~ts",
-        [[io_lib:format("  ~ts~n", [Path]) || Path <- Paths]]
-    );
+%% The rendering itself lives in thrift_generator_diagnostic — the CLI
+%% and the rebar3 plugin share one formatter.
+
 format_error(Reason) ->
-    io_lib:format("~0p", [Reason]).
+    thrift_generator_diagnostic:format(Reason).
