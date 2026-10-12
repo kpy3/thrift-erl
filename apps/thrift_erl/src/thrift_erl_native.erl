@@ -36,6 +36,8 @@ out of the module that decoded them.
 
 -export([supported/0, is_native/1, create/3, fields/1]).
 
+-export_type([native_record/0]).
+
 %% Derived from the running release rather than a literal, so dialyzer
 %% sees a plain boolean() and keeps the OTP-28 arms of the facade's
 %% `supported()` cases alive on an OTP-29 build.
@@ -45,7 +47,15 @@ out of the module that decoded them.
 supported() ->
     list_to_integer(erlang:system_info(otp_release)) >= 29.
 
+%% The spec-level shape of a native record. `record()' is predefined
+%% from OTP 29 on; elvis, which parses the raw source without running
+%% the preprocessor, would see both branches and flag an unresolvable
+%% `record/0' in the exported specs on an OTP-28 toolchain — hence the
+%% exported alias instead of the bare builtin.
+
 -if(?OTP_RELEASE >= 29).
+
+-opaque native_record() :: record().
 
 -doc "Answers whether Term is a native record of any definition.".
 -spec is_native(term()) -> boolean().
@@ -56,7 +66,7 @@ is_native(Term) ->
 Creates an exported native record `Module:Name` with the given
 `{FieldAtom, Value}` pairs (every declared field, in declaration order).
 """.
--spec create(module(), atom(), [{atom(), term()}]) -> record().
+-spec create(module(), atom(), [{atom(), term()}]) -> native_record().
 create(Module, Name, FieldValues) ->
     records:create(Module, Name, FieldValues, #{is_exported => true}).
 
@@ -64,7 +74,7 @@ create(Module, Name, FieldValues) ->
 The identity and content of a native record: its module, its name and
 the `FieldAtom => Value` map over all its fields.
 """.
--spec fields(record()) -> {module(), atom(), #{atom() => term()}}.
+-spec fields(native_record()) -> {module(), atom(), #{atom() => term()}}.
 fields(Record) ->
     Names = records:get_field_names(Record),
     FieldMap = maps:from_list([{Name, records:get(Name, Record)} || Name <- Names]),
@@ -72,10 +82,17 @@ fields(Record) ->
 
 -else.
 
+-opaque native_record() :: term().
+
 -doc "Always false: native records need OTP 29.".
 -spec is_native(term()) -> boolean().
+%% `supported()', not a literal `false': on an OTP-28 toolchain dialyzer
+%% folds a literal into a `false' return type, kills every caller's
+%% `true' arm as unmatched and the native wire paths as never-called.
+%% `supported()' stays an unfoldable boolean() here and answers false at
+%% runtime on this release anyway.
 is_native(_Term) ->
-    false.
+    supported().
 
 -doc "Raises: native records cannot be created before OTP 29.".
 -spec create(module(), atom(), [{atom(), term()}]) -> no_return().
@@ -83,7 +100,7 @@ create(_Module, _Name, _FieldValues) ->
     erlang:error(native_records_unsupported).
 
 -doc "Raises: no native record can exist before OTP 29.".
--spec fields(term()) -> no_return().
+-spec fields(native_record()) -> no_return().
 fields(_Record) ->
     erlang:error(native_records_unsupported).
 

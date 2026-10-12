@@ -464,6 +464,13 @@ struct_to_wire(Fields, Record) ->
 %% the descriptor, declared fields are taken when defined, `undefined`
 %% is skipped exactly as for tuple records, and fields the descriptor
 %% does not declare (a newer definition than the descriptor) are ignored.
+%%
+%% Preprocessor-split like `thrift_erl_native' itself: on a pre-29
+%% toolchain dialyzer types `fields/1' as no_return() and would kill this
+%% body down to its spec, so the stub keeps the raise contract and says
+%% so in its spec — no native value can ever reach it there anyway.
+
+-if(?OTP_RELEASE >= 29).
 
 -spec native_to_wire(module(), binary(), term()) -> map().
 native_to_wire(Module, Name, Record) ->
@@ -486,6 +493,14 @@ native_lookup(Atom, FieldMap) ->
         #{Atom := V} -> {ok, V};
         _ -> none
     end.
+
+-else.
+
+-spec native_to_wire(module(), binary(), term()) -> no_return().
+native_to_wire(_Module, _Name, _Record) ->
+    erlang:error(native_records_unsupported).
+
+-endif.
 
 %% A native-mode struct declares no tuple record, so the map input is
 %% the only non-native shape: field atoms and wire names both normalize
