@@ -39,8 +39,8 @@ wrap(P) ->
 
 -spec area(integer(), integer()) ->
     {ok, integer()}
-    | {error, {exception, binary(), #mapmode_oops{}}}.
+    | {error, {exception, #mapmode_oops{}}}.
 area(W, _H) when W < 0 ->
-    {error, {exception, <<"Oops">>, #mapmode_oops{why = <<"negative width">>}}};
+    {error, {exception, #mapmode_oops{why = <<"negative width">>}}};
 area(W, H) ->
     {ok, W * H}.

@@ -442,33 +442,33 @@ generated_loopback_framed(Config) ->
 -spec generated_loopback(ct:config(), buffered | framed) -> ok.
 generated_loopback(Config, Transport) ->
     ok = generate_modules(data_file(Config, "semantic/main.thrift")),
-    {ok, Server} = 'MainService_server':start_link(#{
+    {ok, Server} = main_main_service_server:start_link(#{
         port => 0,
         handler => thrift_generator_test_handler,
         transport => Transport
     }),
     try
-        {ok, Port} = 'MainService_server':port(Server),
-        {ok, Client} = 'MainService_client':start_link(#{
+        {ok, Port} = main_main_service_server:port(Server),
+        {ok, Client} = main_main_service_client:start_link(#{
             host => "127.0.0.1", port => Port, transport => Transport
         }),
         try
-            ?assertEqual({ok, undefined}, 'MainService_client':ping(Client)),
-            ?assertEqual({ok, 12}, 'MainService_client':area(Client, 3, 4)),
+            ?assertEqual({ok, undefined}, main_main_service_client:ping(Client)),
+            ?assertEqual({ok, 12}, main_main_service_client:area(Client, 3, 4)),
             ?assertEqual(
                 {ok, {shared_inner, <<"5">>}},
-                'MainService_client':fetch(Client, 5)
+                main_main_service_client:fetch(Client, 5)
             ),
             ?assertEqual(
-                {error, {exception, <<"Failed">>, {main_failed, <<"negative id">>}}},
-                'MainService_client':fetch(Client, -1)
+                {error, {exception, {main_failed, <<"negative id">>}}},
+                main_main_service_client:fetch(Client, -1)
             ),
             check_oneway(Client)
         after
-            'MainService_client':stop(Client)
+            main_main_service_client:stop(Client)
         end
     after
-        'MainService_server':stop(Server)
+        main_main_service_server:stop(Server)
     end.
 
 -spec check_oneway(pid()) -> ok.
@@ -476,7 +476,7 @@ check_oneway(Client) ->
     Sink = self(),
     true = register(thrift_generator_test_sink, Sink),
     try
-        ok = 'MainService_client':fire(Client, 42),
+        ok = main_main_service_client:fire(Client, 42),
         receive
             {fired, 42} -> ok
         after 5000 -> exit(oneway_not_delivered)
@@ -565,29 +565,29 @@ generated_map_mode(Config) ->
     ),
     %% e2e: maps over the wire, both key types, declared exception
     {ok, Server} =
-        'MapSvc_server':start_link(#{port => 0, handler => thrift_generator_mapmode_handler}),
+        mapmode_map_svc_server:start_link(#{port => 0, handler => thrift_generator_mapmode_handler}),
     try
-        {ok, Port} = 'MapSvc_server':port(Server),
-        {ok, Client} = 'MapSvc_client':start_link(#{host => "127.0.0.1", port => Port}),
+        {ok, Port} = mapmode_map_svc_server:port(Server),
+        {ok, Client} = mapmode_map_svc_client:start_link(#{host => "127.0.0.1", port => Port}),
         try
             ?assertEqual(
                 {ok, #{x => 2, y => 1}},
-                'MapSvc_client':reflect(Client, #{x => 1, y => 2})
+                mapmode_map_svc_client:reflect(Client, #{x => 1, y => 2})
             ),
             ?assertEqual(
                 {ok, {mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 101}}},
-                'MapSvc_client':wrap(Client, #{x => 1, y => 2})
+                mapmode_map_svc_client:wrap(Client, #{x => 1, y => 2})
             ),
-            ?assertEqual({ok, 12}, 'MapSvc_client':area(Client, 3, 4)),
+            ?assertEqual({ok, 12}, mapmode_map_svc_client:area(Client, 3, 4)),
             ?assertEqual(
-                {error, {exception, <<"Oops">>, {mapmode_oops, <<"negative width">>}}},
-                'MapSvc_client':area(Client, -1, 4)
+                {error, {exception, {mapmode_oops, <<"negative width">>}}},
+                mapmode_map_svc_client:area(Client, -1, 4)
             )
         after
-            'MapSvc_client':stop(Client)
+            mapmode_map_svc_client:stop(Client)
         end
     after
-        'MainService_server':stop(Server)
+        main_main_service_server:stop(Server)
     end.
 
 %% End-to-end over the `--repr native` axis: definitions without an
@@ -637,13 +637,13 @@ generated_native_repr(Config) ->
         nativedemo_types:decode_nativedemo_point(PointBin, record)
     ),
     {ok, Server} =
-        'NatSvc_server':start_link(#{port => 0, handler => thrift_generator_nativedemo_handler}),
+        nativedemo_nat_svc_server:start_link(#{port => 0, handler => thrift_generator_nativedemo_handler}),
     try
-        {ok, Port} = 'NatSvc_server':port(Server),
-        {ok, Client} = 'NatSvc_client':start_link(#{host => "127.0.0.1", port => Port}),
+        {ok, Port} = nativedemo_nat_svc_server:port(Server),
+        {ok, Client} = nativedemo_nat_svc_client:start_link(#{host => "127.0.0.1", port => Port}),
         try
             %% scalar results ride the wire untouched on every release
-            ?assertEqual({ok, 12}, 'NatSvc_client':area(Client, 3, 4)),
+            ?assertEqual({ok, 12}, nativedemo_nat_svc_client:area(Client, 3, 4)),
             case native_supported() of
                 true ->
                     {ok, PointNative} = nativedemo_types:decode_nativedemo_point(PointBin),
@@ -666,11 +666,11 @@ generated_native_repr(Config) ->
                     %% the codec axis, not the wire-call surface
                     ?assertEqual(
                         {ok, #{x => -1, label => <<"p">>}},
-                        'NatSvc_client':reflect(Client, #{x => 1, label => <<"p">>})
+                        nativedemo_nat_svc_client:reflect(Client, #{x => 1, label => <<"p">>})
                     ),
                     ?assertEqual(
-                        {error, {exception, <<"Oops">>, #{why => <<"negative x">>}}},
-                        'NatSvc_client':reflect(Client, #{x => -5, label => <<"p">>})
+                        {error, {exception, #{why => <<"negative x">>}}},
+                        nativedemo_nat_svc_client:reflect(Client, #{x => -5, label => <<"p">>})
                     );
                 false ->
                     ?assertEqual(
@@ -679,10 +679,10 @@ generated_native_repr(Config) ->
                     )
             end
         after
-            'NatSvc_client':stop(Client)
+            nativedemo_nat_svc_client:stop(Client)
         end
     after
-        'NatSvc_server':stop(Server)
+        nativedemo_nat_svc_server:stop(Server)
     end.
 
 %% End-to-end over the Erlang-annotated fixture: an `erl.set = "ordset"`

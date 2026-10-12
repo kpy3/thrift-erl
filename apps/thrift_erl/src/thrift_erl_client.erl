@@ -27,7 +27,9 @@ without extra keep-alive logic.
 `call/4` sends a CALL envelope with the function's parameter struct,
 then waits for exactly one REPLY. The reply payload is decoded per the
 service description: field 0 is the success value, a declared exception
-field turns into `{error, {exception, Name, Map}}`, and a
+field turns into the wire-level `{error, {exception, Name, Map}}`
+(generated clients convert it to `{error, {exception, Value}}` in the
+value's representation), and a
 `TApplicationException` into `{error, {application_exception, ...}}`.
 `oneway/4` answers as soon as the message is on the wire.
 
@@ -104,7 +106,11 @@ both:
 
 -type call_result() ::
     {ok, term()}
+    %% wire level: the exception carries its name; after
+    %% `thrift_erl_record:call_result_from_wire/3' the value alone
+    %% remains — its representation identifies the exception.
     | {error, {exception, binary(), thrift_erl_binary:struct_value()}}
+    | {error, {exception, thrift_erl_binary:struct_value()}}
     | {error, {application_exception, binary(), non_neg_integer(), binary()}}
     | {error, term()}.
 

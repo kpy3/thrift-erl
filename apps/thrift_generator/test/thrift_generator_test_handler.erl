@@ -36,9 +36,9 @@ area(W, H) ->
 
 -spec fetch(integer()) ->
     {ok, #shared_inner{}}
-    | {error, {exception, binary(), #main_failed{}}}.
+    | {error, {exception, #main_failed{}}}.
 fetch(Id) when Id < 0 ->
-    {error, {exception, <<"Failed">>, #main_failed{reason = <<"negative id">>}}};
+    {error, {exception, #main_failed{reason = <<"negative id">>}}};
 fetch(Id) ->
     {ok, #shared_inner{name = integer_to_binary(Id)}}.
 

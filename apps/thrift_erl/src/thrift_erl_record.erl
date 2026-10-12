@@ -106,14 +106,22 @@ args_from_wire({struct, {_Kind, Fields}}, Args) ->
 -doc """
 Converts a handler result to wire representation.
 
-`Result` is `{ok, Value}`, `{error, {exception, Name, Value}}` or
-anything else (passed through) — the shapes the connection handles.
+`Result` is `{ok, Value}`, `{error, {exception, Value}}` — the declared
+exception identified by its representation tag — or
+`{error, {exception, Name, Value}}` with an explicit wire name (the
+form hand-written descriptors and map-representation exceptions need);
+anything else passes through.
 """.
 -spec result_to_wire(type_desc() | undefined, [exception_field()], term()) -> term().
 result_to_wire(_ReplyType, _Exceptions, {ok, undefined} = Result) ->
     Result;
 result_to_wire(ReplyType, _Exceptions, {ok, Value}) when ReplyType =/= undefined ->
     {ok, to_wire(ReplyType, Value)};
+result_to_wire(_ReplyType, Exceptions, {error, {exception, Value}} = Result) ->
+    case exception_name(Value, Exceptions) of
+        {ok, Name} -> result_to_wire(undefined, Exceptions, {error, {exception, Name, Value}});
+        error -> Result
+    end;
 result_to_wire(_ReplyType, Exceptions, {error, {exception, Name, Value}}) ->
     case exception_type(Name, Exceptions) of
         {ok, Type} -> {error, {exception, Name, to_wire(Type, Value)}};
@@ -123,20 +131,23 @@ result_to_wire(_ReplyType, _Exceptions, Result) ->
     Result.
 
 -doc """
-Converts a call result to the handler (record) representation.
+Converts a call result to the handler representation.
 
-`CallResult` is what `thrift_erl_client:call/4` returned.
+`CallResult` is what `thrift_erl_client:call/4` returned. Declared
+exceptions answer `{error, {exception, Value}}`: the value's
+representation — record tag, `__struct__` map or native record —
+identifies the exception.
 """.
 -spec call_result_from_wire(type_desc() | undefined, [exception_field()], call_result()) ->
-    call_result().
+    term().
 call_result_from_wire(_ReplyType, _Exceptions, {ok, undefined} = Result) ->
     Result;
 call_result_from_wire(ReplyType, _Exceptions, {ok, Value}) when ReplyType =/= undefined ->
     {ok, from_wire(ReplyType, Value)};
 call_result_from_wire(_ReplyType, Exceptions, {error, {exception, Name, Value}}) ->
     case exception_type(Name, Exceptions) of
-        {ok, Type} -> {error, {exception, Name, from_wire(Type, Value)}};
-        error -> {error, {exception, Name, Value}}
+        {ok, Type} -> {error, {exception, from_wire(Type, Value)}};
+        error -> {error, {exception, Value}}
     end;
 call_result_from_wire(_ReplyType, _Exceptions, Result) ->
     Result.
@@ -154,6 +165,44 @@ exception_type(Name, Exceptions) ->
         {value, {_, _, Type, _, _}} -> {ok, Type};
         false -> error
     end.
+
+%% The name of the declared exception a handler value belongs to: the
+%% value's representation tag (record tag, `__struct__` atom, sum-union
+%% field atom) is matched against every declared exception. Map-mode
+%% exceptions are plain maps and carry no identity — handlers signal
+%% them through the explicit-name form.
+
+-spec exception_name(term(), [exception_field()]) -> {ok, binary()} | error.
+exception_name(Value, Exceptions) ->
+    Pred = fun({_, _, Type, _FieldName, _}) -> value_matches_repr(Value, Type) end,
+    case lists:search(Pred, Exceptions) of
+        {value, {_, _, {struct, {ref, _, StructName}}, _, _}} -> {ok, StructName};
+        {value, {_, _, _, FieldName, _}} -> {ok, FieldName};
+        false -> error
+    end.
+
+-spec value_matches_repr(term(), type_desc()) -> boolean().
+value_matches_repr(Value, {struct, {ref, Mod, Name}}) ->
+    Tag =
+        case Value of
+            #{'__struct__' := T} when is_atom(T) -> T;
+            _ -> tuple_tag(Value)
+        end,
+    case struct_mode(Mod, Name) of
+        {record, Declared, _} -> Tag =:= Declared;
+        {map, _} -> false;
+        {native, Declared} -> Tag =:= Declared;
+        {sum, FieldAtoms} -> is_atom(Tag) andalso lists:member(Tag, FieldAtoms);
+        _ -> false
+    end;
+value_matches_repr(_, _) ->
+    false.
+
+-spec tuple_tag(term()) -> atom() | undefined.
+tuple_tag(Value) when is_tuple(Value), tuple_size(Value) >= 1, is_atom(element(1, Value)) ->
+    element(1, Value);
+tuple_tag(_) ->
+    undefined.
 
 %%--------------------------------------------------------------------
 %% Representation introspection

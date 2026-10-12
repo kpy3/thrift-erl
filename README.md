@@ -55,7 +55,8 @@ the in-process contract differs, it is deliberate.
 - **Errors are values.** Decoding answers `{error, trailing}` /
   `{error, truncated}` instead of throwing; a declared server
   exception comes back to the client typed, as
-  `{error, {exception, Name, Record}}`.
+  `{error, {exception, Record}}` — the value's representation
+  identifies the exception.
 - **Four in-process representations.** Records (default), plain atom
   maps, tagged struct-maps, or EEP-79 native records on OTP 29 —
   selectable per struct, uniform all the way down, reshaped without
@@ -64,9 +65,8 @@ the in-process contract differs, it is deliberate.
 - **A runtime with no dependencies.** `thrift_erl` stands on kernel
   and stdlib alone, generated code depends on nothing else, and the
   generator itself never ships to production.
-- **Modern OTP.** Requires OTP 28+ (CI matrix: 28, 29): `{active, N}`
-  socket I/O with no passive recv loops, supervised behaviours instead
-  of bare processes, `-nominal` typedefs, and `-doc`/`-moduledoc`
+- **Modern OTP.** Requires OTP 28+, old data structures (dicts, sets v1, etc)
+  dropped, `-nominal` typedefs, and `-doc`/`-moduledoc`
   propagated from IDL doc comments into the generated modules.
 - **Operational surface.** Graceful drain on server stop, a
   reconnecting client with backoff, per-worker statistics for pool
@@ -130,8 +130,12 @@ _build/prod/bin/thrift_generator generate my_api.thrift -o src
 ```
 
 This generates `<mod>_types.erl` plus a `<mod>_types.hrl` include (one
-pair per IDL file) and three modules per service: `<Svc>_client.erl`,
-`<Svc>_server.erl`, `<Svc>_handler.erl`. Files whose on-disk content
+pair per IDL file) and three modules per service —
+`<prefix>_<svc>_client.erl`, `<prefix>_<svc>_server.erl`,
+`<prefix>_<svc>_handler.erl`, where `<prefix>` is the file's
+namespace-derived identifier prefix and `<svc>` is the snake-cased
+service name (`Ping` in `namespace erl ping.api` generates
+`ping_api_ping_client.erl` and friends). Files whose on-disk content
 already matches are left untouched, so regenerating an unchanged IDL
 does not churn mtimes.
 
@@ -211,14 +215,14 @@ headers say which):
 -module(ping_handler).
 -include("ping_api_types.hrl").
 
--behaviour('Ping_handler').
+-behaviour(ping_api_ping_handler).
 
 -export([ping/1, poke/0]).
 
-ping(#ping_api_pingrequest{message = <<"bad">>}) ->
-    {error, {exception, <<"NoSuchMessage">>, #ping_api_nosuchmessage{text = <<"nope">>}}};
-ping(#ping_api_pingrequest{message = Msg}) ->
-    {ok, #ping_api_pingreply{message = <<"pong: ", Msg/binary>>, at_millis = 0}}.
+ping(#ping_api_ping_request{message = <<"bad">>}) ->
+    {error, {exception, #ping_api_no_such_message{text = <<"nope">>}}};
+ping(#ping_api_ping_request{message = Msg}) ->
+    {ok, #ping_api_ping_reply{message = <<"pong: ", Msg/binary>>, at_millis = 0}}.
 
 poke() -> {ok, undefined}.
 ```
@@ -226,15 +230,15 @@ poke() -> {ok, undefined}.
 Server and client:
 
 ```erlang
-{ok, Server} = 'Ping_server':start_link(#{port => 9090, handler => ping_handler}),
-{ok, Client} = 'Ping_client':start_link(#{host => "127.0.0.1", port => 9090}),
-{ok, #ping_api_pingreply{message = <<"pong: hi">>}} =
-    'Ping_client':ping(Client, #ping_api_pingrequest{message = <<"hi">>}),
+{ok, Server} = ping_api_ping_server:start_link(#{port => 9090, handler => ping_handler}),
+{ok, Client} = ping_api_ping_client:start_link(#{host => "127.0.0.1", port => 9090}),
+{ok, #ping_api_ping_reply{message = <<"pong: hi">>}} =
+    ping_api_ping_client:ping(Client, #ping_api_ping_request{message = <<"hi">>}),
 %% a declared exception comes back typed:
-{error, {exception, <<"NoSuchMessage">>, #ping_api_nosuchmessage{}}} =
-    'Ping_client':ping(Client, #ping_api_pingrequest{message = <<"bad">>}),
-ok = 'Ping_client':stop(Client),
-ok = 'Ping_server':stop(Server).
+{error, {exception, #ping_api_no_such_message{}}} =
+    ping_api_ping_client:ping(Client, #ping_api_ping_request{message = <<"bad">>}),
+ok = ping_api_ping_client:stop(Client),
+ok = ping_api_ping_server:stop(Server).
 ```
 
 `start_link` options (a map at creation time, not app env):
@@ -263,7 +267,7 @@ exchange finish and fails the calls only of connections that cannot
 finish):
 
 ```erlang
-ok = 'Ping_server':stop(Server, #{drain => 10_000}).
+ok = ping_api_ping_server:stop(Server, #{drain => 10_000}).
 ```
 
 ## Representations and protocols
@@ -289,18 +293,18 @@ only the record needs its hrl include, the maps and the native record
 need nothing:
 
 ```erlang
-{ok, Req}    = ping_api_types:ping_api_decode_pingrequest(Bin),         %% record (the default)
-{ok, Map}    = ping_api_types:ping_api_decode_pingrequest(Bin, map),    %% plain atom-key map
-{ok, Struct} = ping_api_types:ping_api_decode_pingrequest(Bin, struct), %% tagged map
-{ok, Native} = ping_api_types:ping_api_decode_pingrequest(Bin, native), %% EEP-79 (OTP 29+)
+{ok, Req}    = ping_api_types:ping_api_decode_ping_request(Bin),         %% record (the default)
+{ok, Map}    = ping_api_types:ping_api_decode_ping_request(Bin, map),    %% plain atom-key map
+{ok, Struct} = ping_api_types:ping_api_decode_ping_request(Bin, struct), %% tagged map
+{ok, Native} = ping_api_types:ping_api_decode_ping_request(Bin, native), %% EEP-79 (OTP 29+)
 ```
 
 The value each binding carries:
 
 ```erlang
-Req = #ping_api_pingrequest{message = <<"hi">>},
+Req = #ping_api_ping_request{message = <<"hi">>},
 Map = #{message => <<"hi">>},
-Struct = #{__struct__ => ping_api_pingrequest, message => <<"hi">>},
+Struct = #{__struct__ => ping_api_ping_request, message => <<"hi">>},
 %% Native is a native record: pattern-matching it takes a compiled
 %% -record declaration, reading it takes nothing:
 <<"hi">> = records:get(message, Native).
@@ -313,10 +317,10 @@ every form encodes back to the same bytes — the input representation
 is auto-detected:
 
 ```erlang
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req),
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Map),
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Struct),
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Native).
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req),
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Map),
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Struct),
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Native).
 ```
 
 The facade adds options on top — `strict => true` fails a map/struct
@@ -339,13 +343,13 @@ from every entry point. Every struct in `<mod>_types.erl` gets a
 fixed set of codec functions (prefix = the `erl` namespace prefix, then the lowercased struct name):
 
 ```erlang
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req),
-{ok, Req} = ping_api_types:ping_api_decode_pingrequest(Bin),                  %% record
-{ok, Map} = ping_api_types:ping_api_decode_pingrequest(Bin, map),             %% atom-key map
-{ok, Struct} = ping_api_types:ping_api_decode_pingrequest(Bin, struct),
-{ok, Req} = ping_api_types:ping_api_pingrequest_from_map(Map),
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req),
+{ok, Req} = ping_api_types:ping_api_decode_ping_request(Bin),                  %% record
+{ok, Map} = ping_api_types:ping_api_decode_ping_request(Bin, map),             %% atom-key map
+{ok, Struct} = ping_api_types:ping_api_decode_ping_request(Bin, struct),
+{ok, Req} = ping_api_types:ping_api_ping_request_from_map(Map),
 %% the protocol goes into the last argument of every codec:
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req, my_protocol_mod).
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, my_protocol_mod).
 ```
 
 Decoding is strict: trailing bytes answer `{error, trailing}`,
@@ -375,9 +379,9 @@ emitted), so pattern matching one requires declaring `-record #name{}`
 in the consumer — reading through the `records` module needs nothing:
 
 ```erlang
-{ok, Req} = ping_api_types:ping_api_decode_pingrequest(Bin, native),
+{ok, Req} = ping_api_types:ping_api_decode_ping_request(Bin, native),
 <<"hi">> = records:get(message, Req),
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req).   %% auto-detected
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req).   %% auto-detected
 ```
 
 Enums get `color_to_int/1` / `color_from_int/1` helpers, constants get
@@ -395,13 +399,13 @@ generated codecs all resolve it through `thrift_erl:protocol_module/1`
 the same way as `binary`:
 
 ```erlang
-{ok, Server} = 'Ping_server':start_link(#{
+{ok, Server} = ping_api_ping_server:start_link(#{
     port => 9090, handler => ping_handler, protocol => compact
 }),
-{ok, Client} = 'Ping_client':start_link(#{
+{ok, Client} = ping_api_ping_client:start_link(#{
     host => "127.0.0.1", port => 9090, protocol => compact, transport => buffered
 }),
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req, thrift_erl_compact),
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_erl_compact),
 {ok, Req, <<>>} = thrift_erl_compact:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
@@ -425,13 +429,13 @@ object with stringified keys (`["i32","i32",2,{"1":10}]`). Every
 ins:
 
 ```erlang
-{ok, Server} = 'Ping_server':start_link(#{
+{ok, Server} = ping_api_ping_server:start_link(#{
     port => 9090, handler => ping_handler, protocol => json
 }),
-{ok, Client} = 'Ping_client':start_link(#{
+{ok, Client} = ping_api_ping_client:start_link(#{
     host => "127.0.0.1", port => 9090, protocol => json, transport => buffered
 }),
-{ok, Bin} = ping_api_types:ping_api_encode_pingrequest(Req, thrift_erl_json),
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_erl_json),
 {ok, Req, <<>>} = thrift_erl_json:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
@@ -456,10 +460,10 @@ response body, and the connection stays open for the next call
 json all ride in the body:
 
 ```erlang
-{ok, Server} = 'Ping_server':start_link(#{
+{ok, Server} = ping_api_ping_server:start_link(#{
     port => 9090, handler => ping_handler, transport => http
 }),
-{ok, Client} = 'Ping_client':start_link(#{
+{ok, Client} = ping_api_ping_client:start_link(#{
     host => "127.0.0.1", port => 9090, transport => http, http_path => <<"/thrift">>
 }),
 ```
@@ -479,10 +483,10 @@ runs the full ThriftTest battery against our HTTP server.
 automatic reconnection: any failure fails the outstanding calls and
 stops the process, so a pool sees the death immediately and replaces
 the worker. The unlinked `thrift_erl_client:start/1` (plus
-`service => 'Ping_server'`) is the pool-worker entry:
+`service => ping_api_ping_server`) is the pool-worker entry:
 
 ```erlang
-ClientOpts = #{host => "127.0.0.1", port => 9090, service => 'Ping_server'},
+ClientOpts = #{host => "127.0.0.1", port => 9090, service => ping_api_ping_server},
 
 %% poolboy
 {ok, Pool} = poolboy:start_link(#{
@@ -522,7 +526,7 @@ start — the wrapper keeps trying, like the reference Apache
 
 ```erlang
 {ok, Client} = thrift_erl_reconnecting_client:start_link(
-    #{host => "localhost", port => 9090, service => 'Ping_server',
+    #{host => "localhost", port => 9090, service => ping_api_ping_server,
       reconnect_min => 500, reconnect_max => 30000}
 ),
 {ok, undefined} = thrift_erl_reconnecting_client:call(Client, <<"poke">>, [], 5000),
@@ -551,7 +555,7 @@ server. Handlers must still be fast — they run on the call path.
 ```erlang
 %% a client: one event per caller-facing answer, a plain fun
 {ok, Client} = thrift_erl_client:start_link(#{
-    host => "localhost", port => 9090, service => 'Ping_server',
+    host => "localhost", port => 9090, service => ping_api_ping_server,
     on_event => fun(#{type := Type, function := Fun, duration_us := Us}) ->
                         logger:info("thrift ~ts ~ts: ~p us", [Type, Fun, Us])
                 end}),
@@ -559,7 +563,7 @@ server. Handlers must still be fast — they run on the call path.
 %% a server: {M, F, Args} carries context, the event rides last
 %% (the call becomes my_metrics:record(<<"Ping">>, Event))
 {ok, Server} = thrift_erl_server:start_link(#{
-    port => 9090, handler => ping_handler, service => 'Ping_server',
+    port => 9090, handler => ping_handler, service => ping_api_ping_server,
     on_event => {my_metrics, record, [<<"Ping">>]}}).
 ```
 
@@ -601,16 +605,16 @@ changes):
 {ok, Server} = thrift_erl_server:start_link(#{
     port => 9090,
     services => #{
-        <<"Widgets">> => #{handler => WidgetsHandler, service => 'Widgets_server'},
-        <<"Users">>   => #{handler => UsersHandler,   service => 'Users_server'}
+        <<"Widgets">> => #{handler => WidgetsHandler, service => shop_widgets_server},
+        <<"Users">>   => #{handler => UsersHandler,   service => shop_users_server}
     }
 }),
 
 %% clients pick their service; function names stay plain
 {ok, Widgets} = thrift_erl_client:start_link(
-    #{host => "localhost", port => 9090, service => 'Widgets_server', multiplex => <<"Widgets">>}),
+    #{host => "localhost", port => 9090, service => shop_widgets_server, multiplex => <<"Widgets">>}),
 {ok, Users} = thrift_erl_client:start_link(
-    #{host => "localhost", port => 9090, service => 'Users_server', multiplex => <<"Users">>}),
+    #{host => "localhost", port => 9090, service => shop_users_server, multiplex => <<"Users">>}),
 ```
 
 A generated server/client pair takes the same options — pass
@@ -636,13 +640,13 @@ option (`certs_keys`, `verify`, `cacerts`, ...) applies:
 ```erlang
 %% server: present a certificate
 {ok, Server} = thrift_erl_server:start_link(#{
-    port => 9090, handler => ping_handler, service => 'Ping_server',
+    port => 9090, handler => ping_handler, service => ping_api_ping_server,
     ssl_opts => [{certs_keys, [#{certfile => "cert.pem", keyfile => "key.pem"}]}]
 }),
 
 %% client: verify the server
 {ok, Client} = thrift_erl_client:start_link(#{
-    host => "localhost", port => 9090, service => 'Ping_server',
+    host => "localhost", port => 9090, service => ping_api_ping_server,
     ssl_opts => [{verify, verify_peer}, {cacerts, CaDer},
                  {server_name_indication, "localhost"}]
 })

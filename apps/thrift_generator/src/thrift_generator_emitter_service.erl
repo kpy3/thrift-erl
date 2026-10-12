@@ -15,9 +15,14 @@
 -module(thrift_generator_emitter_service).
 
 -moduledoc """
-The per-service trio of generated modules: `<svc>_handler.erl` (the
-`-callback` behaviour), `<svc>_server.erl` (the start/stop/port entry
-points) and `<svc>_client.erl` (one typed wrapper per IDL function).
+The per-service trio of generated modules: `<prefix>_<svc>_handler.erl`
+(the `-callback` behaviour), `<prefix>_<svc>_server.erl` (the
+start/stop/port entry points) and `<prefix>_<svc>_client.erl` (one
+typed wrapper per IDL function). The name carries the file's
+identifier prefix and the snake-cased service name — `Ping` in
+`namespace erl ping.api` becomes `ping_api_ping_client` — so
+same-named services of different IDL files cannot collide, exactly
+like the record tags.
 
 Split out of the core emitter: everything here is about services, while
 the core builds the types module and its codecs. The type mapping for
@@ -43,18 +48,29 @@ the shared form-building vocabulary lives in
     [{module(), erl_syntax:forms(), undefined}].
 service_sources(Svc, Mod, Ctx) ->
     TypesMod = maps:get(Mod#tg_module.name, Ctx#ectx.type_modules),
-    HandlerMod = service_module(Svc#tg_service.name, handler),
-    ServerMod = service_module(Svc#tg_service.name, server),
-    ClientMod = service_module(Svc#tg_service.name, client),
+    HandlerMod = service_module(Mod, Svc#tg_service.name, handler),
+    ServerMod = service_module(Mod, Svc#tg_service.name, server),
+    ClientMod = service_module(Mod, Svc#tg_service.name, client),
     [
         {HandlerMod, handler_forms(Svc, Mod, HandlerMod, Ctx), undefined},
         {ServerMod, server_forms(Svc, Mod, TypesMod, ServerMod), undefined},
         {ClientMod, client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod), undefined}
     ].
 
--spec service_module(binary(), handler | server | client) -> module().
-service_module(Name, Kind) ->
-    binary_to_atom(<<(thrift_generator_emitter:sanitize(Name))/binary, (kind_suffix(Kind))/binary>>, utf8).
+%% The prefix always exists for loaded files (namespace value or the
+%% normalized file base name — the loader guarantees that); hand-built
+%% models may carry an empty prefix, the module base name steps in.
+
+-spec service_module(#tg_module{}, binary(), handler | server | client) -> module().
+service_module(Mod, Name, Kind) ->
+    Prefix =
+        case Mod#tg_module.prefix of
+            <<>> -> Mod#tg_module.name;
+            P -> P
+        end,
+    Base =
+        <<Prefix/binary, "_", (thrift_generator_names:snake(thrift_generator_emitter:sanitize(Name)))/binary>>,
+    binary_to_atom(<<Base/binary, (kind_suffix(Kind))/binary>>, utf8).
 
 %% The service's IDL doc comment appended to a generated module doc.
 
