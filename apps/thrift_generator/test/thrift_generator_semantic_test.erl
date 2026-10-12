@@ -75,8 +75,10 @@ implicit_field_ids_negative_test() ->
     ok.
 
 duplicate_field_id_error_test() ->
+    %% the location is the offending field's name token: {Line, Column}
+    %% pairs thread through from the scanner
     ?assertMatch(
-        {error, [{<<"t.thrift">>, _, <<"duplicate field id 1 (already used by a)">>}]},
+        {error, [{<<"t.thrift">>, {1, 29}, <<"duplicate field id 1 (already used by a)">>}]},
         analyze(<<"struct S { 1: i32 a, 1: i32 b }">>)
     ),
     ok.

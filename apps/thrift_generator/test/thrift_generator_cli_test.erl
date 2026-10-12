@@ -25,7 +25,11 @@
     format_error_stale_test/0,
     diagnostic_excerpt_test/0,
     diagnostic_compact_fallback_test/0,
-    diagnostic_join_test/0
+    diagnostic_join_test/0,
+    diagnostic_column_marker_test/0,
+    diagnostic_compact_column_test/0,
+    diagnostic_column_utf8_test/0,
+    diagnostic_column_tabs_test/0
 ]).
 
 %% Lexer/parser errors format through the originating module's own
@@ -142,5 +146,81 @@ diagnostic_join_test() ->
     ?assertMatch(
         {_, _},
         binary:match(unicode:characters_to_binary(Mixed), <<"\n\nb.thrift:7: worse">>)
+    ),
+    ok.
+
+%% Column-bearing locations ({Line, Column} pairs from the scanner)
+%% put the marker on the exact column and the compact form names
+%% line and column.
+
+diagnostic_column_marker_test() ->
+    Source = <<"struct P {\n  1: i64 y\n}\n">>,
+    Rendered = thrift_generator_diagnostic:format(
+        [{"p.thrift", {2, 10}, <<"duplicate field id 1 (already used by x)">>}],
+        fun(_Path) -> {ok, Source} end
+    ),
+    ?assertEqual(
+        unicode:characters_to_binary([
+            "  ┌─ p.thrift:2:10:\n",
+            "  │\n",
+            "2 │   1: i64 y\n",
+            "  │          ╰── duplicate field id 1 (already used by x)"
+        ]),
+        unicode:characters_to_binary(Rendered)
+    ),
+    ok.
+
+diagnostic_compact_column_test() ->
+    Rendered = thrift_generator_diagnostic:format(
+        {parse, <<"gone.thrift">>, {{5, 10}, thrift_lexer, {illegal, "@"}}},
+        fun(_Path) -> {error, enoent} end
+    ),
+    ?assertEqual(
+        <<"gone.thrift:5:10: illegal characters \"@\"">>,
+        unicode:characters_to_binary(Rendered)
+    ),
+    ok.
+
+%% Scanner columns count codepoints, marker padding counts bytes: over
+%% multibyte text the two differ and the walk below keeps the caret on
+%% the offending glyph.
+
+diagnostic_column_utf8_test() ->
+    %% string literal, not a binary literal: binaries without /utf8
+    %% keep one byte per glyph and would feed the renderer raw latin-1
+    Source = unicode:characters_to_binary("struct S {\n  1: string naïve\n  1: i64 x\n}\n"),
+    Rendered = thrift_generator_diagnostic:format(
+        {parse, <<"p.thrift">>, {{2, 15}, thrift_lexer, {illegal, "ï"}}},
+        fun(_Path) -> {ok, Source} end
+    ),
+    ?assertEqual(
+        unicode:characters_to_binary([
+            "  ┌─ p.thrift:2:15:\n",
+            "  │\n",
+            "2 │   1: string naïve\n",
+            "  │               ╰── illegal characters \"ï\""
+        ]),
+        unicode:characters_to_binary(Rendered)
+    ),
+    ok.
+
+%% Tabs expand to tab stops every 4 columns — the scanner's own
+%% accounting — so the caret stays under the offending text on
+%% tab-containing lines (a fixed 4-space expansion would drift).
+
+diagnostic_column_tabs_test() ->
+    Source = <<"struct P {\n  1: i32 a\t\textra @ here\n}\n">>,
+    Rendered = thrift_generator_diagnostic:format(
+        {parse, <<"p.thrift">>, {{2, 23}, thrift_lexer, {illegal, "@"}}},
+        fun(_Path) -> {ok, Source} end
+    ),
+    ?assertEqual(
+        unicode:characters_to_binary([
+            "  ┌─ p.thrift:2:23:\n",
+            "  │\n",
+            "2 │   1: i32 a      extra @ here\n",
+            "  │                       ╰── illegal characters \"@\""
+        ]),
+        unicode:characters_to_binary(Rendered)
     ),
     ok.

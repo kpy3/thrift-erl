@@ -31,9 +31,14 @@ paths the loader tracks.
 
 -include("thrift_generator.hrl").
 
--type token() :: {atom(), pos_integer()} | {atom(), pos_integer(), term()}.
+%% Tokens carry {Line, Column} locations (columns are 1-based,
+%% codepoint-counted by the scanner).
 
--export_type([token/0]).
+-type token() :: {atom(), loc()} | {atom(), loc(), term()}.
+
+-type loc() :: pos_integer() | {pos_integer(), pos_integer()}.
+
+-export_type([token/0, loc/0]).
 
 -export_type([generate_opts/0]).
 
@@ -188,8 +193,8 @@ Reads and lexes an IDL file, appending a `__file__` marker with the
 path as given.
 """.
 -spec tokens(file:filename_all()) ->
-    {ok, [token()], pos_integer()}
-    | {error, {pos_integer(), module(), term()} | term(), pos_integer()}.
+    {ok, [token()], loc()}
+    | {error, {loc(), module(), term()} | term(), loc()}.
 tokens(Filename) ->
     maybe
         {ok, Data} ?= file:read_file(Filename),
@@ -276,7 +281,7 @@ detached(_) ->
 -spec parse_file(file:filename_all()) -> {ok, ast_node()} | {error, term()}.
 parse_file(Filename) ->
     maybe
-        {ok, Tokens, _EndLine} ?= tokens(Filename),
+        {ok, Tokens, _EndLoc} ?= tokens(Filename),
         ast(Tokens)
     else
         {error, Reason} -> {error, Reason};
@@ -287,7 +292,7 @@ parse_file(Filename) ->
 -spec parse_string(string() | binary()) -> {ok, ast_node()} | {error, term()}.
 parse_string(Snippet) ->
     maybe
-        {ok, Tokens, _EndLine} ?= thrift_lexer:string(unicode:characters_to_list(Snippet)),
+        {ok, Tokens, _EndLoc} ?= thrift_lexer:string(unicode:characters_to_list(Snippet)),
         ast(Tokens)
     else
         {error, Reason} -> {error, Reason};

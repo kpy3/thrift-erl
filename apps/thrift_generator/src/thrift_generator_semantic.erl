@@ -23,19 +23,25 @@ and enum references, merges inherited service functions and validates
 the result: duplicate names and field ids, union field requiredness,
 oneway function shapes, throw clauses pointing at exceptions,
 unresolved type references, typedef cycles and constant type
-mismatches. All errors are collected as `{File, Line, Message}`
-triples before failing.
+mismatches. All errors are collected as `{File, Loc, Message}`
+triples before failing, where `Loc` is a line number or a
+`{Line, Column}` pair (whatever the error site knows).
 """.
 
 -export([analyze/1, analyze/2]).
 
--export_type([sem_error/0]).
+-export_type([sem_error/0, loc/0]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
 
 -type def_kind() :: struct | union | exception | enum | typedef | service | const.
--type sem_error() :: {File :: binary(), Line :: non_neg_integer(), Message :: binary()}.
+%% An error position: a plain line number, or a {Line, Column} pair
+%% when the site has the opening token's column (columns are 1-based).
+
+-type loc() :: non_neg_integer() | {non_neg_integer(), non_neg_integer()}.
+
+-type sem_error() :: {File :: binary(), Loc :: loc(), Message :: binary()}.
 
 %% A resolved reference: which module the definition lives in, its name
 %% within that module and its kind.
@@ -212,7 +218,7 @@ check_generated_names(Module, Ctx) ->
     %% Sum unions index convert/2 by their field atoms; two unions
     %% claiming one atom would make the lookup ambiguous.
     SumFields = [
-        {F#tg_field.name, S#tg_struct.line}
+        {F#tg_field.name, {S#tg_struct.line, S#tg_struct.col}}
      || S <- Module#tg_module.structs,
         S#tg_struct.kind =:= union,
         maps:get(union_type, S#tg_struct.erl, <<"record">>) =:= <<"sum">>,
@@ -221,13 +227,13 @@ check_generated_names(Module, Ctx) ->
     Ctx3 = check_flat_clashes(SumFields, "sum union field", Ctx2),
     check_const_clashes(Module, Ctx3).
 
--spec check_flat_clashes([{binary(), non_neg_integer()}], string(), #ctx{}) -> #ctx{}.
+-spec check_flat_clashes([{binary(), loc()}], string(), #ctx{}) -> #ctx{}.
 check_flat_clashes(Pairs, What, Ctx) ->
     ByName = maps:groups_from_list(fun({N, _}) -> N end, fun({_N, L}) -> L end, Pairs),
     maps:fold(
         fun
-            (Name, Lines, C) when length(Lines) > 1 ->
-                [First, _Second | _] = lists:sort(Lines),
+            (Name, Locs, C) when length(Locs) > 1 ->
+                [First, _Second | _] = lists:sort(Locs),
                 err(First, "duplicate ~ts ~ts", [What, Name], C);
             (_Name, _Lines, C) ->
                 C
@@ -265,7 +271,7 @@ check_const_clashes(Module, Ctx) ->
             case lists:member(Snake, Generated) of
                 true ->
                     err(
-                        C#tg_const.line,
+                        {C#tg_const.line, C#tg_const.col},
                         "constant ~ts collides with a generated function name",
                         [C#tg_const.name],
                         C0
@@ -288,7 +294,7 @@ check_duplicates(Defs, Ctx) ->
     lists:foldl(
         fun(Name, C) ->
             [Node | _] = [N || N <- Defs, element(2, N#thrift_generator_node.payload) =:= Name],
-            err(Node#thrift_generator_node.line, "duplicate definition of ~ts", [Name], C)
+            err(loc(Node), "duplicate definition of ~ts", [Name], C)
         end,
         Ctx,
         Duplicates
@@ -333,7 +339,8 @@ build_struct(Node, Kind, Acc, Ctx0) ->
             fields = Fields,
             erl = Erl,
             doc = Node#thrift_generator_node.doc,
-            line = Line
+            line = Line,
+            col = Node#thrift_generator_node.col
         },
     Ctx1 = check_struct_annotations(Struct, Ctx),
     {[Struct | Acc], Ctx1}.
@@ -379,7 +386,7 @@ struct_type_default(_Kind, Erl, Ctx) ->
 union_type_kind(#tg_struct{kind = union}, Ctx) ->
     Ctx;
 union_type_kind(S, Ctx) ->
-    err(S#tg_struct.line, "erl.union_type belongs on a union", [], Ctx).
+    err({S#tg_struct.line, S#tg_struct.col}, "erl.union_type belongs on a union", [], Ctx).
 
 -spec check_struct_annotations(#tg_struct{}, #ctx{}) -> #ctx{}.
 check_struct_annotations(S, Ctx0) ->
@@ -390,7 +397,7 @@ check_struct_annotations(S, Ctx0) ->
             <<"map">> -> Ctx0;
             <<"record">> -> Ctx0;
             <<"native">> -> Ctx0;
-            Value -> err(S#tg_struct.line, "unknown erl.struct_type ~ts", [Value], Ctx0)
+            Value -> err({S#tg_struct.line, S#tg_struct.col}, "unknown erl.struct_type ~ts", [Value], Ctx0)
         end,
     Ctx2 =
         case maps:get(union_type, Erl, undefined) of
@@ -400,7 +407,7 @@ check_struct_annotations(S, Ctx0) ->
                 union_type_kind(S, Ctx1);
             UnionType ->
                 err(
-                    S#tg_struct.line,
+                    {S#tg_struct.line, S#tg_struct.col},
                     "unknown erl.union_type ~ts (expected \"record\" or \"sum\")",
                     [UnionType],
                     Ctx1
@@ -415,14 +422,14 @@ check_struct_annotations(S, Ctx0) ->
                     Ctx2;
                 _ ->
                     err(
-                        S#tg_struct.line,
+                        {S#tg_struct.line, S#tg_struct.col},
                         "erl.struct_type.map.key_type requires erl.struct_type = \"map\"",
                         [],
                         Ctx2
                     )
             end;
         KeyType ->
-            err(S#tg_struct.line, "unknown erl.struct_type.map.key_type ~ts", [KeyType], Ctx2)
+            err({S#tg_struct.line, S#tg_struct.col}, "unknown erl.struct_type.map.key_type ~ts", [KeyType], Ctx2)
     end.
 
 %% Field conversion shared by structs/unions/exceptions and function
@@ -453,7 +460,7 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
         name = FieldName,
         default = Default
     } = FieldNode#thrift_generator_node.payload,
-    Line = FieldNode#thrift_generator_node.line,
+    Loc = loc(FieldNode),
     {Id, Next} =
         case RawId of
             undefined ->
@@ -464,20 +471,20 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
     Ctx1 =
         case Seen of
             #{Id := Other} ->
-                err(Line, "duplicate field id ~b (already used by ~ts)", [Id, Other], Ctx0);
+                err(Loc, "duplicate field id ~b (already used by ~ts)", [Id, Other], Ctx0);
             _ ->
                 Ctx0
         end,
     Ctx2 =
         case {Kind, Required} of
             {union, required} ->
-                err(Line, "union field ~ts must be optional", [FieldName], Ctx1);
+                err(Loc, "union field ~ts must be optional", [FieldName], Ctx1);
             _ ->
                 Ctx1
         end,
-    Ctx3 = validate_type(Type, Line, Ctx2),
+    Ctx3 = validate_type(Type, Loc, Ctx2),
     Type1 = apply_set_default(Type, Ctx3),
-    Ctx4 = reject_misplaced_set_impl(FieldNode#thrift_generator_node.annotations, Line, Ctx3),
+    Ctx4 = reject_misplaced_set_impl(FieldNode#thrift_generator_node.annotations, Loc, Ctx3),
     {DefaultResolved, Ctx5} =
         case Default of
             undefined ->
@@ -487,7 +494,7 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
                     {ok, Resolved} ->
                         {Resolved, Ctx4};
                     {error, Reason} ->
-                        {undefined, err(Line, "unresolved default value: ~ts", [format("~tp", [Reason])], Ctx4)}
+                        {undefined, err(Loc, "unresolved default value: ~ts", [format("~tp", [Reason])], Ctx4)}
                 end
         end,
     Field =
@@ -509,15 +516,16 @@ analyze_enum(Node, {Acc, Ctx}) ->
     case Node#thrift_generator_node.type_module of
         thrift_generator_enum ->
             #thrift_generator_enum{name = Name, values = Raw} = Node#thrift_generator_node.payload,
-            Line = Node#thrift_generator_node.line,
-            {Pairs, Ctx1} = number_enum_values(Raw, Line, -1, #{}, #{}, [], Ctx),
+            Loc = loc(Node),
+            {Pairs, Ctx1} = number_enum_values(Raw, Loc, -1, #{}, #{}, [], Ctx),
             Enum =
                 #tg_enum{
                     name = Name,
                     values = lists:reverse(Pairs),
                     erl = Node#thrift_generator_node.annotations,
                     doc = Node#thrift_generator_node.doc,
-                    line = Line
+                    line = Node#thrift_generator_node.line,
+                    col = Node#thrift_generator_node.col
                 },
             {[Enum | Acc], Ctx1};
         _ ->
@@ -526,20 +534,20 @@ analyze_enum(Node, {Acc, Ctx}) ->
 
 -spec number_enum_values(
     [enum_value()],
-    non_neg_integer(),
+    loc(),
     integer(),
     #{binary() => true},
     #{integer() => binary()},
     [{integer(), binary()}],
     #ctx{}
 ) -> {[{integer(), binary()}], #ctx{}}.
-number_enum_values([], _Line, _Prev, _Names, _Values, Acc, Ctx) ->
+number_enum_values([], _Loc, _Prev, _Names, _Values, Acc, Ctx) ->
     {Acc, Ctx};
-number_enum_values([{Name, RawValue, _Ann, _Doc} | Rest], Line, Prev, Names, Values, Acc, Ctx0) ->
+number_enum_values([{Name, RawValue, _Ann, _Doc} | Rest], Loc, Prev, Names, Values, Acc, Ctx0) ->
     Ctx1 =
         case Names of
             #{Name := true} ->
-                err(Line, "duplicate enum member ~ts", [Name], Ctx0);
+                err(Loc, "duplicate enum member ~ts", [Name], Ctx0);
             _ ->
                 Ctx0
         end,
@@ -554,7 +562,7 @@ number_enum_values([{Name, RawValue, _Ann, _Doc} | Rest], Line, Prev, Names, Val
         case Values of
             #{Value := Other} ->
                 err(
-                    Line,
+                    Loc,
                     "duplicate enum value ~b for member ~ts (already used by ~ts)",
                     [Value, Name, Other],
                     Ctx1
@@ -563,7 +571,7 @@ number_enum_values([{Name, RawValue, _Ann, _Doc} | Rest], Line, Prev, Names, Val
                 Ctx1
         end,
     number_enum_values(
-        Rest, Line, Value, Names#{Name => true}, Values#{Value => Name}, [{Value, Name} | Acc], Ctx
+        Rest, Loc, Value, Names#{Name => true}, Values#{Value => Name}, [{Value, Name} | Acc], Ctx
     ).
 
 %% -- typedefs --------------------------------------------------------
@@ -573,16 +581,17 @@ analyze_typedef(Node, {Acc, Ctx}) ->
     case Node#thrift_generator_node.type_module of
         thrift_generator_typedef ->
             #thrift_generator_typedef{name = Name, type = Type} = Node#thrift_generator_node.payload,
-            Line = Node#thrift_generator_node.line,
-            Ctx1 = validate_type(Type, Line, Ctx),
-            Ctx2 = reject_misplaced_set_impl(Node#thrift_generator_node.annotations, Line, Ctx1),
+            Loc = loc(Node),
+            Ctx1 = validate_type(Type, Loc, Ctx),
+            Ctx2 = reject_misplaced_set_impl(Node#thrift_generator_node.annotations, Loc, Ctx1),
             Typedef =
                 #tg_typedef{
                     name = Name,
                     type = apply_set_default(Type, Ctx1),
                     erl = Node#thrift_generator_node.annotations,
                     doc = Node#thrift_generator_node.doc,
-                    line = Line
+                    line = Node#thrift_generator_node.line,
+                    col = Node#thrift_generator_node.col
                 },
             {[Typedef | Acc], Ctx2};
         _ ->
@@ -596,24 +605,26 @@ analyze_typedef(Node, {Acc, Ctx}) ->
 check_typedef_cycles(Typedefs, Ctx) ->
     LocalTypedefs = #{T#tg_typedef.name => T || T <- Typedefs},
     lists:foldl(
-        fun(T, C) -> visit_typedef(T#tg_typedef.name, T#tg_typedef.line, LocalTypedefs, #{}, C) end,
+        fun(T, C) ->
+            visit_typedef(T#tg_typedef.name, {T#tg_typedef.line, T#tg_typedef.col}, LocalTypedefs, #{}, C)
+        end,
         Ctx,
         Typedefs
     ).
 
 -spec visit_typedef(
-    binary(), non_neg_integer(), #{binary() => #tg_typedef{}}, #{binary() => true}, #ctx{}
+    binary(), loc(), #{binary() => #tg_typedef{}}, #{binary() => true}, #ctx{}
 ) -> #ctx{}.
-visit_typedef(Name, Line, LocalTypedefs, Visiting, Ctx) ->
+visit_typedef(Name, Loc, LocalTypedefs, Visiting, Ctx) ->
     case Visiting of
         #{Name := true} ->
-            err(Line, "typedef cycle through ~ts", [Name], Ctx);
+            err(Loc, "typedef cycle through ~ts", [Name], Ctx);
         _ ->
             case LocalTypedefs of
                 #{Name := #tg_typedef{type = {ref, Target, _}}} ->
                     case is_local_name(Target) andalso maps:is_key(Target, LocalTypedefs) of
                         true ->
-                            visit_typedef(Target, Line, LocalTypedefs, Visiting#{Name => true}, Ctx);
+                            visit_typedef(Target, Loc, LocalTypedefs, Visiting#{Name => true}, Ctx);
                         false ->
                             Ctx
                     end;
@@ -630,8 +641,8 @@ analyze_const(Node, {Acc, Ctx}) ->
         thrift_generator_constant ->
             #thrift_generator_constant{name = Name, type = Type, value = Value} =
                 Node#thrift_generator_node.payload,
-            Line = Node#thrift_generator_node.line,
-            Ctx1 = validate_type(Type, Line, Ctx),
+            Loc = loc(Node),
+            Ctx1 = validate_type(Type, Loc, Ctx),
             case resolve_value(Value, #{}, Ctx1) of
                 {ok, Resolved} ->
                     Const =
@@ -641,16 +652,17 @@ analyze_const(Node, {Acc, Ctx}) ->
                             value = Resolved,
                             erl = Node#thrift_generator_node.annotations,
                             doc = Node#thrift_generator_node.doc,
-                            line = Line
+                            line = Node#thrift_generator_node.line,
+                            col = Node#thrift_generator_node.col
                         },
                     case check_value(Type, Resolved, Ctx1) of
                         ok ->
                             {[Const | Acc], Ctx1};
                         {error, Msg} ->
-                            {[Const | Acc], err(Line, "constant ~ts: ~ts", [Name, Msg], Ctx1)}
+                            {[Const | Acc], err(Loc, "constant ~ts: ~ts", [Name, Msg], Ctx1)}
                     end;
                 {error, Reason} ->
-                    {Acc, err(Line, "constant ~ts: ~ts", [Name, format("~tp", [Reason])], Ctx1)}
+                    {Acc, err(Loc, "constant ~ts: ~ts", [Name, format("~tp", [Reason])], Ctx1)}
             end;
         _ ->
             {Acc, Ctx}
@@ -768,15 +780,15 @@ service_name(Node) ->
 analyze_service(Node, ByName, InProgress, Ctx0) ->
     #thrift_generator_service{name = Name, extends = Extends, functions = RawFunctions} =
         Node#thrift_generator_node.payload,
-    Line = Node#thrift_generator_node.line,
+    Loc = loc(Node),
     case InProgress of
         #{Name := true} ->
-            {empty_service(Name), err(Line, "service extends cycle through ~ts", [Name], Ctx0)};
+            {empty_service(Name), err(Loc, "service extends cycle through ~ts", [Name], Ctx0)};
         _ ->
             {ParentFunctions, Ctx1} =
-                parent_functions(Extends, Line, ByName, InProgress#{Name => true}, Ctx0),
+                parent_functions(Extends, Loc, ByName, InProgress#{Name => true}, Ctx0),
             {Own, Ctx2} = analyze_functions(RawFunctions, Ctx1),
-            {Merged, Ctx3} = merge_functions(ParentFunctions, Own, Line, Ctx2),
+            {Merged, Ctx3} = merge_functions(ParentFunctions, Own, Loc, Ctx2),
             Service =
                 #tg_service{
                     name = Name,
@@ -784,7 +796,8 @@ analyze_service(Node, ByName, InProgress, Ctx0) ->
                     functions = Merged,
                     erl = Node#thrift_generator_node.annotations,
                     doc = Node#thrift_generator_node.doc,
-                    line = Line
+                    line = Node#thrift_generator_node.line,
+                    col = Node#thrift_generator_node.col
                 },
             {Service, Ctx3}
     end.
@@ -795,15 +808,15 @@ empty_service(Name) ->
 
 -spec parent_functions(
     binary() | undefined,
-    non_neg_integer(),
+    loc(),
     #{binary() => ast_node()},
     #{binary() => true},
     #ctx{}
 ) -> {[#tg_function{}], #ctx{}}.
-parent_functions(undefined, _Line, _ByName, _InProgress, Ctx) ->
+parent_functions(undefined, _Loc, _ByName, _InProgress, Ctx) ->
     {[], Ctx};
-parent_functions(ParentName, Line, ByName, InProgress, Ctx0) when is_binary(ParentName) ->
-    Ctx = validate_type({ref, ParentName, #{}}, Line, Ctx0),
+parent_functions(ParentName, Loc, ByName, InProgress, Ctx0) when is_binary(ParentName) ->
+    Ctx = validate_type({ref, ParentName, #{}}, Loc, Ctx0),
     case resolve_type_ref(ParentName, Ctx) of
         {ok, {Module, _, service}} when Module =:= Ctx#ctx.module ->
             case ByName of
@@ -812,21 +825,21 @@ parent_functions(ParentName, Line, ByName, InProgress, Ctx0) when is_binary(Pare
                         analyze_service(ParentNode, ByName, InProgress, Ctx),
                     {Fns, C1};
                 _ ->
-                    {[], err(Line, "unknown service ~ts", [ParentName], Ctx)}
+                    {[], err(Loc, "unknown service ~ts", [ParentName], Ctx)}
             end;
         {ok, {Module, LocalName, service}} ->
-            included_service_functions(Module, LocalName, Line, Ctx);
+            included_service_functions(Module, LocalName, Loc, Ctx);
         _ ->
-            {[], err(Line, "~ts is not a service", [ParentName], Ctx)}
+            {[], err(Loc, "~ts is not a service", [ParentName], Ctx)}
     end.
 
 %% An `extends` into an included module: the parent's merged functions
 %% come from that module's finished analysis (dependencies are
 %% analyzed first).
 
--spec included_service_functions(binary(), binary(), non_neg_integer(), #ctx{}) ->
+-spec included_service_functions(binary(), binary(), loc(), #ctx{}) ->
     {[#tg_function{}], #ctx{}}.
-included_service_functions(Module, LocalName, Line, Ctx) ->
+included_service_functions(Module, LocalName, Loc, Ctx) ->
     Found =
         lists:filtermap(
             fun({_ModuleName, Model}) ->
@@ -843,12 +856,12 @@ included_service_functions(Module, LocalName, Line, Ctx) ->
         [Fns | _] ->
             {Fns, Ctx};
         [] ->
-            {[], err(Line, "unknown service ~ts", [LocalName], Ctx)}
+            {[], err(Loc, "unknown service ~ts", [LocalName], Ctx)}
     end.
 
--spec merge_functions([#tg_function{}], [#tg_function{}], non_neg_integer(), #ctx{}) ->
+-spec merge_functions([#tg_function{}], [#tg_function{}], loc(), #ctx{}) ->
     {[#tg_function{}], #ctx{}}.
-merge_functions(Parent, Own, Line, Ctx0) ->
+merge_functions(Parent, Own, Loc, Ctx0) ->
     ParentNames = [F#tg_function.name || F <- Parent],
     Overridden = [Name || Name <- [F#tg_function.name || F <- Own], lists:member(Name, ParentNames)],
     Ctx =
@@ -856,7 +869,7 @@ merge_functions(Parent, Own, Line, Ctx0) ->
             [] ->
                 Ctx0;
             [First | _] ->
-                err(Line, "function ~ts overrides an inherited function", [First], Ctx0)
+                err(Loc, "function ~ts overrides an inherited function", [First], Ctx0)
         end,
     {Parent ++ Own, Ctx}.
 
@@ -872,13 +885,13 @@ analyze_functions(Nodes, Ctx) ->
                     fields = Params,
                     throws = Throws
                 } = Node#thrift_generator_node.payload,
-                Line = Node#thrift_generator_node.line,
+                Loc = loc(Node),
                 C1 =
                     case {Oneway, ReturnType, Throws} of
                         {true, void, []} ->
                             C0;
                         {true, _, _} ->
-                            err(Line, "oneway function ~ts must return void and throw nothing", [Name], C0);
+                            err(Loc, "oneway function ~ts must return void and throw nothing", [Name], C0);
                         _ ->
                             C0
                     end,
@@ -887,11 +900,11 @@ analyze_functions(Nodes, Ctx) ->
                         void ->
                             C1;
                         Type ->
-                            validate_type(Type, Line, C1)
+                            validate_type(Type, Loc, C1)
                     end,
                 {ParamsResolved, C3} = analyze_fields(Params, struct, C2),
                 {ThrowsResolved, C4} = analyze_fields(Throws, struct, C3),
-                C5 = validate_throws(ThrowsResolved, Line, C4),
+                C5 = validate_throws(ThrowsResolved, Loc, C4),
                 Function =
                     #tg_function{
                         name = Name,
@@ -910,20 +923,20 @@ analyze_functions(Nodes, Ctx) ->
 
 %% Declared throw fields must reference exceptions.
 
--spec validate_throws([#tg_field{}], non_neg_integer(), #ctx{}) -> #ctx{}.
-validate_throws(Fields, Line, Ctx) ->
+-spec validate_throws([#tg_field{}], loc(), #ctx{}) -> #ctx{}.
+validate_throws(Fields, Loc, Ctx) ->
     lists:foldl(
         fun
             %% Apache Thrift rejects `required` in a throws clause
             %% (0.18, THRIFT-5669): the flag has no wire meaning there.
             (#tg_field{name = Name, required = required}, C) ->
-                err(Line, "throw field ~ts cannot be required", [Name], C);
+                err(Loc, "throw field ~ts cannot be required", [Name], C);
             (#tg_field{type = {ref, Ref, _}}, C) ->
                 case resolve_type_ref(Ref, C) of
                     {ok, {_, _, exception}} ->
                         C;
                     {ok, {_, _, _}} ->
-                        err(Line, "throw field must be an exception, got ~ts", [Ref], C);
+                        err(Loc, "throw field must be an exception, got ~ts", [Ref], C);
                     error ->
                         C
                 end;
@@ -941,48 +954,48 @@ validate_throws(Fields, Line, Ctx) ->
 %% Validates every {ref, Name, _} inside a type (recursing through
 %% containers) against the local module and every loaded module.
 
--spec validate_type(thrift_type(), non_neg_integer(), #ctx{}) -> #ctx{}.
-validate_type({ref, Name, _}, Line, Ctx) ->
+-spec validate_type(thrift_type(), loc(), #ctx{}) -> #ctx{}.
+validate_type({ref, Name, _}, Loc, Ctx) ->
     case resolve_type_ref(Name, Ctx) of
         {ok, _} ->
             Ctx;
         error ->
-            err(Line, "unknown type ~ts", [Name], Ctx)
+            err(Loc, "unknown type ~ts", [Name], Ctx)
     end;
-validate_type({list, Elem, _}, Line, Ctx) ->
-    validate_type(Elem, Line, Ctx);
-validate_type({set, Elem, Ann}, Line, Ctx) ->
-    Ctx1 = validate_set_impl(Ann, Line, Ctx),
-    validate_type(Elem, Line, Ctx1);
-validate_type({map, Key, Value, _}, Line, Ctx) ->
-    validate_type(Key, Line, validate_type(Value, Line, Ctx));
-validate_type(_Base, _Line, Ctx) ->
+validate_type({list, Elem, _}, Loc, Ctx) ->
+    validate_type(Elem, Loc, Ctx);
+validate_type({set, Elem, Ann}, Loc, Ctx) ->
+    Ctx1 = validate_set_impl(Ann, Loc, Ctx),
+    validate_type(Elem, Loc, Ctx1);
+validate_type({map, Key, Value, _}, Loc, Ctx) ->
+    validate_type(Key, Loc, validate_type(Value, Loc, Ctx));
+validate_type(_Base, _Loc, Ctx) ->
     Ctx.
 
 %% The erl.set annotation picks the in-process set implementation
 %% (`sets` v2 or `ordsets`); the wire encoding is unchanged either way.
 
--spec validate_set_impl(annotations(), non_neg_integer(), #ctx{}) -> #ctx{}.
-validate_set_impl(Ann, Line, Ctx) ->
+-spec validate_set_impl(annotations(), loc(), #ctx{}) -> #ctx{}.
+validate_set_impl(Ann, Loc, Ctx) ->
     case maps:find(<<"erl.set">>, Ann) of
         error ->
             Ctx;
         {ok, Impl} when Impl =:= <<"sets">>; Impl =:= <<"ordset">> ->
             Ctx;
         {ok, Impl} ->
-            err(Line, "unknown erl.set ~ts (expected \"sets\" or \"ordset\")", [Impl], Ctx)
+            err(Loc, "unknown erl.set ~ts (expected \"sets\" or \"ordset\")", [Impl], Ctx)
     end.
 
 %% `erl.set` only works as a type annotation (between the set<...> type
 %% and the name); written after the name it would land on the field or
 %% typedef node and be silently ignored, so reject it up front.
 
--spec reject_misplaced_set_impl(erl_annotations(), non_neg_integer(), #ctx{}) -> #ctx{}.
-reject_misplaced_set_impl(Ann, Line, Ctx) ->
+-spec reject_misplaced_set_impl(erl_annotations(), loc(), #ctx{}) -> #ctx{}.
+reject_misplaced_set_impl(Ann, Loc, Ctx) ->
     case maps:is_key(set, Ann) of
         true ->
             err(
-                Line,
+                Loc,
                 "erl.set belongs between the set<...> type and the name, not after it",
                 [],
                 Ctx
@@ -1059,7 +1072,7 @@ apply_namespace_set_default({_Node, <<"ordset">>}, Ctx) ->
     Ctx#ctx{set_default = ordset};
 apply_namespace_set_default({Node, Other}, Ctx) ->
     err(
-        Node#thrift_generator_node.line,
+        loc(Node),
         "unknown erl.set ~ts (expected \"sets\" or \"ordset\")",
         [Other],
         Ctx
@@ -1072,7 +1085,7 @@ apply_namespace_union_default({_Node, <<"sum">>}, Ctx) ->
     Ctx#ctx{union_default = sum};
 apply_namespace_union_default({Node, Other}, Ctx) ->
     err(
-        Node#thrift_generator_node.line,
+        loc(Node),
         "unknown erl.union_type ~ts (expected \"record\" or \"sum\")",
         [Other],
         Ctx
@@ -1249,10 +1262,16 @@ member_if_declared(Member, Members) ->
 %% Small helpers
 %%--------------------------------------------------------------------
 
--spec err(non_neg_integer(), string(), [term()], #ctx{}) -> #ctx{}.
-err(Line, Format, Args, Ctx) ->
+-spec err(loc(), string(), [term()], #ctx{}) -> #ctx{}.
+err(Loc, Format, Args, Ctx) ->
     Message = iolist_to_binary(io_lib:format(Format, Args)),
-    Ctx#ctx{errors = [{Ctx#ctx.file, Line, Message} | Ctx#ctx.errors]}.
+    Ctx#ctx{errors = [{Ctx#ctx.file, Loc, Message} | Ctx#ctx.errors]}.
+
+%% The location of an AST node as an err/4 position.
+
+-spec loc(ast_node()) -> loc().
+loc(#thrift_generator_node{line = Line, col = 0}) -> Line;
+loc(#thrift_generator_node{line = Line, col = Col}) -> {Line, Col}.
 
 -spec is_local_name(binary()) -> boolean().
 is_local_name(Name) ->

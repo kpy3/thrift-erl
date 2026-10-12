@@ -57,24 +57,24 @@ RESERVED        = {RESERVED11}|{RESERVED12}|{RESERVED13}
 Rules.
 
 {WHITESPACE}    : skip_token.
-{DOCLINE}       : {token, {doc, TokenLine, doc_line(TokenChars)}}.
-{DOCCOMMENT}    : {token, {doc, TokenLine, doc_block(TokenChars)}}.
+{DOCLINE}       : {token, {doc, TokenLoc, doc_line(TokenChars)}}.
+{DOCCOMMENT}    : {token, {doc, TokenLoc, doc_block(TokenChars)}}.
 {COMMENTS}      : skip_token.
 
-__file__        : {token, {file, TokenLine}}.
-{PUNCTUATOR}    : {token, {list_to_atom(TokenChars), TokenLine}}.
-{KEYWORD}       : {token, {list_to_atom(TokenChars), TokenLine}}.
+__file__        : {token, {file, TokenLoc}}.
+{PUNCTUATOR}    : {token, {list_to_atom(TokenChars), TokenLoc}}.
+{KEYWORD}       : {token, {list_to_atom(TokenChars), TokenLoc}}.
 
-{INT}           : {token, {int, TokenLine, list_to_integer(TokenChars)}}.
-{HEX}           : {token, {int, TokenLine, hex_to_integer(TokenChars)}}.
-{DOUBLE}        : {token, {double, TokenLine, list_to_float(TokenChars)}}.
-{BADDOUBLE}     : {token, {double, TokenLine, bad_list_to_float(TokenChars)}}.
-{STRING}        : {token, {string, TokenLine, unicode:characters_to_binary(process_string(TokenChars, TokenLen))}}.
-{BOOLEAN}       : {token, {list_to_atom(TokenChars), TokenLine}}.
+{INT}           : {token, {int, TokenLoc, list_to_integer(TokenChars)}}.
+{HEX}           : {token, {int, TokenLoc, hex_to_integer(TokenChars)}}.
+{DOUBLE}        : {token, {double, TokenLoc, list_to_float(TokenChars)}}.
+{BADDOUBLE}     : {token, {double, TokenLoc, bad_list_to_float(TokenChars)}}.
+{STRING}        : {token, {string, TokenLoc, unicode:characters_to_binary(process_string(TokenChars, TokenLen))}}.
+{BOOLEAN}       : {token, {list_to_atom(TokenChars), TokenLoc}}.
 
-{RESERVED}      : reserved_keyword_error(TokenChars, TokenLine).
+{RESERVED}      : reserved_keyword_error(TokenChars, TokenLoc).
 
-{IDENTIFIER}    : {token, {ident, TokenLine, unicode:characters_to_binary(TokenChars)}}.
+{IDENTIFIER}    : {token, {ident, TokenLoc, unicode:characters_to_binary(TokenChars)}}.
 
 Erlang code.
 
@@ -130,7 +130,12 @@ trim_edges(Lines) ->
 drop_empty_prefix([[] | Rest]) -> drop_empty_prefix(Rest);
 drop_empty_prefix(Lines) -> Lines.
 
-reserved_keyword_error(Keyword, _Line) ->
+% Token locations are {Line, Column} pairs (the generator builds the
+% rebar3-style excerpt marker on the exact column); the reserved keyword
+% error carries its location the same way, landing as
+% {{Line, Column}, thrift_lexer, {user, Message}}.
+
+reserved_keyword_error(Keyword, _Loc) ->
     Message = io_lib:format(
       "cannot use reserved language keyword \"~s\"", [Keyword]),
     {error, Message}.
