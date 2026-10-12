@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- Generated service modules carry the file's identifier prefix and the
+  snake-cased service name: `Ping` in `namespace erl ping.api` now
+  generates `ping_api_ping_client` / `ping_api_ping_server` /
+  `ping_api_ping_handler` instead of `'Ping_client'` / `'Ping_server'` /
+  `'Ping_handler'` — same-named services of different IDL files no
+  longer collide. Regenerate and update `-behaviour` and `service`
+  references.
+- Declared exceptions answer `{error, {exception, Value}}` on the
+  generated client, and handlers signal them the same way: the value's
+  representation — record tag, `__struct__` map, native record or
+  sum-union tuple — identifies the exception. The explicit-name form
+  `{error, {exception, Name, Value}}` stays valid for hand-written
+  descriptors and map-representation exceptions (plain maps carry no
+  identity) and remains the raw `thrift_erl_client:call/4` wire-level
+  shape.
+
 ### Project
 
 - Renamed the project **thrift-erl**, after the flagship runtime

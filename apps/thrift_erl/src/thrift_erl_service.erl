@@ -26,8 +26,12 @@ Handler functions are called as `Handler:Function(Args...)` with
 arguments in declaration order. They answer:
 
 - `{ok, Value}` — the reply value (`undefined` for `void` functions);
-- `{error, {exception, Name, Map}}` — a declared exception, encoded
-  under its throw-field id by name;
+- `{error, {exception, Value}}` — a declared exception, identified by
+  the value's representation tag (record tag, `__struct__` map or
+  native record) and encoded under its throw-field id;
+- `{error, {exception, Name, Value}}` — the same with an explicit wire
+  name, for hand-written descriptors and map-representation exceptions
+  (plain maps carry no identity);
 - anything else that raises — the runtime answers with
   `TApplicationException` (INTERNAL_ERROR).
 """.
@@ -50,6 +54,7 @@ arguments in declaration order. They answer:
 
 -type handler_result() ::
     {ok, term()}
+    | {error, {exception, thrift_erl_binary:struct_value()}}
     | {error, {exception, Name :: binary(), thrift_erl_binary:struct_value()}}.
 
 -doc """

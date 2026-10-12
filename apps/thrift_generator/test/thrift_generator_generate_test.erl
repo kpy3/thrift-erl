@@ -47,7 +47,7 @@ generate_check_up_to_date_test() ->
         {ok, Generated} = thrift_generator:generate(File, OutDir, #{}),
         Modules = [Module || #{module := Module} <- Generated],
         ?assertEqual(
-            ['Pinger_client', 'Pinger_handler', 'Pinger_server', checkgate_types],
+            [checkgate_pinger_client, checkgate_pinger_handler, checkgate_pinger_server, checkgate_types],
             lists:sort(Modules)
         ),
         ?assertEqual(ok, thrift_generator:check(File, OutDir, #{})),
@@ -62,7 +62,7 @@ generate_check_modified_file_test() ->
         File = write_idl(Dir),
         OutDir = filename:join(Dir, "out"),
         {ok, Generated} = thrift_generator:generate(File, OutDir, #{}),
-        #{path := StalePath} = entry_for('Pinger_server', Generated),
+        #{path := StalePath} = entry_for(checkgate_pinger_server, Generated),
         ok = file:write_file(StalePath, <<"-module(tampered).">>),
         ?assertEqual({error, {stale, [StalePath]}}, thrift_generator:check(File, OutDir, #{})),
         ok

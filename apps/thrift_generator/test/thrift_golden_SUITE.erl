@@ -96,13 +96,13 @@ our_client_official_server(_Config) ->
     Port = free_port(),
     {ok, Server} = thrift_server:start_link(Port, thrift_test_thrift, thrift_golden_official_handler),
     {ok, Client} =
-        'ThriftTest_client':start_link(#{host => "127.0.0.1", port => Port, transport => buffered}),
+        goldentest_thrift_test_client:start_link(#{host => "127.0.0.1", port => Port, transport => buffered}),
     try
         true = register(thrift_golden_oneway_sink, self()),
         run_our_client_assertions(Client)
     after
         unregister(thrift_golden_oneway_sink),
-        ok = 'ThriftTest_client':stop(Client),
+        ok = goldentest_thrift_test_client:stop(Client),
         %% Unlink first: `thrift_server:stop/1` terminates the linked
         %% server with reason `stopped`, which would otherwise replace
         %% the test result (or a failure in the body) with `{'EXIT',
@@ -151,10 +151,10 @@ official_json_client_our_server_framed(_Config) ->
 official_http_client_our_server(_Config) ->
     {ok, _} = application:ensure_all_started(inets),
     {ok, Server} =
-        'ThriftTest_server':start_link(#{
+        goldentest_thrift_test_server:start_link(#{
             port => 0, handler => thrift_golden_our_handler, transport => http
         }),
-    {ok, Port} = 'ThriftTest_server':port(Server),
+    {ok, Port} = goldentest_thrift_test_server:port(Server),
     {ok, HttpTransport} = thrift_http_transport:new(
         "127.0.0.1:" ++ integer_to_list(Port),
         "/thrift/test",
@@ -172,7 +172,7 @@ official_http_client_our_server(_Config) ->
         catch
             _:_ -> ok
         end,
-        ok = 'ThriftTest_server':stop(Server)
+        ok = goldentest_thrift_test_server:stop(Server)
     end.
 
 %% The official multiplexed client (`thrift_multiplexed_protocol' wraps
@@ -184,14 +184,14 @@ official_http_client_our_server(_Config) ->
 
 official_multiplexed_client_our_multiplexed_server(_Config) ->
     {ok, Server} =
-        'ThriftTest_server':start_link(#{
+        goldentest_thrift_test_server:start_link(#{
             port => 0,
             %% The official multiplexed client is buffered by default.
             transport => buffered,
             services =>
-                #{<<"ThriftTest">> => #{handler => thrift_golden_our_handler, service => 'ThriftTest_server'}}
+                #{<<"ThriftTest">> => #{handler => thrift_golden_our_handler, service => goldentest_thrift_test_server}}
         }),
-    {ok, Port} = 'ThriftTest_server':port(Server),
+    {ok, Port} = goldentest_thrift_test_server:port(Server),
     {ok, [{_ServiceName, Client0}]} =
         thrift_client_util:new_multiplexed("127.0.0.1", Port, [{"ThriftTest", thrift_test_thrift}], [
             {recv_timeout, ?CLIENT_TIMEOUT}
@@ -229,7 +229,7 @@ official_multiplexed_client_our_multiplexed_server(_Config) ->
         catch
             _:_ -> ok
         end,
-        ok = 'ThriftTest_server':stop(Server)
+        ok = goldentest_thrift_test_server:stop(Server)
     end.
 
 %%--------------------------------------------------------------------
@@ -237,67 +237,66 @@ official_multiplexed_client_our_multiplexed_server(_Config) ->
 %%--------------------------------------------------------------------
 
 run_our_client_assertions(Client) ->
-    ?assertEqual({ok, <<"foo">>}, 'ThriftTest_client':testString(Client, <<"foo">>)),
-    ?assertEqual({ok, true}, 'ThriftTest_client':testBool(Client, true)),
-    ?assertEqual({ok, false}, 'ThriftTest_client':testBool(Client, false)),
-    ?assertEqual({ok, -42}, 'ThriftTest_client':testByte(Client, -42)),
-    ?assertEqual({ok, 123456}, 'ThriftTest_client':testI32(Client, 123456)),
-    ?assertEqual({ok, 123456789012}, 'ThriftTest_client':testI64(Client, 123456789012)),
-    ?assertEqual({ok, 3.25}, 'ThriftTest_client':testDouble(Client, 3.25)),
-    ?assertEqual({ok, <<1, 2, 3>>}, 'ThriftTest_client':testBinary(Client, <<1, 2, 3>>)),
+    ?assertEqual({ok, <<"foo">>}, goldentest_thrift_test_client:testString(Client, <<"foo">>)),
+    ?assertEqual({ok, true}, goldentest_thrift_test_client:testBool(Client, true)),
+    ?assertEqual({ok, false}, goldentest_thrift_test_client:testBool(Client, false)),
+    ?assertEqual({ok, -42}, goldentest_thrift_test_client:testByte(Client, -42)),
+    ?assertEqual({ok, 123456}, goldentest_thrift_test_client:testI32(Client, 123456)),
+    ?assertEqual({ok, 123456789012}, goldentest_thrift_test_client:testI64(Client, 123456789012)),
+    ?assertEqual({ok, 3.25}, goldentest_thrift_test_client:testDouble(Client, 3.25)),
+    ?assertEqual({ok, <<1, 2, 3>>}, goldentest_thrift_test_client:testBinary(Client, <<1, 2, 3>>)),
 
     X = #goldentest_xtruct{string_thing = <<"hi">>, byte_thing = -1, i32_thing = 7, i64_thing = 99},
-    ?assertEqual({ok, X}, 'ThriftTest_client':testStruct(Client, X)),
+    ?assertEqual({ok, X}, goldentest_thrift_test_client:testStruct(Client, X)),
     X2 = #goldentest_xtruct2{byte_thing = 5, struct_thing = X, i32_thing = 77},
-    ?assertEqual({ok, X2}, 'ThriftTest_client':testNest(Client, X2)),
+    ?assertEqual({ok, X2}, goldentest_thrift_test_client:testNest(Client, X2)),
 
-    ?assertEqual({ok, #{1 => 10, 2 => 20}}, 'ThriftTest_client':testMap(Client, #{1 => 10, 2 => 20})),
+    ?assertEqual({ok, #{1 => 10, 2 => 20}}, goldentest_thrift_test_client:testMap(Client, #{1 => 10, 2 => 20})),
     %% The official handler echoes the set through `sets`, so element
     %% order comes back in `sets` iteration order.
-    {ok, ResultSet} = 'ThriftTest_client':testSet(Client, [1, 2, 3]),
+    {ok, ResultSet} = goldentest_thrift_test_client:testSet(Client, [1, 2, 3]),
     ?assertEqual([1, 2, 3], lists:sort(ResultSet)),
-    ?assertEqual({ok, [1, 2, 3]}, 'ThriftTest_client':testList(Client, [1, 2, 3])),
-    ?assertEqual({ok, 'SIX'}, 'ThriftTest_client':testEnum(Client, 'SIX')),
-    ?assertEqual({ok, 77}, 'ThriftTest_client':testTypedef(Client, 77)),
+    ?assertEqual({ok, [1, 2, 3]}, goldentest_thrift_test_client:testList(Client, [1, 2, 3])),
+    ?assertEqual({ok, 'SIX'}, goldentest_thrift_test_client:testEnum(Client, 'SIX')),
+    ?assertEqual({ok, 77}, goldentest_thrift_test_client:testTypedef(Client, 77)),
 
     ExpectedMapMap =
         #{
             -4 => #{J => J || J <- lists:seq(-4, -1)},
             4 => #{J => J || J <- lists:seq(1, 4)}
         },
-    ?assertEqual({ok, ExpectedMapMap}, 'ThriftTest_client':testMapMap(Client, 2)),
+    ?assertEqual({ok, ExpectedMapMap}, goldentest_thrift_test_client:testMapMap(Client, 2)),
 
     ?assertEqual(
-        {error, {exception, <<"Xception">>, #goldentest_xception{errorCode = 1001, message = <<"Xception">>}}},
-        'ThriftTest_client':testException(Client, <<"Xception">>)
+        {error, {exception, #goldentest_xception{errorCode = 1001, message = <<"Xception">>}}},
+        goldentest_thrift_test_client:testException(Client, <<"Xception">>)
     ),
-    ?assertEqual({ok, undefined}, 'ThriftTest_client':testException(Client, <<"fine">>)),
+    ?assertEqual({ok, undefined}, goldentest_thrift_test_client:testException(Client, <<"fine">>)),
 
     ?assertEqual(
-        {error,
-            {exception, <<"Xception">>, #goldentest_xception{errorCode = 1001, message = <<"This is not Xception2">>}}},
-        'ThriftTest_client':testMultiException(Client, <<"Xception">>, <<"x">>)
+        {error, {exception, #goldentest_xception{errorCode = 1001, message = <<"This is not Xception2">>}}},
+        goldentest_thrift_test_client:testMultiException(Client, <<"Xception">>, <<"x">>)
     ),
     ?assertEqual(
         {error,
-            {exception, <<"Xception2">>, #goldentest_xception2{
+            {exception, #goldentest_xception2{
                 errorCode = 2002, struct_thing = #goldentest_xtruct{string_thing = <<"y">>}
             }}},
-        'ThriftTest_client':testMultiException(Client, <<"Xception2">>, <<"y">>)
+        goldentest_thrift_test_client:testMultiException(Client, <<"Xception2">>, <<"y">>)
     ),
     ?assertEqual(
         {ok, #goldentest_xtruct{string_thing = <<"y">>}},
-        'ThriftTest_client':testMultiException(Client, <<"fine">>, <<"y">>)
+        goldentest_thrift_test_client:testMultiException(Client, <<"fine">>, <<"y">>)
     ),
 
     %% Oneway fires the sink; the connection stays usable afterwards.
-    ?assertEqual(ok, 'ThriftTest_client':testOneway(Client, 1)),
+    ?assertEqual(ok, goldentest_thrift_test_client:testOneway(Client, 1)),
     receive
         {fired, 1} -> ok
     after ?CLIENT_TIMEOUT ->
         erlang:error(oneway_not_delivered)
     end,
-    ?assertEqual({ok, <<"after oneway">>}, 'ThriftTest_client':testString(Client, <<"after oneway">>)).
+    ?assertEqual({ok, <<"after oneway">>}, goldentest_thrift_test_client:testString(Client, <<"after oneway">>)).
 
 %%--------------------------------------------------------------------
 %% Official client against our server
@@ -308,10 +307,10 @@ official_client_scenario(Transport) ->
 
 official_client_scenario(Transport, Protocol) ->
     {ok, Server} =
-        'ThriftTest_server':start_link(#{
+        goldentest_thrift_test_server:start_link(#{
             port => 0, handler => thrift_golden_our_handler, transport => Transport, protocol => Protocol
         }),
-    {ok, Port} = 'ThriftTest_server':port(Server),
+    {ok, Port} = goldentest_thrift_test_server:port(Server),
     {ok, Client0} =
         thrift_client_util:new("127.0.0.1", Port, thrift_test_thrift, [
             {protocol, Protocol}, {framed, Transport =:= framed}, {recv_timeout, ?CLIENT_TIMEOUT}
@@ -326,7 +325,7 @@ official_client_scenario(Transport, Protocol) ->
         catch
             _:_ -> ok
         end,
-        ok = 'ThriftTest_server':stop(Server)
+        ok = goldentest_thrift_test_server:stop(Server)
     end.
 
 run_official_client_assertions(C0) ->

@@ -111,7 +111,7 @@ generate() ->
 compile_all_modules_test() ->
     Results = generate(),
     Names = [Name || {ok, Name, _} <- Results],
-    ?assertEqual(['Svc_client', 'Svc_handler', 'Svc_server', t_types], lists:sort(Names)),
+    ?assertEqual([t_svc_client, t_svc_handler, t_svc_server, t_types], lists:sort(Names)),
     ok.
 
 struct_info_descriptor_test() ->
@@ -164,7 +164,7 @@ service_info_descriptor_test() ->
     generate(),
     %% The server module unwraps its service from the types module's
     %% per-file map: the runtime expects a flat function map.
-    Info = 'Svc_server':service_info(),
+    Info = t_svc_server:service_info(),
     ?assertEqual([<<"area">>, <<"fetch">>, <<"fire">>, <<"ping">>], lists:sort(maps:keys(Info))),
     ?assertEqual(true, maps:get(oneway, maps:get(<<"fire">>, Info))),
     ?assertEqual({base, i32}, maps:get(reply, maps:get(<<"area">>, Info))),
@@ -191,11 +191,11 @@ map_representation_test() ->
 
 handler_callbacks_test() ->
     Results = generate(),
-    {ok, 'Svc_handler', Beam} = lists:keyfind('Svc_handler', 2, Results),
-    {module, 'Svc_handler'} = code:load_binary('Svc_handler', "Svc_handler.erl", Beam),
+    {ok, t_svc_handler, Beam} = lists:keyfind(t_svc_handler, 2, Results),
+    {module, t_svc_handler} = code:load_binary(t_svc_handler, "Svc_handler.erl", Beam),
     ?assertEqual(
         lists:sort([{fire, 1}, {ping, 0}, {fetch, 1}, {area, 2}]),
-        lists:sort('Svc_handler':behaviour_info(callbacks))
+        lists:sort(t_svc_handler:behaviour_info(callbacks))
     ),
     ok.
 
@@ -204,7 +204,7 @@ source_is_readable_text_test() ->
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Sources = thrift_generator_emitter:sources(Model),
-    ClientSrc = entry_source('Svc_client', Sources),
+    ClientSrc = entry_source(t_svc_client, Sources),
     ?assertMatch(
         {match, _},
         re:run(ClientSrc, <<"area\\(Client, P1, P2\\) -> area\\(Client, P1, P2, 5000\\).">>)
@@ -621,7 +621,7 @@ namespace_prefix_test() ->
         Results
     ),
     ?assertEqual(
-        ['Svc_client', 'Svc_handler', 'Svc_server', demo_widgets_types],
+        ['demo_widgets_svc_client', 'demo_widgets_svc_handler', 'demo_widgets_svc_server', demo_widgets_types],
         lists:sort([Name || {ok, Name, _} <- Results])
     ),
 
@@ -760,15 +760,15 @@ doc_pipeline_test() ->
     ?assertMatch({match, _}, re:run(TypesSrc, <<"The struct tag -> descriptor map">>)),
     ?assertMatch({match, _}, re:run(TypesSrc, <<"Reshapes a typed value \\(record or struct">>)),
     %% client methods and handler callbacks carry the function's IDL doc
-    ClientSrc = entry_source('Svc_client', Sources),
+    ClientSrc = entry_source(t_svc_client, Sources),
     ?assertMatch({match, _}, re:run(ClientSrc, <<"Ping it\\.\\\\n\\\\nCalls ping and waits for">>)),
     ?assertMatch({match, _}, re:run(ClientSrc, <<"Sends the oneway fire">>)),
-    HandlerSrc = entry_source('Svc_handler', Sources),
+    HandlerSrc = entry_source(t_svc_handler, Sources),
     ?assertMatch({match, _}, re:run(HandlerSrc, <<"Ping it\\.\\\\n\\\\nHandler callback for ping">>)),
     ?assertMatch({match, _}, re:run(HandlerSrc, <<"oneway fire: called as">>)),
     %% the service doc lands in the generated module docs
     ?assertMatch({match, _}, re:run(ClientSrc, <<"Waves at the caller\\.">>)),
-    ServerSrc = entry_source('Svc_server', Sources),
+    ServerSrc = entry_source(t_svc_server, Sources),
     ?assertMatch({match, _}, re:run(ServerSrc, <<"Waves at the caller\\.">>)),
     ok.
 
