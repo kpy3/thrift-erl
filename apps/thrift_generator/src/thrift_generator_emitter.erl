@@ -40,9 +40,12 @@ the descriptor terms, which keeps the emitter declarative.
     sources/1,
     compile_sources/1,
     erlang_type/2,
-    record_mode/1,
+    exceptions_desc/2,
     has_record/1,
+    params_desc/2,
     record_form/3,
+    record_mode/1,
+    reply_desc/2,
     sanitize/1,
     section_label/1,
     struct_type/1,
@@ -674,8 +677,12 @@ tag_index_forms(Mod, Ctx) ->
     Pairs = lists:append([
         case sum_mode(S) of
             %% A sum-union value carries a field atom as its tag: every
-            %% field indexes the union (the semantic rejects atoms
-            %% claimed by two unions of one module).
+            %% field indexes the union. An atom shared by several sum
+            %% unions of one module resolves to the LAST union
+            %% declaring it (maps:from_list order) — the module-level
+            %% convert/2 is context-free, so converting another union's
+            %% value under a shared atom fails its payload type check
+            %% (struct payloads; scalars pass through unchecked).
             true ->
                 [{field_atom(F#tg_field.name), struct_ref(S, Ctx)} || F <- S#tg_struct.fields];
             false ->
@@ -714,7 +721,12 @@ tag_index_forms(Mod, Ctx) ->
             <<
                 "The struct tag -> descriptor map `thrift_erl:convert/3` takes:"
                 " record tags for record-mode structs, wire names for"
-                " map-mode ones, sum-union field atoms for sums."
+                " map-mode ones, sum-union field atoms for sums. Several"
+                " sum unions of one module may share a field name; the"
+                " atom indexes the last union declaring it, so converting"
+                " another union's value under a shared atom fails the"
+                " payload type check where a struct payload makes it"
+                " visible (scalars pass through unchecked)."
             >>
         ) ++
         thrift_generator_emitter_syntax:fn_form(tag_index, [
@@ -1137,9 +1149,29 @@ function_info_forms(Mod, Ctx) ->
             ]
     ).
 
+%% Same-named methods across a module's services are legal Thrift and
+%% common in the wild (per-service `GetEvents'), but function_info/2 is
+%% method-name keyed — duplicate clauses could not even compile. The
+%% last declaration wins, the same resolution `tag_index/0' applies to
+%% shared sum-union field atoms. Generated clients do not resolve
+%% through this table: each wrapper embeds its own service's
+%% descriptors, so a collision affects introspection only.
+
 -spec service_functions(#tg_module{}) -> [#tg_function{}].
 service_functions(Mod) ->
-    lists:append([S#tg_service.functions || S <- Mod#tg_module.services]).
+    All = lists:append([S#tg_service.functions || S <- Mod#tg_module.services]),
+    {Kept, _Seen} =
+        lists:foldr(
+            fun(F, {KeptAcc, Seen}) ->
+                case maps:is_key(F#tg_function.name, Seen) of
+                    true -> {KeptAcc, Seen};
+                    false -> {[F | KeptAcc], Seen#{F#tg_function.name => true}}
+                end
+            end,
+            {[], #{}},
+            All
+        ),
+    Kept.
 
 -spec params_desc(#tg_function{}, #ectx{}) -> desc().
 params_desc(F, Ctx) ->

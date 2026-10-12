@@ -54,7 +54,7 @@ service_sources(Svc, Mod, Ctx) ->
     [
         {HandlerMod, handler_forms(Svc, Mod, HandlerMod, Ctx), undefined},
         {ServerMod, server_forms(Svc, Mod, TypesMod, ServerMod), undefined},
-        {ClientMod, client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod), undefined}
+        {ClientMod, client_forms(Svc, Mod, ServerMod, ClientMod, Ctx), undefined}
     ].
 
 %% The prefix always exists for loaded files (namespace value or the
@@ -341,8 +341,8 @@ server_forms(Svc, Mod, TypesMod, ServerMod) ->
             )
         ]).
 
--spec client_forms(#tg_service{}, #tg_module{}, module(), module(), module()) -> erl_syntax:forms().
-client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod) ->
+-spec client_forms(#tg_service{}, #tg_module{}, module(), module(), #ectx{}) -> erl_syntax:forms().
+client_forms(Svc, Mod, ServerMod, ClientMod, Ctx) ->
     Doc =
         unicode:characters_to_binary([
             io_lib:format(
@@ -355,7 +355,7 @@ client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod) ->
             ),
             service_doc_suffix(Svc)
         ]),
-    ClientFns = [client_fn(F, TypesMod) || F <- Svc#tg_service.functions],
+    ClientFns = [client_fn(F, Ctx) || F <- Svc#tg_service.functions],
     thrift_generator_emitter_syntax:header(ClientMod, Mod#tg_module.path) ++
         thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [
@@ -371,9 +371,9 @@ client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod) ->
 %% `Name/(N+1)` the call itself. Non-oneway replies come back through
 %% `thrift_erl_record:call_result_from_wire`, so records surface here.
 
--spec client_fn(#tg_function{}, module()) ->
+-spec client_fn(#tg_function{}, #ectx{}) ->
     {[erl_syntax:forms()], [erl_syntax:forms()]}.
-client_fn(F, TypesMod) ->
+client_fn(F, Ctx) ->
     Name = thrift_generator_emitter_syntax:function_atom(F#tg_function.name),
     NParams = length(F#tg_function.params),
     ShortArgs = [erl_syntax:variable("Client")] ++ param_vars(NParams),
@@ -381,15 +381,16 @@ client_fn(F, TypesMod) ->
     ShortCall = erl_syntax:application(
         erl_syntax:atom(Name), ShortArgs ++ [thrift_generator_emitter_syntax:abstract(?DEFAULT_TIMEOUT)]
     ),
+    %% The descriptors are embedded literally, not resolved through
+    %% `TypesMod:function_info/2': that table is method-name keyed and
+    %% same-named methods of another service of one file would hand this
+    %% client a foreign descriptor.
     WireArgs =
         erl_syntax:application(
             erl_syntax:atom(thrift_erl_record),
             erl_syntax:atom(args_to_wire),
             [
-                thrift_generator_emitter_syntax:application(TypesMod, function_info, [
-                    thrift_generator_emitter_syntax:abstract(F#tg_function.name),
-                    thrift_generator_emitter_syntax:abstract(params)
-                ]),
+                thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:params_desc(F, Ctx)),
                 erl_syntax:list(param_vars(NParams))
             ]
         ),
@@ -405,14 +406,8 @@ client_fn(F, TypesMod) ->
                         erl_syntax:atom(thrift_erl_record),
                         erl_syntax:atom(call_result_from_wire),
                         [
-                            thrift_generator_emitter_syntax:application(TypesMod, function_info, [
-                                thrift_generator_emitter_syntax:abstract(F#tg_function.name),
-                                thrift_generator_emitter_syntax:abstract(reply)
-                            ]),
-                            thrift_generator_emitter_syntax:application(TypesMod, function_info, [
-                                thrift_generator_emitter_syntax:abstract(F#tg_function.name),
-                                thrift_generator_emitter_syntax:abstract(exceptions)
-                            ]),
+                            thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:reply_desc(F, Ctx)),
+                            thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:exceptions_desc(F, Ctx)),
                             RawCall
                         ]
                     )

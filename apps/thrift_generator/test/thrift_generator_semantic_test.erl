@@ -398,16 +398,6 @@ union_type_validation_test() ->
         {error, [{<<"t.thrift">>, _, <<"unknown erl.union_type tuple (expected \"record\" or \"sum\")">>}]},
         analyze(<<"union U { 1: i64 n } (erl.union_type = \"tuple\")">>)
     ),
-    %% Two sum unions of one module cannot claim the same field atom:
-    %% the atoms are convert/2's tags.
-    ?assertMatch(
-        {error, [{<<"t.thrift">>, _, <<"duplicate sum union field n">>}]},
-        analyze(
-            "namespace erl t (erl.union_type = \"sum\")\n"
-            "union A { 1: i64 n }\n"
-            "union B { 1: string n }"
-        )
-    ),
     ok.
 
 %% The invocation-wide option axes (analyze/2 opts) seed the same

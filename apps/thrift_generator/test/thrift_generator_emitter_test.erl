@@ -38,6 +38,8 @@
     enum_and_const_helpers_test/0,
     set_annotation_test/0,
     sum_union_test/0,
+    sum_union_shared_atoms_test/0,
+    service_method_name_clash_test/0,
     namespace_set_default_test/0,
     namespace_prefix_test/0,
     type_definitions_test/0,
@@ -430,6 +432,90 @@ sum_union_test() ->
     %% An unknown tag and a malformed wire union are tagged errors.
     ?assertMatch({error, {value_does_not_match_type, _}}, t_types:encode_value({bogus, 1})),
     ?assertMatch({error, {invalid_union, _}}, t_types:decode_value(<<0>>)),
+    ok.
+
+%% Field atoms shared by several sum unions of one module are legal,
+%% common Thrift (per-resource result unions). Each union's own
+%% encode/decode stays exact; the context-free module-level convert
+%% resolves a shared atom to the LAST union declaring it, so another
+%% union's value under that atom fails the payload type check where it
+%% can be seen (struct payloads — the wire-map level does not type-check
+%% scalars).
+
+sum_union_shared_atoms_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        "namespace erl t (erl.union_type = \"sum\")\n"
+        "struct Inner { 1: string name }\n"
+        "union First { 1: i64 n, 2: Inner s }\n"
+        "union Second { 1: Inner n }\n"
+    ),
+    Loaded = [
+        #tg_loaded{name = <<"t">>, prefix = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}
+    ],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+
+    %% per-union codecs are exact regardless of the shared atom
+    {ok, FirstBin} = t_types:encode_t_first({n, 5}),
+    {ok, {n, 5}} = t_types:decode_t_first(FirstBin),
+    {ok, SecondBin} = t_types:encode_t_second({n, {t_inner, <<"x">>}}),
+    {ok, {n, {t_inner, <<"x">>}}} = t_types:decode_t_second(SecondBin),
+
+    %% the shared atom indexes the last-declared union
+    #{n := {struct, {ref, t_types, <<"Second">>}}, s := {struct, {ref, t_types, <<"First">>}}} =
+        t_types:tag_index(),
+    {ok, {n, {t_inner, <<"x">>}}} = t_types:convert({n, {t_inner, <<"x">>}}, record),
+    {ok, {s, {t_inner, <<"x">>}}} = t_types:convert({s, {t_inner, <<"x">>}}, record),
+    %% an i64 payload under the struct-typed winner is a loud misuse,
+    %% not a silent conversion
+    ?assertError({value_does_not_match_type, _}, t_types:convert({n, 5}, record)),
+    ok.
+
+%% Same-named methods across two services of one file are legal Thrift
+%% (per-service GetEvents): the name-keyed function_info/2 keeps the
+%% last declaration's clauses, and every generated client embeds its own
+%% service's params/reply/exceptions descriptors instead of resolving
+%% through that table — a collision cannot hand one client another
+%% service's descriptor (wrong field types on the wire).
+
+service_method_name_clash_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        "namespace erl t\n"
+        "service First { list<i64> Get(1: string filter) }\n"
+        "service Second { list<string> Get(1: i64 limit) }\n"
+    ),
+    Loaded = [#tg_loaded{name = <<"t">>, prefix = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+
+    %% the name-keyed introspection table carries the last declaration
+    ?assertEqual(
+        {struct, {struct, [{1, default, {base, i64}, <<"limit">>, undefined}]}},
+        t_types:function_info(<<"Get">>, params)
+    ),
+
+    Sources = thrift_generator_emitter:sources(Model),
+    %% each client embeds its own descriptor and never resolves through
+    %% the shared table
+    FirstClient = entry_source(t_first_client, Sources),
+    SecondClient = entry_source(t_second_client, Sources),
+    ?assertMatch(nomatch, re:run(FirstClient, <<"function_info">>)),
+    ?assertMatch(nomatch, re:run(SecondClient, <<"function_info">>)),
+    ?assertMatch({match, _}, re:run(FirstClient, <<"filter">>)),
+    ?assertMatch(nomatch, re:run(FirstClient, <<"limit">>)),
+    ?assertMatch({match, _}, re:run(SecondClient, <<"limit">>)),
     ok.
 
 %% `--repr native' (analyze/2 `#{repr => native}') materializes onto

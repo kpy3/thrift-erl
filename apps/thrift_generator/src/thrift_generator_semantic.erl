@@ -247,17 +247,12 @@ check_generated_names(Module, Ctx) ->
     EnumPrefixes = [{thrift_generator_names:snake(E#tg_enum.name), E#tg_enum.line} || E <- Module#tg_module.enums],
     Ctx1 = check_flat_clashes(StructTags, "record tag", Ctx),
     Ctx2 = check_flat_clashes(EnumPrefixes, "enum helper prefix", Ctx1),
-    %% Sum unions index convert/2 by their field atoms; two unions
-    %% claiming one atom would make the lookup ambiguous.
-    SumFields = [
-        {F#tg_field.name, {S#tg_struct.line, S#tg_struct.col}}
-     || S <- Module#tg_module.structs,
-        S#tg_struct.kind =:= union,
-        maps:get(union_type, S#tg_struct.erl, <<"record">>) =:= <<"sum">>,
-        F <- S#tg_struct.fields
-    ],
-    Ctx3 = check_flat_clashes(SumFields, "sum union field", Ctx2),
-    check_const_clashes(Module, Ctx3).
+    %% Sum-union field atoms are NOT checked for cross-union clashes:
+    %% sharing a field name across unions is legal, common Thrift
+    %% (per-resource result unions), and only the module-level
+    %% convert/2 entry is context-free — the tag_index resolves a
+    %% shared atom to the last union declaring it (see tag_index_forms).
+    check_const_clashes(Module, Ctx2).
 
 -spec check_flat_clashes([{binary(), loc()}], string(), #ctx{}) -> #ctx{}.
 check_flat_clashes(Pairs, What, Ctx) ->
