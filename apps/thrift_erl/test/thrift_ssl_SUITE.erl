@@ -224,7 +224,9 @@ plain_client_to_tls_server(Config) ->
         try
             ?assertMatch({error, _}, call(Client, <<"add">>, [2, 3]))
         after
-            thrift_erl_client:stop(Client)
+            %% The failed call stops the client (its design); the
+            %% teardown races its death on loaded runners.
+            stop_client_quietly(Client)
         end,
         %% The server is still there and still speaks TLS.
         {ok, TlsClient} = thrift_erl_client:start_link(
