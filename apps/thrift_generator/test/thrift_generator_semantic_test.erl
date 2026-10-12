@@ -49,7 +49,8 @@
     namespace_set_default_error_test/0,
     namespace_union_default_test/0,
     namespace_union_default_error_test/0,
-    union_type_validation_test/0
+    union_type_validation_test/0,
+    option_axes_test/0
 ]).
 
 -spec analyze(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.
@@ -408,3 +409,78 @@ union_type_validation_test() ->
         )
     ),
     ok.
+
+%% The invocation-wide option axes (analyze/2 opts) seed the same
+%% defaults the namespace annotations control: an explicit
+%% per-definition annotation wins over the option, and a file-wide
+%% namespace default wins over it too; each option's built-in default
+%% injects nothing.
+
+option_axes_test() ->
+    %% the union axis materializes the annotation the namespace header
+    %% would have injected
+    {ok, SumModel} =
+        analyze_opts(
+            "union Value { 1: i64 n }\n"
+            "union Legacy { 1: i64 n } (erl.union_type = \"record\")\n",
+            #{union_type => sum}
+        ),
+    [Value, Legacy] = (model_module(SumModel))#tg_module.structs,
+    ?assertEqual(#{union_type => <<"sum">>}, Value#tg_struct.erl),
+    ?assertEqual(#{union_type => <<"record">>}, Legacy#tg_struct.erl),
+    %% the file-wide namespace default outranks the invocation option
+    {ok, NsModel} =
+        analyze_opts(
+            "namespace erl t (erl.union_type = \"record\")\nunion U { 1: i64 n }",
+            #{union_type => sum}
+        ),
+    [U] = (model_module(NsModel))#tg_module.structs,
+    ?assertEqual(#{}, U#tg_struct.erl),
+    %% the set axis
+    {ok, SetModel} =
+        analyze_opts(
+            "struct S {\n"
+            "  1: set<i32> plain,\n"
+            "  2: set<i32> (erl.set = \"ordset\") ords\n"
+            "}\n",
+            #{set => sets}
+        ),
+    [S] = (model_module(SetModel))#tg_module.structs,
+    [Plain, Ords] = S#tg_struct.fields,
+    ?assertEqual(
+        {set, {base, i32, #{}}, #{<<"erl.set">> => <<"sets">>}},
+        Plain#tg_field.type
+    ),
+    ?assertEqual(
+        {set, {base, i32, #{}}, #{<<"erl.set">> => <<"ordset">>}},
+        Ords#tg_field.type
+    ),
+    %% the typedef axis: `alias' (the built-in default) injects nothing
+    {ok, NominalModel} =
+        analyze_opts(
+            "typedef i64 Stamp\n"
+            "typedef string Text (erl.type = \"alias\")\n",
+            #{typedef_type => nominal}
+        ),
+    [Stamp, Text] = (model_module(NominalModel))#tg_module.typedefs,
+    ?assertEqual(#{type => <<"nominal">>}, Stamp#tg_typedef.erl),
+    ?assertEqual(#{type => <<"alias">>}, Text#tg_typedef.erl),
+    {ok, AliasModel} =
+        analyze_opts(
+            "typedef i64 Stamp\nunion V { 1: i64 n }\nstruct B { 1: set<i32> tags }",
+            #{}
+        ),
+    AliasModule = model_module(AliasModel),
+    [AliasStamp] = AliasModule#tg_module.typedefs,
+    [AliasV, AliasB] = AliasModule#tg_module.structs,
+    ?assertEqual(#{}, AliasStamp#tg_typedef.erl),
+    ?assertEqual(#{}, AliasV#tg_struct.erl),
+    ?assertEqual({set, {base, i32, #{}}, #{}}, (hd(AliasB#tg_struct.fields))#tg_field.type),
+    ok.
+
+-spec analyze_opts(string() | binary(), thrift_generator_semantic:generate_semantic_opts()) ->
+    {ok, #tg_model{}} | {error, term()}.
+analyze_opts(Snippet, Opts) ->
+    {ok, Doc} = thrift_generator:parse_string(Snippet),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    thrift_generator_semantic:analyze(Loaded, Opts).

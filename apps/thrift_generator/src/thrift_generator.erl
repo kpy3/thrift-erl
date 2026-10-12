@@ -42,11 +42,16 @@ paths the loader tracks.
 
 -export_type([generate_opts/0]).
 
-%% The default value representation for definitions without an explicit
-%% `erl.struct_type' annotation (`record' injects nothing — the
-%% annotation-free default stays the tuple record). Unions keep their
-%% own axis (`erl.union_type').
--type generate_opts() :: #{repr => record | map | native}.
+%% The invocation-wide option axes. Each one applies only to
+%% definitions without an explicit annotation of its own (`record'
+%% repr, `record' unions, `list' sets and `alias' typedefs inject
+%% nothing — the annotation-free defaults stay as they are).
+-type generate_opts() :: #{
+    repr => record | map | native,
+    union_type => record | sum,
+    set => list | sets | ordset,
+    typedef_type => alias | nominal
+}.
 
 -doc """
 Full pipeline: load (with includes), semantic analysis, code emission,
@@ -56,10 +61,17 @@ Writes one `<module>.erl` per generated module (types, and
 client/server/handler per service) and a `<mod>_types.hrl` next to
 every types module. Files whose on-disk content already matches are
 left untouched, so regenerating an unchanged IDL does not churn mtimes
-(and recompiles). `Opts` understands `repr` — the representation
-generated for definitions without an explicit `erl.struct_type`
-annotation (`record`, the default, injects nothing; `map` and `native`
-inject their annotation the same way an explicit one would).
+(and recompiles).
+
+`Opts` carries the invocation-wide axes; each applies only to
+definitions without an explicit annotation of its own: `repr`
+(`record`, the default, `map` or `native`) for structures and
+exceptions without `erl.struct_type`, `union_type` (`record` or `sum`)
+for unions without `erl.union_type`, `set` (`list`, the default,
+`sets` or `ordset`) for sets without `erl.set`, and `typedef_type`
+(`alias`, the default, or `nominal`) for typedefs without `erl.type`.
+A file-wide namespace default overrides the option for its file.
+
 Returns the generated modules with their paths (and the include path
 when one was written).
 """.
@@ -81,9 +93,9 @@ writes.
     {ok, [thrift_generator_emitter:source()]} | {error, term()}.
 sources(ThriftFile, Opts) ->
     maybe
-        Repr ?= repr_opt(Opts),
+        SemanticOpts ?= semantic_opts(Opts),
         {ok, Loaded} ?= thrift_generator_loader:load(ThriftFile),
-        {ok, Model} ?= thrift_generator_semantic:analyze(Loaded, #{repr => Repr}),
+        {ok, Model} ?= thrift_generator_semantic:analyze(Loaded, SemanticOpts),
         {ok, thrift_generator_emitter:sources(Model)}
     else
         {error, Reason} -> {error, Reason};
@@ -198,13 +210,36 @@ stale_path(Path, Source, Acc) ->
 disk_differs(Path, Source) ->
     file:read_file(Path) =/= {ok, Source}.
 
--spec repr_opt(term()) -> record | map | native.
-repr_opt(#{repr := Repr}) when Repr =:= record; Repr =:= map; Repr =:= native ->
-    Repr;
-repr_opt(#{} = Opts) when map_size(Opts) =:= 0 ->
-    record;
-repr_opt(Opts) ->
+%% Validates the public option axes of generate/3, sources/2 and
+%% check/3: only the four known keys, each with its exact atom values.
+%% Unknown keys are rejected — a typo like `typedef' would otherwise
+%% silently fall back to the built-in defaults. (No empty-map clause:
+%% the `#{}' pattern matches ANY map, so the key check below must see
+%% every input.)
+
+-spec semantic_opts(term()) -> generate_opts().
+semantic_opts(Opts) when is_map(Opts) ->
+    case maps:keys(Opts) -- [repr, union_type, set, typedef_type] of
+        [] ->
+            #{
+                repr => axis_opt(repr, [record, map, native], Opts, record),
+                union_type => axis_opt(union_type, [record, sum], Opts, record),
+                set => axis_opt(set, [list, sets, ordset], Opts, list),
+                typedef_type => axis_opt(typedef_type, [alias, nominal], Opts, alias)
+            };
+        _ ->
+            erlang:error({badarg, Opts})
+    end;
+semantic_opts(Opts) ->
     erlang:error({badarg, Opts}).
+
+-spec axis_opt(repr | union_type | set | typedef_type, [atom()], generate_opts(), atom()) -> atom().
+axis_opt(Key, Allowed, Opts, Default) ->
+    Value = maps:get(Key, Opts, Default),
+    case is_atom(Value) andalso lists:member(Value, Allowed) of
+        true -> Value;
+        false -> erlang:error({badarg, {Key, Value}})
+    end.
 
 write_all([#{module := Module, source := Source} = Entry | Rest], OutDir, Acc) ->
     Base = atom_to_list(Module),

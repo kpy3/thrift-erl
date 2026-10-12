@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Generator (`thrift_generator`)
 
+- Three new invocation-wide option axes next to `--repr`, each applying
+  only where the IDL carries no explicit annotation of its own (an
+  explicit annotation wins, and a file-wide namespace default
+  `erl.set` / `erl.union_type` beats the option for its file):
+  `--union-type record|sum` materializes `erl.union_type` on unannotated
+  unions, `--set list|sets|ordset` materializes `erl.set` on unannotated
+  sets, and `--typedef-type alias|nominal` materializes `erl.type` on
+  unannotated typedefs (the API map keys: `union_type`, `set`,
+  `typedef_type`). The rebar3 plugin grows the same four axes (including
+  the previously unplumbed `repr`) as `{thrift, [{repr, ...}, ...]}`
+  config entries, validated with a rendered `{bad_opt, _}` error instead
+  of a raw crash, and `check/3` treats them like `--repr`: artifacts
+  count as stale unless regenerated with the exact same options.
+
 - Cross-module references resolve under the Apache Thrift spelling:
   the dotted qualifier is the **included file's base name**
   (`include "payment_resource.thrift"` makes

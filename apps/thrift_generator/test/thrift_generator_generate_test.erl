@@ -27,6 +27,8 @@
     generate_check_modified_file_test/0,
     generate_check_missing_file_test/0,
     generate_check_repr_drift_test/0,
+    generate_check_option_axes_test/0,
+    generate_bad_opts_test/0,
     generate_skips_unchanged_test/0,
     clean_removes_generated_files_test/0,
     clean_missing_dir_test/0
@@ -101,6 +103,58 @@ generate_check_repr_drift_test() ->
         {error, {stale, Stale}} = thrift_generator:check(File, OutDir, #{repr => map}),
         TypesErl = filename:join(OutDir, "checkgate_types.erl"),
         ?assert(lists:member(TypesErl, Stale)),
+        ok
+    after
+        rm_rf(Dir)
+    end.
+
+%% The union/set/typedef option axes take part in the freshness gate
+%% the same way --repr does: check passes only with the exact options
+%% the artifacts were generated with.
+
+generate_check_option_axes_test() ->
+    Dir = tmp_dir(),
+    try
+        File = filename:join(Dir, "axesgate.thrift"),
+        ok =
+            file:write_file(
+                File,
+                "union Value { 1: i64 n }\n"
+                "struct Bag { 1: optional set<string> tags }\n"
+                "typedef i64 Stamp\n"
+            ),
+        OutDir = filename:join(Dir, "out"),
+        Opts = #{union_type => sum, set => sets, typedef_type => nominal},
+        {ok, _} = thrift_generator:generate(File, OutDir, Opts),
+        ?assertEqual(ok, thrift_generator:check(File, OutDir, Opts)),
+        {error, {stale, Stale}} = thrift_generator:check(File, OutDir, #{}),
+        TypesErl = filename:join(OutDir, "axesgate_types.erl"),
+        ?assert(lists:member(TypesErl, Stale)),
+        ok
+    after
+        rm_rf(Dir)
+    end.
+
+%% Option validation: only the four known keys with their exact atom
+%% values; anything else — an unknown key, a bad value, a non-map —
+%% fails with badarg before any file is written.
+
+generate_bad_opts_test() ->
+    Dir = tmp_dir(),
+    try
+        File = write_idl(Dir),
+        OutDir = filename:join(Dir, "out"),
+        ?assertError({badarg, #{unknown := 1}}, thrift_generator:generate(File, OutDir, #{unknown => 1})),
+        ?assertError({badarg, {repr, tuple}}, thrift_generator:generate(File, OutDir, #{repr => tuple})),
+        ?assertError(
+            {badarg, {union_type, tagged}}, thrift_generator:generate(File, OutDir, #{union_type => tagged})
+        ),
+        ?assertError({badarg, {set, gb_sets}}, thrift_generator:generate(File, OutDir, #{set => gb_sets})),
+        ?assertError(
+            {badarg, {typedef_type, record}},
+            thrift_generator:generate(File, OutDir, #{typedef_type => record})
+        ),
+        ?assertError({badarg, atoms}, thrift_generator:generate(File, OutDir, atoms)),
         ok
     after
         rm_rf(Dir)
