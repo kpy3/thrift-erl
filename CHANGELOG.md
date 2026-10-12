@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing and tooling
+
+- The ssl suite's plain-client case no longer flakes the teardown the
+  same way the server-events test did: the failed call stops the client
+  (its design), so the after-block's bare stop races the client's death
+  and raises `exit:noproc` on loaded runners; it now goes through the
+  suite's quiet-stop helper like every other case with a client
+  expected dead.
+
 ## [0.6.0] — 2026-10-12
 
 Schema-shape freedom: the generator accepts legal, common Thrift it
