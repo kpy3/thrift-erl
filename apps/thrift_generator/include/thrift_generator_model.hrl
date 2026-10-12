@@ -152,6 +152,9 @@
     modules :: #{module_key() => #tg_module{}},
     %% binary module name -> emitted types module atom
     type_modules :: #{module_key() => module()},
+    %% include basename (the Apache qualification spelling) -> binary
+    %% module name
+    include_modules = #{} :: #{module_key() => module_key()},
     current :: undefined | module_key(),
     %% hrl context: type references qualify with the defining module —
     %% the hrl carries no type definitions, and remote types compile at

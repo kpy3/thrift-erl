@@ -39,6 +39,7 @@
     utf8_invalid_file_rejected/1,
     same_struct_names_coexist/1,
     cross_module_typedef/1,
+    cross_module_include_qualifier/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
     generated_map_mode/1,
@@ -62,6 +63,7 @@ all() ->
         utf8_invalid_file_rejected,
         same_struct_names_coexist,
         cross_module_typedef,
+        cross_module_include_qualifier,
         generated_loopback_buffered,
         generated_loopback_framed,
         generated_map_mode,
@@ -268,6 +270,47 @@ cross_module_typedef(Config) ->
 loader_cycle(Config) ->
     CycleA = data_file(Config, "semantic/cycle_a.thrift"),
     ?assertMatch({error, {cycle, CycleA}}, thrift_generator_loader:load(CycleA)).
+
+%% The Apache qualification spelling: a dotted reference's qualifier is
+%% the included file's base name, which differs from the target's module
+%% key (the erl namespace value). Types, constants and the module-key
+%% spelling all resolve; the generated descriptor points at the real
+%% types module.
+
+cross_module_include_qualifier(Config) ->
+    IncluderPath = data_file(Config, "semantic/qualified/includer.thrift"),
+    {ok, Loaded} = thrift_generator_loader:load(IncluderPath),
+    ?assertEqual(
+        [<<"qualified_includer">>, <<"qualified_includee">>],
+        [E#tg_loaded.name || E <- Loaded]
+    ),
+
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [IncluderMod, IncludeeMod] = Model#tg_model.modules,
+    ?assertEqual(<<"qualified_includee">>, IncludeeMod#tg_module.name),
+
+    [Holder] = IncluderMod#tg_module.structs,
+    ?assertEqual(
+        [
+            {ref, <<"includee.Payload">>, #{}},
+            {ref, <<"includee.Color">>, #{}},
+            {ref, <<"includee.Stamp">>, #{}},
+            {ref, <<"qualified_includee.Payload">>, #{}}
+        ],
+        [F#tg_field.type || F <- Holder#tg_struct.fields]
+    ),
+
+    [Cap] = [C || C <- IncluderMod#tg_module.consts, C#tg_const.name =:= <<"Cap">>],
+    ?assertEqual(7, Cap#tg_const.value),
+
+    ok = generate_modules(IncluderPath),
+    {struct, Fields} = 'qualified_includer_types':struct_info(<<"Holder">>),
+    PayloadField = lists:keyfind(1, 1, Fields),
+    ?assertEqual(
+        {struct, {ref, 'qualified_includee_types', <<"Payload">>}},
+        element(3, PayloadField)
+    ),
+    ok.
 
 loader_duplicate_module(Config) ->
     One = data_file(Config, "semantic/dup_one.thrift"),

@@ -67,6 +67,10 @@ triples before failing, where `Loc` is a line number or a
     %% keep their own axis and never take this injection)
     repr_default = record :: record | map | native,
     all_defs = #{} :: #{binary() => #{binary() => def_kind()}},
+    %% include basename (the Apache qualification spelling) -> module
+    %% name: `payment_resource.PaymentResource` resolves through this
+    %% when no module is literally named payment_resource
+    include_modules = #{} :: #{binary() => binary()},
     all_const_values = #{} :: #{binary() => #{binary() => const_value()}},
     all_enum_members = #{} :: #{binary() => #{binary() => [binary()]}},
     all_typedefs = #{} :: #{binary() => #{binary() => thrift_type()}},
@@ -92,6 +96,7 @@ without an explicit `erl.struct_type` annotation.
 analyze([Root | _] = Loaded, Opts) ->
     Ctx0 = #ctx{
         all_defs = index_defs(Loaded, fun def_kind/1),
+        include_modules = include_module_index(Loaded),
         all_const_values = index_defs(Loaded, fun const_value_of/1),
         all_enum_members = index_defs(Loaded, fun enum_members_of/1),
         all_typedefs = index_defs(Loaded, fun typedef_type_of/1),
@@ -1123,7 +1128,67 @@ resolve_type_ref(Name, Ctx) ->
                 _ -> error
             end;
         false ->
-            find_first(fun(Module) -> dotted_ref(Name, Module, Ctx) end, maps:keys(Ctx#ctx.all_defs))
+            case
+                find_first(
+                    fun(Module) -> dotted_ref(Name, Module, Ctx) end,
+                    maps:keys(Ctx#ctx.all_defs)
+                )
+            of
+                {ok, _} = Hit ->
+                    Hit;
+                error ->
+                    include_type_ref(Name, Ctx)
+            end
+    end.
+
+%% The Apache qualification spelling: the qualifier is the included
+%% file's base name, which need not match the target file's module name.
+
+-spec include_type_ref(binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+include_type_ref(Name, Ctx) ->
+    case split_ref(Name) of
+        {Qualifier, Local} -> include_type_ref(Qualifier, Local, Ctx);
+        error -> error
+    end.
+
+-spec include_type_ref(binary(), binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+include_type_ref(Qualifier, Local, Ctx) ->
+    case maps:find(Qualifier, Ctx#ctx.include_modules) of
+        {ok, Module} -> module_ref(Module, Local, Ctx);
+        error -> error
+    end.
+
+%% The module index by include base name. Two files sharing a base name
+%% (different directories) leave the first module in the index — such a
+%% reference is ambiguous in Apache Thrift too, and the full module-key
+%% spelling still resolves exactly.
+
+-spec include_module_index([#tg_loaded{}]) -> #{binary() => binary()}.
+include_module_index(Loaded) ->
+    lists:foldl(
+        fun(L, Acc) ->
+            Qualifier = thrift_generator_loader:include_qualifier(L#tg_loaded.path),
+            case Acc of
+                #{Qualifier := _} -> Acc;
+                _ -> Acc#{Qualifier => L#tg_loaded.name}
+            end
+        end,
+        #{},
+        Loaded
+    ).
+
+-spec split_ref(binary()) -> {binary(), binary()} | error.
+split_ref(Name) ->
+    case binary:split(Name, <<".">>) of
+        [Qualifier, Local] -> {Qualifier, Local};
+        [Name] -> error
+    end.
+
+-spec module_ref(binary(), binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+module_ref(Module, Local, Ctx) ->
+    case maps:get(Module, Ctx#ctx.all_defs, #{}) of
+        #{Local := Kind} -> {ok, {Module, Local, Kind}};
+        _ -> error
     end.
 
 %% Resolves `Name` as `Module.Name`: the part after the prefix must be
@@ -1214,15 +1279,39 @@ resolve_value_ref(Ref, Ctx) ->
             Found;
         error ->
             Others = [M || M <- maps:keys(Ctx#ctx.all_defs), M =/= Ctx#ctx.module],
-            find_first(
-                fun(M) ->
-                    case strip_prefix(Ref, M) of
-                        error -> error;
-                        Name -> try_const_and_enum(Name, M, Ctx)
-                    end
-                end,
-                Others
-            )
+            case find_first(fun(M) -> strip_value_ref(Ref, M, Ctx) end, Others) of
+                {ok, _} = Found ->
+                    Found;
+                error ->
+                    include_value_ref(Ref, Ctx)
+            end
+    end.
+
+-spec strip_value_ref(binary(), binary(), #ctx{}) ->
+    {ok, {const, const_value()}} | {ok, {enum_member, binary()}} | error.
+strip_value_ref(Ref, Module, Ctx) ->
+    case strip_prefix(Ref, Module) of
+        error -> error;
+        Name -> try_const_and_enum(Name, Module, Ctx)
+    end.
+
+%% The Apache spelling qualifies by the included file's base name, not
+%% the module name.
+
+-spec include_value_ref(binary(), #ctx{}) ->
+    {ok, {const, const_value()}} | {ok, {enum_member, binary()}} | error.
+include_value_ref(Ref, Ctx) ->
+    case split_ref(Ref) of
+        {Qualifier, Local} -> include_value_ref(Qualifier, Local, Ctx);
+        error -> error
+    end.
+
+-spec include_value_ref(binary(), binary(), #ctx{}) ->
+    {ok, {const, const_value()}} | {ok, {enum_member, binary()}} | error.
+include_value_ref(Qualifier, Local, Ctx) ->
+    case maps:find(Qualifier, Ctx#ctx.include_modules) of
+        {ok, Module} -> try_const_and_enum(Local, Module, Ctx);
+        error -> error
     end.
 
 -spec try_const_and_enum(binary(), binary(), #ctx{}) ->

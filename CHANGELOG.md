@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Generator (`thrift_generator`)
+
+- Cross-module references resolve under the Apache Thrift spelling:
+  the dotted qualifier is the **included file's base name**
+  (`include "payment_resource.thrift"` makes
+  `payment_resource.PaymentResource` references), which previously only
+  worked by coincidence — when the target's `namespace erl` value
+  happened to equal its base name. Both spellings now always resolve,
+  the base-name one and the module-key one; the generated descriptors
+  and remote types point at the real types module of the target file.
+  Two included files sharing a base name (different directories) leave
+  the first module in the qualification index — such a reference is
+  ambiguous in Apache Thrift too, and the module-key spelling still
+  resolves exactly.
+
 ### Testing and tooling
 
 - A teardown race in the server-events test no longer flakes the CI:

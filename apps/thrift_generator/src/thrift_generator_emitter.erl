@@ -118,12 +118,41 @@ module_triplets(Model) ->
                 M#tg_module.name => types_module_atom(M#tg_module.name)
              || M <- Model#tg_model.modules
             },
+        include_modules = include_module_index(Model#tg_model.modules),
         current = undefined
     },
     lists:append([
         module_sources(Mod, Ctx0#ectx{current = Mod#tg_module.name})
      || Mod <- Model#tg_model.modules
     ]).
+
+%% References from other modules qualify either with the target's module
+%% key (the erl namespace value) or — the Apache Thrift spelling — with
+%% the included file's base name, which need not match it. Two files
+%% sharing a base name leave the first module in the index: such a
+%% reference is ambiguous in Apache Thrift too, and the module-key
+%% spelling still resolves exactly.
+
+-spec include_module_index([#tg_module{}]) -> #{module_key() => module_key()}.
+include_module_index(Modules) ->
+    lists:foldl(
+        fun(M, Acc) ->
+            Qualifier = thrift_generator_loader:include_qualifier(M#tg_module.path),
+            case Acc of
+                #{Qualifier := _} -> Acc;
+                _ -> Acc#{Qualifier => M#tg_module.name}
+            end
+        end,
+        #{},
+        Modules
+    ).
+
+-spec module_key_of(module_key(), #ectx{}) -> module_key().
+module_key_of(Key, Ctx) ->
+    case maps:is_key(Key, Ctx#ectx.modules) of
+        true -> Key;
+        false -> maps:get(Key, Ctx#ectx.include_modules, Key)
+    end.
 
 -spec module_sources(#tg_module{}, #ectx{}) ->
     [{module(), erl_syntax:forms(), erl_syntax:forms() | undefined}].
@@ -1267,7 +1296,8 @@ set_impl(Ann) ->
     end.
 
 -spec qualified_desc(module_key(), binary(), #ectx{}) -> desc().
-qualified_desc(ModKey, Local, Ctx) ->
+qualified_desc(ModKey0, Local, Ctx) ->
+    ModKey = module_key_of(ModKey0, Ctx),
     Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
     TypesMod = maps:get(ModKey, Ctx#ectx.type_modules, undefined),
     case find_struct(Module, Local) of
@@ -1472,7 +1502,8 @@ local_ref_type(Local, Ctx) ->
     end.
 
 -spec qualified_ref_type(module_key(), binary(), #ectx{}) -> erl_syntax:syntaxTree().
-qualified_ref_type(ModKey, Local, Ctx) ->
+qualified_ref_type(ModKey0, Local, Ctx) ->
+    ModKey = module_key_of(ModKey0, Ctx),
     Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
     case def_alias(Module, Local) of
         {ok, Alias} ->
