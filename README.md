@@ -9,7 +9,9 @@ against its official compact, JSON, HTTP and multiplexed clients.
 
 ## Contents
 
-- [Why over the official Apache Thrift runtime](#why-over-the-official-apache-thrift-runtime)
+- [Compared to Apache Thrift](#compared-to-apache-thrift)
+  - [What you gain](#what-you-gain)
+  - [Where the in-process contract differs](#where-the-in-process-contract-differs)
 - [Layout](#layout)
 - [Build and tests](#build-and-tests)
 - [CLI](#cli)
@@ -27,14 +29,20 @@ against its official compact, JSON, HTTP and multiplexed clients.
 - [TLS](#tls)
 - [Namespaces](#namespaces)
 - [Codegen annotations](#codegen-annotations)
-- [Differences from Apache Thrift](#differences-from-apache-thrift)
 - [Performance](#performance)
 - [License](#license)
 
-## Why over the official Apache Thrift runtime
+## Compared to Apache Thrift
 
-Wire compatibility with Apache Thrift is the hard requirement here,
-not the selling point — everything below sits on top of it.
+Parity with Apache Thrift is the hard requirement here, not the
+selling point, and it is tested rather than assumed: two-way golden
+interop against the vendored official runtime — binary, compact and
+JSON protocols over buffered, framed and HTTP transports, multiplexed
+services included — plus PropEr properties pinning the specialized
+codecs byte-for-byte to the generic engine on every protocol. Where
+the in-process contract differs, it is deliberate.
+
+### What you gain
 
 - **Specialized codecs on the hot path.** The emitter compiles a
   per-struct wire codec into every generated module, and named struct
@@ -44,11 +52,6 @@ not the selling point — everything below sits on top of it.
   binary protocol, 2.4–6× on compact and up to 10× on JSON encode
   against the official 0.25.0 Erlang runtime (see Performance;
   reproducible with `./scripts/bench`).
-- **Compatibility is tested, not assumed.** Two-way golden interop
-  against the vendored official runtime: binary, compact and JSON
-  protocols over buffered, framed and HTTP transports, multiplexed
-  services included. PropEr properties pin the specialized codecs
-  byte-for-byte to the generic engine on every protocol.
 - **Errors are values.** Decoding answers `{error, trailing}` /
   `{error, truncated}` instead of throwing; a declared server
   exception comes back to the client typed, as
@@ -73,6 +76,23 @@ not the selling point — everything below sits on top of it.
   for CI, unchanged-file skipping so regeneration does not churn
   mtimes, and introspection exports (`struct_info/1`, `enum_info/1`,
   `function_info/2`, ...).
+
+### Where the in-process contract differs
+
+- Sets decode to plain wire lists by default; `erl.set = "sets"`
+  reproduces the official `sets:set()` representation per type or
+  file-wide (see [Codegen annotations](#codegen-annotations)) — parity
+  is on the wire, not in the in-process term.
+- Field defaults live in the generated record literals, not in decode:
+  a missing optional field decodes as `undefined`; the default value is
+  what a hand-constructed record carries.
+- An unknown enum value on the wire passes through decode as the raw
+  integer (forward compatibility with newer schemas); encode rejects
+  values with no enum member (`{error, {unknown_enum_value, V}}`).
+- The HTTP transport speaks an HTTP/1.1 subset with Content-Length
+  framing only — no chunked encoding — and a oneway call is still a
+  request/response exchange: the server answers 200 before running the
+  handler, so the client and server never desynchronize.
 
 ## Layout
 
@@ -689,34 +709,6 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
 Introspection in the spirit of the official generator: `struct_info/1`,
 `enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`,
 `tag_index/0` and `convert/2` in `<mod>_types.erl`.
-
-## Differences from Apache Thrift
-
-Parity with Apache Thrift is on the wire; where the in-process contract
-differs, it is deliberate:
-
-- Wire compatibility is covered by golden interop tests against the
-  vendored official runtime: binary protocol on buffered and framed
-  transports (both directions), compact and JSON protocols against
-  official clients, and the HTTP transport against the official
-  `thrift_http_transport`.
-- In-process representations are this library's axis — records
-  (default), maps, structs, or EEP-79 native records per struct — not
-  the official runtime's dict/list-based structures. Sets decode to
-  plain lists by default; `erl.set = "sets"` reproduces the official
-  `sets:set()` per type or file-wide (see Codegen annotations). The
-  native representation requires OTP 29; older releases answer
-  `{error, {unsupported_repr, native}}`.
-- Field defaults live in the generated record literals, not in decode:
-  a missing optional field decodes as `undefined`; the default value is
-  what a hand-constructed record carries.
-- An unknown enum value on the wire passes through decode as the raw
-  integer (forward compatibility with newer schemas); encode rejects
-  values with no enum member (`{error, {unknown_enum_value, V}}`).
-- The HTTP transport speaks an HTTP/1.1 subset with Content-Length
-  framing only — no chunked encoding — and a oneway call is still a
-  request/response exchange: the server answers 200 before running the
-  handler, so the client and server never desynchronize.
 
 ## Performance
 
