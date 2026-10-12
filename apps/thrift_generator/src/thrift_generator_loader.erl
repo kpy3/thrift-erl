@@ -26,7 +26,7 @@ becomes one entry with its module name — taken from `namespace erl`
 are absolute binaries.
 """.
 
--export([load/1]).
+-export([load/1, include_qualifier/1]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -183,6 +183,17 @@ collapse_prefix([C | Rest], Acc, Sep) ->
 -spec strip_underscores(binary()) -> binary().
 strip_underscores(Bin) ->
     string:trim(Bin, both, "_").
+
+-doc """
+The qualification prefix other files' references use for this file's
+definitions: the file base name without the .thrift extension. Apache
+Thrift spells cross-module references with the include's base name
+(`include "foo.thrift"` makes `foo.Type` references), which is a
+different key than the module name the file's erl namespace produces.
+""".
+-spec include_qualifier(file:filename_all()) -> binary().
+include_qualifier(Path) ->
+    basename_sans_extension(unicode:characters_to_binary(Path)).
 
 -spec basename_sans_extension(binary()) -> binary().
 basename_sans_extension(Path) ->
