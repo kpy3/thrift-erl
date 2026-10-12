@@ -730,7 +730,7 @@ doc_pipeline_test() ->
         Results
     ),
     Sources = thrift_generator_emitter:sources(Model),
-    TypesSrc = entry_source(t_types, Sources),
+    TypesSrc = doc_text(entry_source(t_types, Sources)),
     %% the IDL struct doc is prepended to every codec function's doc
     ?assertMatch(
         {match, _},
@@ -760,10 +760,10 @@ doc_pipeline_test() ->
     ?assertMatch({match, _}, re:run(TypesSrc, <<"The struct tag -> descriptor map">>)),
     ?assertMatch({match, _}, re:run(TypesSrc, <<"Reshapes a typed value \\(record or struct">>)),
     %% client methods and handler callbacks carry the function's IDL doc
-    ClientSrc = entry_source(t_svc_client, Sources),
+    ClientSrc = doc_text(entry_source(t_svc_client, Sources)),
     ?assertMatch({match, _}, re:run(ClientSrc, <<"Ping it\\.\\\\n\\\\nCalls ping and waits for">>)),
     ?assertMatch({match, _}, re:run(ClientSrc, <<"Sends the oneway fire">>)),
-    HandlerSrc = entry_source(t_svc_handler, Sources),
+    HandlerSrc = doc_text(entry_source(t_svc_handler, Sources)),
     ?assertMatch({match, _}, re:run(HandlerSrc, <<"Ping it\\.\\\\n\\\\nHandler callback for ping">>)),
     ?assertMatch({match, _}, re:run(HandlerSrc, <<"oneway fire: called as">>)),
     %% the service doc lands in the generated module docs
@@ -783,6 +783,14 @@ entry(Module, Sources) ->
 -spec entry_source(module(), [thrift_generator_emitter:source()]) -> binary().
 entry_source(Module, Sources) ->
     maps:get(source, entry(Module, Sources)).
+
+%% Doc attributes wrap their string literal one chunk per line; the
+%% seams (`"' newline indentation `"') carry no content, so gluing them
+%% restores the logical doc text for substring matching.
+
+-spec doc_text(binary()) -> binary().
+doc_text(Source) ->
+    re:replace(Source, <<"\"\\n\\s*\"">>, <<>>, [global, {return, binary}]).
 
 -spec entry_hrl(module(), [thrift_generator_emitter:source()]) -> binary().
 entry_hrl(Module, Sources) ->
