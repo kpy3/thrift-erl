@@ -43,6 +43,7 @@
     type_definitions_test/0,
     native_representation_test/0,
     repr_option_test/0,
+    option_axes_test/0,
     doc_pipeline_test/0
 ]).
 
@@ -526,6 +527,48 @@ repr_option_test() ->
     {ok, NativeModel} = thrift_generator_semantic:analyze(Loaded(), #{repr => native}),
     #{<<"Plain">> := NativePlain} = Annotations(NativeModel),
     ?assertEqual(<<"native">>, maps:get(struct_type, NativePlain)),
+    ok.
+
+%% The invocation-wide option axes (analyze/2 `#{union_type => sum, set
+%% => sets, typedef_type => nominal}') generate the same artifacts the
+%% matching annotations would: tagged-tuple sums, the chosen set
+%% implementation and a -nominal typedef.
+
+option_axes_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        "union Value { 1: i64 n, 2: string s }\n"
+        "struct Bag { 1: optional set<string> tags }\n"
+        "typedef i64 Stamp\n"
+    ),
+    Loaded = [
+        #tg_loaded{name = <<"t">>, prefix = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}
+    ],
+    {ok, Model} =
+        thrift_generator_semantic:analyze(
+            Loaded,
+            #{union_type => sum, set => sets, typedef_type => nominal}
+        ),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+
+    ?assertEqual({sum, [n, s]}, t_types:record_fields(<<"Value">>)),
+    ?assertEqual(
+        {struct, [{1, optional, {set, {base, string}, sets}, <<"tags">>, undefined}]},
+        t_types:struct_info(<<"Bag">>)
+    ),
+    TypesSrc = entry_source(t_types, thrift_generator_emitter:sources(Model)),
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"-nominal 'Stamp'\\(\\) :: integer\\(\\)\\.">>)),
+
+    {ok, Bin} = t_types:encode_t_value({n, 5}),
+    {ok, {n, 5}} = t_types:decode_t_value(Bin),
+    {ok, BagBin} = t_types:encode_t_bag(#{tags => sets:from_list([<<"a">>, <<"b">>])}),
+    {ok, #{tags := Tags}} = t_types:decode_t_bag(BagBin, map),
+    ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), Tags),
     ok.
 
 namespace_set_default_test() ->

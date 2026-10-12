@@ -30,7 +30,7 @@ triples before failing, where `Loc` is a line number or a
 
 -export([analyze/1, analyze/2]).
 
--export_type([sem_error/0, loc/0]).
+-export_type([sem_error/0, loc/0, generate_semantic_opts/0]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -48,6 +48,17 @@ triples before failing, where `Loc` is a line number or a
 
 -type resolved_ref() :: {Module :: binary(), Name :: binary(), def_kind()}.
 
+%% Invocation-wide option axes of analyze/2 (mirrored by generate/3 and
+%% check/3); every axis is optional and applies only where the IDL
+%% carries no explicit annotation.
+
+-type generate_semantic_opts() :: #{
+    repr => record | map | native,
+    union_type => record | sum,
+    set => list | sets | ordset,
+    typedef_type => alias | nominal
+}.
+
 %% Per-module analysis context. The `all_*` indexes cover every loaded
 %% module (for cross-module references); `analyzed` holds modules that
 %% finished before this one — the loader's root-first list reversed
@@ -57,11 +68,17 @@ triples before failing, where `Loc` is a line number or a
 -record(ctx, {
     module = undefined :: binary() | undefined,
     file = undefined :: binary() | undefined,
-    %% the file-wide set implementation from the namespace's erl.set
+    %% the set implementation seeded by the invocation-wide `set'
+    %% option and overridden per file by the namespace's erl.set
     set_default = list :: list | sets | ordset,
-    %% the file-wide union representation from the namespace's
+    %% the union representation seeded by the invocation-wide
+    %% `union_type' option and overridden per file by the namespace's
     %% erl.union_type (record by default, tagged-tuple sums via "sum")
     union_default = record :: record | sum,
+    %% the typedef flavor seeded by the invocation-wide `typedef_type'
+    %% option; explicit erl.type annotations always win (there is no
+    %% file-wide default for this axis)
+    typedef_default = alias :: alias | nominal,
     %% the invocation-wide representation for definitions without an
     %% explicit erl.struct_type (the generator's --repr option; unions
     %% keep their own axis and never take this injection)
@@ -87,11 +104,18 @@ analyze(Loaded) ->
     analyze(Loaded, #{}).
 
 -doc """
-Analyzes with invocation-wide options: `repr` (`record`, the default,
-`map` or `native`) is the representation generated for definitions
-without an explicit `erl.struct_type` annotation.
+Analyzes with invocation-wide options. Each axis applies only to
+definitions without an explicit annotation: `repr` (`record`, the
+default, `map` or `native`) is the representation for structures and
+exceptions without `erl.struct_type`, `union_type` (`record` or `sum`)
+is the union representation for unions without `erl.union_type`, `set`
+(`list`, the default, `sets` or `ordset`) is the set implementation for
+sets without `erl.set`, and `typedef_type` (`alias`, the default, or
+`nominal`) is the typedef flavor for typedefs without `erl.type`. A
+file-wide namespace default (`erl.set`, `erl.union_type` on the
+namespace header) overrides the option for its file.
 """.
--spec analyze([#tg_loaded{}], #{repr => record | map | native}) ->
+-spec analyze([#tg_loaded{}], generate_semantic_opts()) ->
     {ok, #tg_model{}} | {error, [sem_error()]}.
 analyze([Root | _] = Loaded, Opts) ->
     Ctx0 = #ctx{
@@ -101,6 +125,9 @@ analyze([Root | _] = Loaded, Opts) ->
         all_enum_members = index_defs(Loaded, fun enum_members_of/1),
         all_typedefs = index_defs(Loaded, fun typedef_type_of/1),
         repr_default = maps:get(repr, Opts, record),
+        union_default = maps:get(union_type, Opts, record),
+        set_default = maps:get(set, Opts, list),
+        typedef_default = maps:get(typedef_type, Opts, alias),
         analyzed = #{}
     },
     {ModuleMap, Ctx} =
@@ -593,7 +620,7 @@ analyze_typedef(Node, {Acc, Ctx}) ->
                 #tg_typedef{
                     name = Name,
                     type = apply_set_default(Type, Ctx1),
-                    erl = Node#thrift_generator_node.annotations,
+                    erl = typedef_default_annotation(Node#thrift_generator_node.annotations, Ctx2),
                     doc = Node#thrift_generator_node.doc,
                     line = Node#thrift_generator_node.line,
                     col = Node#thrift_generator_node.col
@@ -601,6 +628,21 @@ analyze_typedef(Node, {Acc, Ctx}) ->
             {[Typedef | Acc], Ctx2};
         _ ->
             {Acc, Ctx}
+    end.
+
+%% The invocation-wide typedef flavor (the generator's --typedef-type)
+%% is materialized onto every typedef without an explicit erl.type
+%% annotation, so the emitter keeps reading the plain annotation;
+%% `alias' injects nothing — the annotation-free default stays the
+%% plain alias.
+
+-spec typedef_default_annotation(erl_annotations(), #ctx{}) -> erl_annotations().
+typedef_default_annotation(Ann, #ctx{typedef_default = alias}) ->
+    Ann;
+typedef_default_annotation(Ann, #ctx{typedef_default = nominal}) ->
+    case maps:is_key(type, Ann) of
+        true -> Ann;
+        false -> Ann#{type => <<"nominal">>}
     end.
 
 %% Only pure local typedef-to-typedef chains can cycle: includes are
@@ -1153,9 +1195,9 @@ include_type_ref(Name, Ctx) ->
 
 -spec include_type_ref(binary(), binary(), #ctx{}) -> {ok, resolved_ref()} | error.
 include_type_ref(Qualifier, Local, Ctx) ->
-    case maps:find(Qualifier, Ctx#ctx.include_modules) of
-        {ok, Module} -> module_ref(Module, Local, Ctx);
-        error -> error
+    case Ctx#ctx.include_modules of
+        #{Qualifier := Module} -> module_ref(Module, Local, Ctx);
+        _ -> error
     end.
 
 %% The module index by include base name. Two files sharing a base name
@@ -1309,9 +1351,9 @@ include_value_ref(Ref, Ctx) ->
 -spec include_value_ref(binary(), binary(), #ctx{}) ->
     {ok, {const, const_value()}} | {ok, {enum_member, binary()}} | error.
 include_value_ref(Qualifier, Local, Ctx) ->
-    case maps:find(Qualifier, Ctx#ctx.include_modules) of
-        {ok, Module} -> try_const_and_enum(Local, Module, Ctx);
-        error -> error
+    case Ctx#ctx.include_modules of
+        #{Qualifier := Module} -> try_const_and_enum(Local, Module, Ctx);
+        _ -> error
     end.
 
 -spec try_const_and_enum(binary(), binary(), #ctx{}) ->

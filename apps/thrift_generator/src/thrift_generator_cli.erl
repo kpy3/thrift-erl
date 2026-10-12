@@ -18,21 +18,26 @@
 Command-line front end (escript entry point).
 
 ```
-thrift_generator <file.thrift> [-o <out_dir>] [--repr record|map|native] [--check]
-thrift_generator generate <file.thrift> [-o <out_dir>] [--repr record|map|native] [--check]
+thrift_generator <file.thrift> [-o <out_dir>] [--repr record|map|native]
+    [--union-type record|sum] [--set list|sets|ordset] [--typedef-type alias|nominal] [--check]
+thrift_generator generate <file.thrift> [same options]
 ```
 
 Argument parsing rides on the stdlib `argparse` module (usage/help
 included); `generate` stays accepted as an optional subcommand — the
 file operand selects the action. Runs the full pipeline (load with
 includes, semantic analysis, emit) and writes the generated Erlang
-sources to `out_dir` (default: the current directory). `--repr` picks
-the value representation generated for definitions without an explicit
-`erl.struct_type` annotation (`record`, the default, `map` or
-`native`). `--check` verifies instead of writing: every generated
-artifact must already exist in `out_dir` with the exact content this
-input would produce — drift (missing or stale files) exits 1, so the
-flag works as a CI freshness gate.
+sources to `out_dir` (default: the current directory). The four option
+flags each pick the generated flavor for definitions without an
+explicit annotation of their own: `--repr` the value representation
+(`erl.struct_type`), `--union-type` the union representation
+(`erl.union_type`), `--set` the in-process set implementation
+(`erl.set`) and `--typedef-type` the typedef flavor (`erl.type`); a
+file-wide namespace default overrides the flag for its file. `--check`
+verifies instead of writing: every generated artifact must already
+exist in `out_dir` with the exact content this input would produce —
+drift (missing or stale files) exits 1, so the flag works as a CI
+freshness gate.
 
 Errors render as rebar3/elp-style source excerpts (the offending line
 under a gutter, a `╰──` marker naming the problem); `--compact-errors`
@@ -72,15 +77,20 @@ main(RawArgs) ->
 -spec run_parsed(argparse:arg_map(), #{progname => string()}) -> no_return().
 run_parsed(#{file := File} = Parsed, _Options) ->
     OutDir = maps:get(out_dir, Parsed, <<".">>),
-    Repr = maps:get(repr, Parsed, record),
+    GenOpts = #{
+        repr => maps:get(repr, Parsed, record),
+        union_type => maps:get(union_type, Parsed, record),
+        set => maps:get(set, Parsed, list),
+        typedef_type => maps:get(typedef_type, Parsed, alias)
+    },
     Resolver =
         case maps:get(compact_errors, Parsed, false) of
             true -> fun(_Path) -> {error, compact_errors} end;
             false -> auto
         end,
     case maps:get(check, Parsed, false) of
-        true -> check(File, OutDir, Repr, Resolver);
-        false -> run(File, OutDir, Repr, Resolver)
+        true -> check(File, OutDir, GenOpts, Resolver);
+        false -> run(File, OutDir, GenOpts, Resolver)
     end;
 run_parsed(_Parsed, Options) ->
     parse_error("missing <file.thrift> operand", Options).
@@ -130,6 +140,39 @@ command() ->
                     ]}
             },
             #{
+                name => union_type,
+                long => "-union-type",
+                type => {atom, [record, sum]},
+                default => record,
+                help =>
+                    {"[--union-type record|sum]", [
+                        "union representation for unions without an explicit"
+                        " erl.union_type annotation (default: record)"
+                    ]}
+            },
+            #{
+                name => set,
+                long => "-set",
+                type => {atom, [list, sets, ordset]},
+                default => list,
+                help =>
+                    {"[--set list|sets|ordset]", [
+                        "in-process set implementation for sets without an"
+                        " explicit erl.set annotation (default: list)"
+                    ]}
+            },
+            #{
+                name => typedef_type,
+                long => "-typedef-type",
+                type => {atom, [alias, nominal]},
+                default => alias,
+                help =>
+                    {"[--typedef-type alias|nominal]", [
+                        "typedef flavor for typedefs without an explicit"
+                        " erl.type annotation (default: alias)"
+                    ]}
+            },
+            #{
                 name => check,
                 long => "-check",
                 type => boolean,
@@ -150,8 +193,8 @@ command() ->
         ]
     }.
 
-run(File, OutDir, Repr, Resolver) ->
-    case thrift_generator:generate(File, OutDir, #{repr => Repr}) of
+run(File, OutDir, GenOpts, Resolver) ->
+    case thrift_generator:generate(File, OutDir, GenOpts) of
         {ok, Generated} ->
             io:format("Generated ~b module(s) in ~ts:~n", [
                 length(Generated), unicode:characters_to_list(OutDir)
@@ -174,8 +217,8 @@ run(File, OutDir, Repr, Resolver) ->
             halt(1)
     end.
 
-check(File, OutDir, Repr, Resolver) ->
-    case thrift_generator:check(File, OutDir, #{repr => Repr}) of
+check(File, OutDir, GenOpts, Resolver) ->
+    case thrift_generator:check(File, OutDir, GenOpts) of
         ok ->
             io:format("~ts: generated sources are up to date in ~ts~n", [
                 unicode:characters_to_list(File), unicode:characters_to_list(OutDir)
