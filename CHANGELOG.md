@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Generator (`thrift_generator`)
 
+- The generated client and handler module docs word the boundary per
+  the representations the service actually passes — `records`, `maps`,
+  `native records`, `tagged tuples` for sum unions, or a neutral
+  clause on a mix — instead of always claiming records under
+  `--repr map`/`native`. Services over no struct-typed types carry no
+  boundary sentence at all.
 - Generated modules put an empty line between top-level definitions
   (`-type` blocks, `struct_info`/`enum_info`/`function_info`, codecs) —
   `-spec`/`-callback` contracts and `-doc` comments stay flush with

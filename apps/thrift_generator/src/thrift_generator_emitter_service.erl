@@ -83,6 +83,52 @@ service_doc_suffix(Svc) ->
             <<"\n\n", Doc/binary>>
     end.
 
+%% The boundary sentence of the client/handler module docs, worded per
+%% the representations the service actually passes: every struct carries
+%% its resolved `erl.struct_type' (the `--repr' option injects the
+%% choice before the emit), sum unions are tagged tuples whatever the
+%% axis says. Services over no structs at all carry no sentence.
+
+-spec repr_text(#tg_service{}, #tg_module{}, string()) -> binary().
+repr_text(Svc, Mod, Template) ->
+    case repr_names(Svc, Mod) of
+        [] ->
+            <<>>;
+        Reprs ->
+            unicode:characters_to_binary(io_lib:format(Template, [repr_noun(Reprs)]))
+    end.
+
+%% The distinct representations of the module's structs reachable from
+%% the service's parameter, reply and throws types.
+
+-spec repr_names(#tg_service{}, #tg_module{}) -> [record | map | native | sum].
+repr_names(Svc, Mod) ->
+    ByName = #{S#tg_struct.name => S || S <- Mod#tg_module.structs},
+    lists:usort([
+        case thrift_generator_emitter:sum_mode(S) of
+            true ->
+                sum;
+            false ->
+                thrift_generator_emitter:struct_type(S)
+        end
+     || Name <- service_struct_names(Svc, Mod),
+        S <- [maps:get(Name, ByName)]
+    ]).
+
+%% One distinct representation reads concrete; a mix reads neutral.
+
+-spec repr_noun([record | map | native | sum]) -> binary().
+repr_noun([record]) ->
+    <<"records">>;
+repr_noun([map]) ->
+    <<"maps">>;
+repr_noun([native]) ->
+    <<"native records">>;
+repr_noun([sum]) ->
+    <<"tagged tuples">>;
+repr_noun(_) ->
+    <<"the representation declared for each struct">>.
+
 -spec kind_suffix(handler | server | client) -> binary().
 kind_suffix(handler) ->
     <<"_handler">>;
@@ -98,8 +144,8 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
             io_lib:format(
                 "Handler behaviour for the ~ts service. Implement every"
                 " callback and pass the module as `handler` when starting"
-                " the server; struct arguments arrive as records.",
-                [Svc#tg_service.name]
+                " the server.~ts",
+                [Svc#tg_service.name, repr_text(Svc, Mod, " Struct arguments arrive as ~ts.")]
             ),
             service_doc_suffix(Svc)
         ]),
@@ -171,6 +217,10 @@ ref_names(_) ->
 -spec expand_structs([binary()], #{binary() => #tg_struct{}}, #{binary() => true}) -> [binary()].
 expand_structs([], _ByName, Seen) ->
     maps:keys(Seen);
+%% refs name enums and other-module definitions just as freely: only
+%% this module's structs are collected
+expand_structs([Name | Rest], ByName, Seen) when not is_map_key(Name, ByName) ->
+    expand_structs(Rest, ByName, Seen);
 expand_structs([Name | Rest], ByName, Seen) ->
     case is_map_key(Name, Seen) of
         true ->
@@ -297,10 +347,11 @@ client_forms(Svc, Mod, TypesMod, ServerMod, ClientMod) ->
         unicode:characters_to_binary([
             io_lib:format(
                 "Typed client for the ~ts service. `start_link/1` takes the"
-                " same options map as `thrift_erl_client` (minus `service`)."
-                " Struct arguments and results are converted to records at"
-                " the boundary.",
-                [Svc#tg_service.name]
+                " same options map as `thrift_erl_client` (minus `service`).~ts",
+                [
+                    Svc#tg_service.name,
+                    repr_text(Svc, Mod, " Struct arguments and results are converted to ~ts at the boundary.")
+                ]
             ),
             service_doc_suffix(Svc)
         ]),

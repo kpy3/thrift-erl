@@ -45,6 +45,7 @@ the descriptor terms, which keeps the emitter declarative.
     record_form/3,
     sanitize/1,
     section_label/1,
+    struct_type/1,
     sum_mode/1,
     type_desc/2
 ]).
