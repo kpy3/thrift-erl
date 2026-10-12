@@ -341,7 +341,15 @@ server_connection_and_handler_events_test() ->
         [C] = wait_for_events(connection_closed, 1),
         ?assert(is_map_key(reason, C))
     after
-        thrift_erl_client:stop(Client),
+        %% The server stop above closed the connection and the client
+        %% stops itself on tcp_closed, so by the time this block runs
+        %% the client may already be gone — its stop then races a
+        %% noproc, which is the expected outcome here.
+        try
+            thrift_erl_client:stop(Client)
+        catch
+            exit:noproc -> ok
+        end,
         %% the in-body stop may not have run if an assertion failed
         %% first; a default-named server left behind poisons every
         %% later suite

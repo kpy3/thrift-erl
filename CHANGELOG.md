@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Testing and tooling
+
+- A teardown race in the server-events test no longer flakes the CI:
+  the client stops itself when the socket closes (its design), so the
+  after-block's cleanup stop can race the client's death and raise
+  `exit:noproc` on loaded runners; the guard catches exactly that and
+  nothing else.
+
 ## [0.5.0] — 2026-10-12
 
 A name of its own and sharper edges: the project is **thrift-erl**,
