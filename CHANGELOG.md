@@ -5,7 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] — 2026-10-12
+
+A name of its own and sharper edges: the project is **thrift-erl**,
+generated service modules carry the file's prefix (no more cross-file
+name collisions), declared exceptions surface as typed answers on the
+client, IDL errors point at the exact column with a rendered source
+excerpt, and the plugin can sweep generated files on project clean.
+The CI gate is clean on both OTP 28 and 29.
 
 ### Breaking changes
 
