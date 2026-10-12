@@ -39,9 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Located errors (lexer/parser and semantic findings) render as
   rebar3/elp-style source excerpts by default — the offending line
-  under a gutter, a `╰──` marker naming the problem. Unreadable
+  under a gutter, a `╰──` marker naming the problem. Positions are
+  exact: the scanner threads `{Line, Column}` pairs through tokens,
+  AST nodes and the semantic model, so the marker sits on the exact
+  column (codepoint-counted, tab stops expanded like the scanner's)
+  and the compact form reads `path:line:column: message`. Unreadable
   sources and unlocated errors fall back to the compact
-  `path:line: message` line, which is also what the new
+  `path:line[:column]: message` line, which is also what the new
   `--compact-errors` CLI switch forces; the rebar3 plugin renders
   through the same formatter.
 - The generated client and handler module docs word the boundary per

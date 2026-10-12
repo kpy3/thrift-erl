@@ -54,7 +54,7 @@ Rootsymbol Document.
 %% its value is deliberately dropped — paths are the loader's business,
 %% the AST document carries only headers and definitions.
 Document -> Headers Definitions File:
-    build_node(thrift_generator_document, 0, ['$1', '$2']).
+    build_node(thrift_generator_document, ['$1', '$2']).
 
 File -> '$empty': undefined.
 File -> file string: unwrap('$2').
@@ -69,15 +69,15 @@ Header -> CppInclude: '$1'.
 Header -> Namespace: '$1'.
 
 Include -> include string:
-    build_node(thrift_generator_include, line('$1'), [unwrap('$2')]).
+    build_node(thrift_generator_include, loc('$1'), [unwrap('$2')]).
 
 CppInclude -> cpp_include string:
-    build_node(thrift_generator_cpp_include, line('$1'), [unwrap('$2')]).
+    build_node(thrift_generator_cpp_include, loc('$1'), [unwrap('$2')]).
 
 Namespace -> namespace '*' ident Annotations:
-    build_node(thrift_generator_namespace, line('$1'), '$4', [<<"*">>, unwrap('$3')]).
+    build_node(thrift_generator_namespace, loc('$1'), '$4', [<<"*">>, unwrap('$3')]).
 Namespace -> namespace ident ident Annotations:
-    build_node(thrift_generator_namespace, line('$1'), '$4', [unwrap('$2'), unwrap('$3')]).
+    build_node(thrift_generator_namespace, loc('$1'), '$4', [unwrap('$2'), unwrap('$3')]).
 
 % Definitions
 
@@ -97,7 +97,7 @@ Def -> Service: '$1'.
 % Constants
 
 Const -> const FieldType ident '=' ConstValue Separator:
-    build_node(thrift_generator_constant, line('$1'), [unwrap('$3'), '$2', '$5']).
+    build_node(thrift_generator_constant, loc('$1'), [unwrap('$3'), '$2', '$5']).
 
 ConstValue -> ident: {ref, unwrap('$1')}.
 ConstValue -> true: unwrap('$1').
@@ -118,13 +118,13 @@ ConstList -> ConstValue Separator ConstList: ['$1'|'$3'].
 % Typedef
 
 Typedef -> typedef FieldType Annotations ident Annotations Separator:
-    build_node(thrift_generator_typedef, line('$1'), '$5',
+    build_node(thrift_generator_typedef, loc('$1'), '$5',
                [unwrap('$4'), merge_type_annotations('$2', '$3')]).
 
 % Enum
 
 Enum -> enum ident '{' EnumList '}' Annotations:
-    build_node(thrift_generator_enum, line('$1'), '$6', [unwrap('$2'), '$4']).
+    build_node(thrift_generator_enum, loc('$1'), '$6', [unwrap('$2'), '$4']).
 
 EnumList -> '$empty': [].
 EnumList -> EnumValue Separator EnumList: ['$1'|'$3'].
@@ -137,22 +137,22 @@ EnumValue -> Doc ident Annotations:
 % Struct
 
 Struct -> struct ident '{' FieldList '}' Annotations:
-    build_node(thrift_generator_struct, line('$1'), '$6', [unwrap('$2'), '$4']).
+    build_node(thrift_generator_struct, loc('$1'), '$6', [unwrap('$2'), '$4']).
 
 % Union
 
 Union -> union ident '{' FieldList '}' Annotations:
-    build_node(thrift_generator_union, line('$1'), '$6', [unwrap('$2'), '$4']).
+    build_node(thrift_generator_union, loc('$1'), '$6', [unwrap('$2'), '$4']).
 
 % Exception
 
 Exception -> exception ident '{' FieldList '}' Annotations:
-    build_node(thrift_generator_exception, line('$1'), '$6', [unwrap('$2'), '$4']).
+    build_node(thrift_generator_exception, loc('$1'), '$6', [unwrap('$2'), '$4']).
 
 % Service
 
 Service -> service ident Extends '{' FunctionList '}' Annotations:
-    build_node(thrift_generator_service, line('$1'), '$7', [unwrap('$2'), '$3', '$5']).
+    build_node(thrift_generator_service, loc('$1'), '$7', [unwrap('$2'), '$3', '$5']).
 
 Extends -> extends ident: unwrap('$2').
 Extends -> '$empty': undefined.
@@ -164,7 +164,7 @@ FunctionList -> Function FunctionList: ['$1'|'$2'].
 
 Function -> Doc Oneway ReturnType ident '(' FieldList ')' Throws Annotations Separator:
     set_doc('$1',
-            build_node(thrift_generator_function, line('$4'), '$9',
+            build_node(thrift_generator_function, loc('$4'), '$9',
                        ['$2', '$3', unwrap('$4'), '$6', '$8'])).
 
 Oneway -> '$empty': false.
@@ -188,7 +188,7 @@ FieldList -> Field FieldList: ['$1'|'$2'].
 
 Field -> Doc FieldIdentifier FieldRequired FieldType Annotations FieldName FieldDefault Annotations Separator:
     set_doc('$1',
-            build_node(thrift_generator_field, line('$6'), '$8',
+            build_node(thrift_generator_field, loc('$6'), '$8',
                        ['$2', '$3', merge_type_annotations('$4', '$5'), unwrap('$6'), '$7'])).
 
 FieldName -> ident: '$1'.
@@ -287,9 +287,9 @@ Erlang code.
 
 % Construct a build_node AST node of the requested kind. Args build the
 % kind's payload record through the shared ?NODE_BUILDERS table, and, if
-% provided, a line number and annotations are assigned to the resulting
-% node. Annotations are filtered down to the `erl.*` namespace before
-% being stored on the node.
+% provided, a location ({Line, Column} from the lexer) and annotations
+% are assigned to the resulting node. Annotations are filtered down to
+% the `erl.*` namespace before being stored on the node.
 
 build_node(Kind, Args) when is_list(Args) ->
     #thrift_generator_node{
@@ -297,8 +297,9 @@ build_node(Kind, Args) when is_list(Args) ->
         type_module = Kind
     }.
 
-build_node(TypeModule, Line, Args) when is_integer(Line) ->
-    (build_node(TypeModule, Args))#thrift_generator_node{line = Line}.
+build_node(TypeModule, Loc, Args) when is_tuple(Loc) ->
+    {Line, Col} = Loc,
+    (build_node(TypeModule, Args))#thrift_generator_node{line = Line, col = Col}.
 
 build_node(TypeModule, Line, Annotations, Args) when is_map(Annotations) ->
     Node = build_node(TypeModule, Line, Args),
@@ -312,10 +313,11 @@ set_doc(undefined, Node) ->
 set_doc(Doc, #thrift_generator_node{} = Node) ->
     Node#thrift_generator_node{doc = Doc}.
 
-% Extract the line number from the lexer's expression tuple.
+% Extract the location from the lexer's expression tuple: every token
+% carries a {Line, Column} pair in its annotation slot.
 
-line({_Token, Line}) -> Line;
-line({_Token, Line, _Value}) -> Line.
+loc({_Token, Loc}) -> Loc;
+loc({_Token, Loc, _Value}) -> Loc.
 
 % Return either the atom from a 2-tuple lexer expression or the processed
 % value from a 3-tuple lexer expression.
@@ -327,7 +329,7 @@ unwrap({_,_,V}) -> V.
 % token carrying the keyword's literal text, so Field consumes one
 % uniform token shape.
 
-keyword_ident({Key, Line}) -> {ident, Line, atom_to_binary(Key, utf8)}.
+keyword_ident({Key, Loc}) -> {ident, Loc, atom_to_binary(Key, utf8)}.
 
 % Merge annotations written after a type into the type tuple itself, so that
 % every type shape carries its annotations.

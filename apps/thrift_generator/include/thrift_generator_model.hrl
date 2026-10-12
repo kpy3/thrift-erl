@@ -50,7 +50,9 @@
     fields :: [#tg_field{}],
     erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
-    line = 0 :: non_neg_integer()
+    line = 0 :: non_neg_integer(),
+    %% 1-based column of the opening token (for diagnostics)
+    col = 0 :: non_neg_integer()
 }).
 
 %% Enum: members ordered by declaration, implicit values numbered by
@@ -61,7 +63,9 @@
     values :: [{integer(), binary()}],
     erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
-    line = 0 :: non_neg_integer()
+    line = 0 :: non_neg_integer(),
+    %% 1-based column of the opening token (for diagnostics)
+    col = 0 :: non_neg_integer()
 }).
 
 -record(tg_typedef, {
@@ -69,7 +73,9 @@
     type :: thrift_type(),
     erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
-    line = 0 :: non_neg_integer()
+    line = 0 :: non_neg_integer(),
+    %% 1-based column of the opening token (for diagnostics)
+    col = 0 :: non_neg_integer()
 }).
 
 %% Constant with its value fully resolved (references replaced by the
@@ -80,7 +86,9 @@
     value :: const_value(),
     erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
-    line = 0 :: non_neg_integer()
+    line = 0 :: non_neg_integer(),
+    %% 1-based column of the opening token (for diagnostics)
+    col = 0 :: non_neg_integer()
 }).
 
 -record(tg_function, {
@@ -100,7 +108,9 @@
     functions :: [#tg_function{}],
     erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
-    line = 0 :: non_neg_integer()
+    line = 0 :: non_neg_integer(),
+    %% 1-based column of the opening token (for diagnostics)
+    col = 0 :: non_neg_integer()
 }).
 
 %% One IDL file = one module. `name` comes from `namespace erl` (or

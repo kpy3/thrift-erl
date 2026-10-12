@@ -112,6 +112,9 @@
 
 -record(thrift_generator_node, {
     line = 0 :: non_neg_integer(),
+    %% 1-based column of the token that opened the definition; 0 when
+    %% only the line is known (synthesized nodes)
+    col = 0 :: non_neg_integer(),
     doc = undefined :: doc(),
     annotations = #{} :: erl_annotations(),
     payload :: term(),
