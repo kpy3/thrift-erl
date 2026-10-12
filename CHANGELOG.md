@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a raw crash, and `check/3` treats them like `--repr`: artifacts
   count as stale unless regenerated with the exact same options.
 
+- Several sum unions of one module may share a field name — legal,
+  common Thrift (per-resource result unions) that the generator wrongly
+  rejected with a `duplicate sum union field` error. The semantic no
+  longer rejects the collision: every union's own encode/decode stays
+  exact, and the module-level context-free `convert/3` resolves a
+  shared atom to the last union declaring it (the generated `tag_index`
+  doc spells this out), so a foreign union's value under a shared atom
+  fails its payload type check loudly rather than converting silently.
+
+- Same-named methods across two services of one file no longer break
+  the generated code (per-service `GetEvents` is ordinary Thrift): the
+  types module's name-keyed `function_info/2` keeps the last
+  declaration's clauses instead of emitting duplicates that fail
+  compilation under `warnings_as_errors`, and every generated client
+  embeds its own service's params/reply/exceptions descriptors instead
+  of resolving them through that table — a collision used to hand a
+  client another service's descriptor, mis-encoding the wire.
+
 - Cross-module references resolve under the Apache Thrift spelling:
   the dotted qualifier is the **included file's base name**
   (`include "payment_resource.thrift"` makes
