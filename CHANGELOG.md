@@ -143,9 +143,29 @@ code actually runs.
   plain client already did): a bad option answers `{error, Reason}`
   instead of killing the caller with the child's exit signal after
   the answer arrived.
+- Server stop works on OTP 28 again: `supervisor:stop/1` only exists
+  from OTP 29 on, so `thrift_erl_server:stop/1` (and the drain path of
+  `stop/2`) stops the supervisor as the gen_server it is —
+  `gen_server:stop(Server, normal, infinity)`, waiting so a busy
+  connection answers its in-flight request before its own shutdown.
 
 ### Testing and tooling
 
+- The eunit output stays readable on negative tests: the suites that
+  start intentionally-bad clients, wrappers and servers quiet the
+  primary logger with level `none` (SASL crash reports log at level
+  `error`, so the previous `error` level passed them straight through
+  to the CI log), and the bad-option observability test silences too.
+- Both toolchains analyze the native axis cleanly. Elvis parses raw
+  sources without the preprocessor, so on an OTP-28 toolchain it
+  cannot resolve the OTP-29 builtin `record()` in exported specs —
+  `thrift_erl_native` now exports the spec-level alias
+  `native_record()` (opaque; `record()` on 29, `term()` on 28)
+  instead. Dialyzer on 28 keeps the facade's native arms alive the
+  same way: the release stubs answer through the unfoldable
+  `supported()` rather than literals, and `native_to_wire/3` is
+  preprocessor-split per release with the stub keeping the signature
+  and raise contract.
 - The elp lint gate fails on findings: the wrapper filters
   `--severity warning` out of the pinned release's JSON (elp itself
   always exits 0) and runs the deterministic `--no-connect` mode, the

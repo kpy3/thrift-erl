@@ -19,6 +19,9 @@
 %%
 %% The wrapper logs every failed retry at warning level by design; the
 %% tests quiet the primary logger so the eunit output stays readable.
+%% `none', not `error': SASL crash reports of intentionally failed
+%% gen_server starts log at level `error' and would pass an `error'
+%% primary straight through to the output.
 
 -module(thrift_erl_reconnecting_test).
 
@@ -28,7 +31,7 @@
 -define(HANDLER, thrift_erl_test_handler).
 
 quiet() ->
-    logger:set_primary_config(level, error).
+    logger:set_primary_config(level, none).
 
 reconnects_after_server_restart_test() ->
     quiet(),

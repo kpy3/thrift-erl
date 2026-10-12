@@ -112,6 +112,8 @@ on_event_option_validation_test() ->
     ).
 
 bad_option_fails_the_start_test() ->
+    %% the intentionally failed starts below crash-report otherwise
+    quiet(),
     Port = free_port(),
     ?assertEqual(
         {error, {on_event, 42}},
@@ -359,8 +361,12 @@ server_on(Port, Events) ->
     %% safe variable even when assertions fail before the in-body stops.
     Server.
 
+%% Silences the SASL crash/supervisor reports of intentionally failed
+%% gen_server starts: they log at level `error', so `error' — the old
+%% value here — passed them straight through to the CI log.
+
 quiet() ->
-    logger:set_primary_config(level, error).
+    logger:set_primary_config(level, none).
 
 opts(Port, Overrides) ->
     maps:merge(

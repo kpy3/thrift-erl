@@ -66,10 +66,16 @@ start_link(Opts) ->
     process_flag(trap_exit, false),
     Result.
 
+%% gen_server:stop, not supervisor:stop/1: the supervisor IS a
+%% gen_server, this is literally what supervisor:stop/1 does — but that
+%% wrapper only exists from OTP 29 on, and the runtime builds on 28.
+%% Waiting with `infinity' lets a busy connection child answer its
+%% in-flight call before its own shutdown.
+
 -doc "Stops the server: the acceptor and, through it, all connections.".
 -spec stop(pid() | atom()) -> ok.
 stop(Server) ->
-    supervisor:stop(Server).
+    gen_server:stop(Server, normal, infinity).
 
 -doc """
 Stops the server, optionally draining first.
@@ -85,7 +91,7 @@ calls. Without the key this is plain `stop/1`.
 stop(Server, #{drain := Timeout}) ->
     Acceptor = whereis_acceptor(Server),
     ok = thrift_erl_acceptor:drain(Acceptor, Timeout),
-    supervisor:stop(Server);
+    stop(Server);
 stop(Server, _Opts) ->
     stop(Server).
 
