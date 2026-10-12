@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Generator (`thrift_generator`)
 
+- Generated modules put an empty line between top-level definitions
+  (`-type` blocks, `struct_info`/`enum_info`/`function_info`, codecs) —
+  `-spec`/`-callback` contracts and `-doc` comments stay flush with
+  their definition. `-doc`/`-moduledoc` strings are wrapped at word
+  boundaries within 80 columns instead of erl_prettypr's mid-word
+  cuts, so `` `start_link/1` ``-style references stay whole. Regenerate
+  to pick the new layout up (`check/3` flags the drift).
 - IDL keywords are accepted as field names, matching Apache Thrift
   0.18+ (THRIFT-5626): `1: i32 oneway` names the field `oneway`.
   Function, const, enum and type names keep the plain-identifier rule,

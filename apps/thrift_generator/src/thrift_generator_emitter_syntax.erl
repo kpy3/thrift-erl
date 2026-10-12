@@ -326,11 +326,62 @@ application(Module, Name, Args) ->
 %% (`erl_prettypr' cannot lay them), so those attributes are built and
 %% rendered as raw forms (`erl_pp'), while everything else stays trees.
 
+%% The rendered source line budget: erl_pp lays raw forms out at 80
+%% columns, and the `-doc'/`-moduledoc' strings are wrapped to the same
+%% width.
+
+-define(LINE_WIDTH, 80).
+
 -spec format(erl_syntax:forms()) -> binary().
 format(Forms) ->
-    blank_around_comments(
-        unicode:characters_to_binary(lists:append([format_form(F) || F <- Forms, F =/= []]))
-    ).
+    blank_around_comments(unicode:characters_to_binary(render([F || F <- Forms, F =/= []]))).
+
+%% Top-level forms come out separated by an empty line — definitions
+%% read as blocks — except where a form belongs to the one below it:
+%% `-spec'/`-callback' contracts and `-doc' comments sit flush with
+%% their definition, and comments get their spacing from
+%% blank_around_comments.
+
+render([]) ->
+    [];
+render([F]) ->
+    [format_form(F)];
+render([F | Rest]) ->
+    [format_form(F) | render_from(F, Rest)].
+
+render_from(Prev, [F | Rest]) ->
+    case separated(F, Prev) of
+        true -> ["\n", format_form(F) | render_from(F, Rest)];
+        false -> [format_form(F) | render_from(F, Rest)]
+    end;
+render_from(_Prev, []) ->
+    [].
+
+separated(F, Prev) ->
+    not (belongs_to_next(Prev) orelse is_comment(F) orelse is_comment(Prev)) andalso
+        (is_function_form(F) orelse contract_or_doc(F)).
+
+%% A `-spec'/`-callback' contract or a `-doc'/`-moduledoc' comment
+%% belongs to the form that follows it.
+
+belongs_to_next(Form) ->
+    contract_or_doc(Form).
+
+is_comment(Form) ->
+    erl_syntax:is_tree(Form) andalso erl_syntax:type(Form) =:= comment.
+
+is_function_form(Form) ->
+    erl_syntax:is_tree(Form) andalso erl_syntax:type(Form) =:= function.
+
+contract_or_doc({attribute, _Anno, Name, _Payload}) ->
+    lists:member(Name, [doc, moduledoc, spec, callback]);
+contract_or_doc(Form) ->
+    case erl_syntax:is_tree(Form) andalso erl_syntax:type(Form) of
+        attribute ->
+            lists:member(attr_name(Form), [doc, moduledoc, spec, callback]);
+        _ ->
+            false
+    end.
 
 %% Every comment block in generated output (the banner, the section
 %% dividers) is a reading landmark: a blank line separates it from the
@@ -388,6 +439,119 @@ drop_trailing_blanks(Acc) ->
 format_form({raw_text, Text}) ->
     unicode:characters_to_list(Text);
 format_form({tree, _, _, _} = Tree) ->
-    [erl_prettypr:format(Tree), "\n"];
+    case doc_form_source(Tree) of
+        undefined -> [erl_prettypr:format(Tree), "\n"];
+        Source -> [Source, "\n"]
+    end;
 format_form(RawForm) ->
     erl_pp:form(RawForm).
+
+%% `-doc'/`-moduledoc' attributes carry string payloads, and
+%% erl_prettypr lays an over-long string out by cutting it wherever the
+%% column runs out — through the middle of `` `start_link/1' ''. Such
+%% attributes are rendered by hand instead: words wrapped to the line
+%% width, broken only at spaces, one string literal per line. The tree
+%% stays a plain string attribute, so `revert_forms' and the in-memory
+%% compile see the same doc every other tool does.
+
+doc_form_source(Tree) ->
+    case erl_syntax:type(Tree) of
+        attribute ->
+            case attr_name(Tree) of
+                Name when Name =:= doc; Name =:= moduledoc ->
+                    case attr_string(Tree) of
+                        undefined -> undefined;
+                        String -> wrap_doc_attribute(Name, String)
+                    end;
+                _ ->
+                    undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+attr_name(Tree) ->
+    case erl_syntax:concrete(erl_syntax:attribute_name(Tree)) of
+        Name when is_atom(Name) -> Name;
+        _ -> none
+    end.
+
+attr_string(Tree) ->
+    case erl_syntax:attribute_arguments(Tree) of
+        [Value] ->
+            case erl_syntax:concrete(Value) of
+                String when is_list(String) -> String;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+wrap_doc_attribute(Name, String) ->
+    Head = "-" ++ atom_to_list(Name) ++ "(\"",
+    %% continuation lines open with the quote under the first one's
+    Cont = lists:duplicate(length(Head) - 1, $\s) ++ "\"",
+    %% the last line also closes the literal and the attribute
+    Budget = ?LINE_WIDTH - length(Head) - 3,
+    [First | Rest] = doc_chunks(String, Budget),
+    Lines = [Head ++ First ++ "\"" | [Cont ++ Chunk ++ "\"" || Chunk <- Rest]],
+    lists:concat(lists:join("\n", close_attribute(Lines))).
+
+close_attribute([Line]) ->
+    [Line ++ ")."];
+close_attribute([Line | Rest]) ->
+    [Line | close_attribute(Rest)].
+
+%% The chunks of one string literal, wrapped at word boundaries; the
+%% literals concatenate back to the original text — a space rides at
+%% the end of a chunk broken mid-paragraph, a `\n' escape at the end of
+%% a paragraph's last chunk.
+
+doc_chunks(String, Budget) ->
+    Paragraphs = [escape_doc(P) || P <- string:split(String, "\n", all)],
+    Wrapped = [wrap_words(string:split(P, " ", all), Budget) || P <- Paragraphs],
+    lists:append([paragraph_chunks(Chunks, Last) || {Last, Chunks} <- with_last(Wrapped)]).
+
+with_last(Wrapped) ->
+    Last = length(Wrapped),
+    lists:zip([I =:= Last || I <- lists:seq(1, Last)], Wrapped).
+
+paragraph_chunks([Only], true) ->
+    [Only];
+paragraph_chunks([Only], false) ->
+    [Only ++ "\\n"];
+paragraph_chunks(Chunks, Last) ->
+    Body = lists:sublist(Chunks, length(Chunks) - 1),
+    [Chunk ++ " " || Chunk <- Body] ++ [last_paragraph_chunk(lists:last(Chunks), Last)].
+
+last_paragraph_chunk(Chunk, true) ->
+    Chunk;
+last_paragraph_chunk(Chunk, false) ->
+    Chunk ++ "\\n".
+
+wrap_words(Words, Budget) ->
+    {Lines, Current} =
+        lists:foldl(
+            fun
+                (Word, {Acc, []}) ->
+                    {Acc, Word};
+                (Word, {Acc, Current}) ->
+                    case length(Current) + 1 + length(Word) =< Budget of
+                        true -> {Acc, Current ++ " " ++ Word};
+                        false -> {Acc ++ [Current], Word}
+                    end
+            end,
+            {[], []},
+            Words
+        ),
+    Lines ++ [Current].
+
+escape_doc(String) ->
+    [
+        case Char of
+            $" -> "\\\"";
+            $\\ -> "\\\\";
+            _ -> Char
+        end
+     || Char <- String
+    ].
