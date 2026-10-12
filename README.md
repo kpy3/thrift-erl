@@ -139,6 +139,20 @@ service name (`Ping` in `namespace erl ping.api` generates
 already matches are left untouched, so regenerating an unchanged IDL
 does not churn mtimes.
 
+Errors render as rebar3/elp-style source excerpts — the offending
+line under a gutter, a `╰──` marker naming the problem:
+
+```
+  ┌─ my_api.thrift:9:
+  │
+9 │ PingReply ping(1: PingRequest request) throws(1: NoSuchMessage err),
+  │ ╰── duplicate field id 1 (already used by message)
+```
+
+`--compact-errors` switches to one-line `path:line: message` entries
+(the form the rebar3 plugin falls back to when the source file cannot
+be read back).
+
 `--check` verifies instead of writing: it fails (exit 1, listing the
 drifted files) unless every generated artifact already exists in the
 out dir with the exact content the IDL would produce — a CI freshness
