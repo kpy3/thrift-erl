@@ -225,7 +225,7 @@ from_wire_repr(Desc, Value, Repr) ->
 
 -spec struct_tag({struct, {ref, module(), binary()}}) -> atom().
 struct_tag({struct, {ref, _Module, Name}}) ->
-    binary_to_atom(thrift_erl_names:snake(Name), utf8).
+    thrift_erl_record:record_tag(Name).
 %% `decode_repr/3` reaches `struct_tag/1` only for map-mode structs, and
 %% those are always ref descriptors — an inline descriptor has no
 %% representation to mis-decode into.

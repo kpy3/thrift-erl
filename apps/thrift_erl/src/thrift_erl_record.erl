@@ -58,6 +58,7 @@ the codecs answer with.
     from_wire/2,
     from_wire/3,
     repr_mode/1,
+    record_tag/1,
     unknown_fields/2
 ]).
 
@@ -658,10 +659,11 @@ map_mode_from_wire(Fields, binary, Map) ->
 field_atom(NameBin) ->
     binary_to_atom(NameBin, utf8).
 
-%% The fallback identity tag for a struct whose definition declares no
-%% record tag of its own: the snake-cased wire name (`__struct__` tags
-%% of map-mode structs, hand-written descriptor targets).
-
+-doc """
+The fallback identity tag for a struct whose definition declares no
+record tag of its own: the snake-cased wire name (`__struct__` tags
+of map-mode structs, hand-written descriptor targets).
+""".
 -spec record_tag(binary()) -> atom().
 record_tag(NameBin) ->
     binary_to_atom(thrift_erl_names:snake(NameBin), utf8).

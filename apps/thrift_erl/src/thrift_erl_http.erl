@@ -248,7 +248,7 @@ headers([], Acc) ->
 headers([Line | Rest], Acc) ->
     case binary:split(Line, <<":">>) of
         [Name, Value] ->
-            headers(Rest, [{lower(trim(Name)), trim(Value)} | Acc]);
+            headers(Rest, [{lower(string:trim(Name)), string:trim(Value)} | Acc]);
         _ ->
             {error, bad_request}
     end.
@@ -302,6 +302,7 @@ reason(405) -> <<"Method Not Allowed">>;
 reason(500) -> <<"Internal Server Error">>;
 reason(_) -> <<>>.
 
+%% Handwritten on purpose: header names are ASCII, and string:lowercase/1 rejects bytes outside valid UTF-8.
 -spec lower(binary()) -> binary().
 lower(Bin) ->
     <<
@@ -313,7 +314,3 @@ lower(Bin) ->
         >>
      || <<C>> <= Bin
     >>.
-
--spec trim(binary()) -> binary().
-trim(Bin) ->
-    string:trim(Bin).
