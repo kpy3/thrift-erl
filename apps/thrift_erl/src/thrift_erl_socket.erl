@@ -251,11 +251,9 @@ The passive->active flow is what the connections re-arm on
 """.
 -spec set_active(socket(), pos_integer()) -> ok.
 set_active({tcp, Socket}, N) ->
-    ok = inet:setopts(Socket, [{active, N}]),
-    ok;
+    ok = inet:setopts(Socket, [{active, N}]);
 set_active({ssl, Socket}, N) ->
-    ok = ssl:setopts(Socket, [{active, N}]),
-    ok.
+    ok = ssl:setopts(Socket, [{active, N}]).
 
 -doc "Hands the socket to `Pid`, which becomes its controlling process.".
 -spec controlling_process(socket(), pid()) -> ok | {error, term()}.
