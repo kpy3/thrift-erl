@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-13
+
+A consolidation release. The server's specific `handshake_timeout`
+option now actually reaches the accept loop it was documented for; the
+generic JSON engine validates unions exactly like binary, compact and
+the specialized codecs; README catches up with the generator and runtime
+as they are; and the three protocol modules share their cold-path
+plumbing instead of carrying three copies. The full gate is green on
+both OTP 28 and 29.
+
+### Runtime (`thrift_erl`)
+
+- The acceptor's connection-options whitelist silently dropped
+  `handshake_timeout`: a server setting the specific key (without the
+  `timeout` umbrella) ran TLS handshakes at the 5000 ms default. The key
+  now passes the whitelist, and a regression test asserts end to end
+  that it reaches the accept loop.
+
+- The generic JSON engine's union validation now matches binary, compact
+  and the specialized codecs: a map with one declared field plus extra
+  undeclared keys encodes (undeclared keys are ignored, as every
+  struct-kind always did) instead of answering `union_multiple`, and a
+  map whose only key matches no declared field answers `union_empty`
+  instead of encoding an empty union object that would not survive a
+  re-encode.
+
+- The codec probe (`binary_codec`/`compact_codec`/`json_codec` dispatch
+  to the specialized per-struct codecs) and the union/required
+  field-presence checks live in `thrift_erl_protocol` once instead of
+  three near-identical copies (~200 lines). The `persistent_term` cache
+  key still names the protocol module and the probe still takes its funs
+  fresh from the module on every call.
+
+### Documentation
+
+- README catches up: the specialized per-struct codecs exist on every
+  protocol (the Performance section still described them as binary-only),
+  the four invocation option axes (`--repr`, `--union-type`, `--set`,
+  `--typedef-type`) are documented for both the CLI and the rebar3
+  plugin, the `service` option (plus `max_queue_depth` and `name`) joins
+  the start_link option list, the codegen-annotation catalogue grows
+  `erl.union_type = "sum"` and `erl.struct_type = "native"` and documents
+  the meaningful `key_type = "binary"`, and the representations section
+  says everything once instead of twice.
+
+### Generator (`thrift_generator`)
+
+- Dead code out — unused exports (`thrift_erl_binary:type_id/1`,
+  `thrift_erl_options:backlog/1`, `record_mode/1`), an inert `-doc` on
+  the unexported `sources/2`, the write-only `erl` fields of four model
+  records — followed by behavior-preserving simplifications: one
+  `mode/1` dispatch instead of four three-boolean products, a shared
+  namespace-default helper, direct map lookups, and a comments pass
+  (history narration out, displaced blocks re-attached, `-doc` gaps
+  filled).
+
 ### Testing and tooling
 
 - The ssl suite's plain-client case no longer flakes the teardown the
