@@ -266,15 +266,15 @@ struct_type_one(S, Prefix, Ctx) ->
 
 -spec alias_type_node(#tg_struct{}, #ectx{}) -> erl_syntax:syntaxTree() | undefined.
 alias_type_node(S, Ctx) ->
-    case {sum_mode(S), record_mode(S), native_mode(S)} of
-        {true, _, _} ->
+    case mode(S) of
+        sum ->
             sum_type_node(S, Ctx);
-        {false, true, _} ->
+        record ->
             Tag = record_tag(current_prefix(Ctx), S#tg_struct.name),
             {type, erl_anno:new(0), record, [{atom, erl_anno:new(0), Tag}]};
-        {false, false, true} ->
+        native ->
             undefined;
-        {false, false, false} ->
+        map ->
             map_type_node(S, Ctx)
     end.
 
@@ -480,11 +480,11 @@ struct_codec_one(S, Ctx) ->
     %% structs default to their atom-keyed map, native-mode structs
     %% to the runtime-minted native record.
     DefaultRepr =
-        case {sum_mode(S), record_mode(S), native_mode(S)} of
-            {true, _, _} -> record;
-            {false, true, _} -> record;
-            {false, false, true} -> native;
-            {false, false, false} -> map
+        case mode(S) of
+            sum -> record;
+            record -> record;
+            native -> native;
+            map -> map
         end,
     Desc = struct_ref(S, Ctx),
     Doc = S#tg_struct.doc,
@@ -657,12 +657,14 @@ struct_index_tag(S, Prefix) ->
 -spec value_type(#tg_struct{}) -> erl_syntax:syntaxTree().
 value_type(S) ->
     Alias = thrift_generator_emitter_syntax:user_type(type_alias(S#tg_struct.name)),
-    case {sum_mode(S), record_mode(S), native_mode(S)} of
-        {false, true, _} ->
+    case mode(S) of
+        record ->
             {type, erl_anno:new(0), union, [Alias, thrift_generator_emitter_syntax:raw_type(map)]};
-        {false, false, true} ->
+        native ->
             thrift_generator_emitter_syntax:raw_type(term);
-        _ ->
+        sum ->
+            Alias;
+        map ->
             Alias
     end.
 
@@ -1039,6 +1041,17 @@ struct_type(S) ->
         _ -> record
     end.
 
+%% The one representation axis the mode case sites dispatch on: sum
+%% unions keep their tagged-tuple form whatever struct_type says,
+%% otherwise the axis is the plain struct_type.
+
+-spec mode(#tg_struct{}) -> sum | record | native | map.
+mode(S) ->
+    case sum_mode(S) of
+        true -> sum;
+        false -> struct_type(S)
+    end.
+
 -spec struct_info_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 struct_info_forms(Mod, Ctx) ->
     Clauses = [
@@ -1258,19 +1271,19 @@ record_fields_forms(Mod) ->
 -spec fields_decl(#tg_struct{}, binary()) ->
     {atom(), [atom()]} | {map, atom | binary} | {native, atom}.
 fields_decl(S, Prefix) ->
-    case {sum_mode(S), record_mode(S), native_mode(S)} of
-        {true, _, _} ->
+    case mode(S) of
+        sum ->
             {sum, [field_atom(F#tg_field.name) || F <- S#tg_struct.fields]};
-        {false, true, _} ->
+        record ->
             {record_tag(Prefix, S#tg_struct.name), [
                 field_atom(F#tg_field.name)
              || F <- S#tg_struct.fields
             ]};
-        {false, false, true} ->
+        native ->
             %% No record declaration exists: the runtime mints native
             %% records under the snake-cased wire name.
             {native, record_tag(<<>>, S#tg_struct.name)};
-        {false, false, false} ->
+        map ->
             {map, map_key_type(S)}
     end.
 

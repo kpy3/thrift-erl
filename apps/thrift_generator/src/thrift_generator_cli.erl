@@ -224,9 +224,6 @@ check(File, OutDir, GenOpts, Resolver) ->
                 unicode:characters_to_list(File), unicode:characters_to_list(OutDir)
             ]),
             halt(0);
-        {error, {stale, Paths}} ->
-            io:format(standard_error, "~ts~n", [thrift_generator_diagnostic:format({stale, Paths}, Resolver)]),
-            halt(1);
         {error, Reason} ->
             io:format(standard_error, "~ts~n", [thrift_generator_diagnostic:format(Reason, Resolver)]),
             halt(1)
