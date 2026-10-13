@@ -272,11 +272,9 @@ fn_clause(Patterns, Body) ->
 wildcard() ->
     erl_syntax:variable("_").
 
-%% Binaries holding printable text print as `<<"text">>' — byte-list
-%% form would swamp the generated descriptors.
-
-%% Recursive so printable binaries print as `<<"text">>' at any depth —
-%% the stock `abstract/1' renders nested binaries as byte lists.
+%% Binaries holding printable text print as `<<"text">>' at any depth —
+%% byte-list form would swamp the generated descriptors, and the stock
+%% `abstract/1' renders nested binaries as byte lists.
 
 -spec abstract(term()) -> erl_syntax:syntaxTree().
 abstract(Term) when is_binary(Term) ->
@@ -425,9 +423,6 @@ starts_with_percent(<<"%", _/binary>>) ->
     true;
 starts_with_percent(_) ->
     false.
-
-%% The blank before a block must not stack onto blank lines already
-%% there (prettypr leaves none, but the raw-text hrl tail does).
 
 -spec drop_trailing_blanks([binary()]) -> [binary()].
 drop_trailing_blanks([<<>> | Rest]) ->

@@ -88,11 +88,6 @@ init(State) ->
 
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, {rebar3_thrift, term()}}.
 do(State) ->
-    %% `rebar3 thrift clean' reaches this provider as the global `task'
-    %% option — rebar3 folds leftover positional words into it, and a
-    %% default-namespace provider wins resolution over the thrift
-    %% namespace, so the namespaced clean provider is hook-only (see
-    %% rebar3_thrift_clean)
     {Parsed, _Args} = rebar_state:command_parsed_args(State),
     Check = proplists:get_value(check, Parsed, false),
     Opts = rebar_state:get(State, thrift, []),

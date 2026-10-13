@@ -478,7 +478,6 @@ nibble_matches(N, {k_ref, Expected, _, _}) ->
 nibble_matches(_N, {k_unsupported, _, _}) ->
     false.
 
-%% Same check for compile results that carry no nested payload.
 -spec k_wire(k_type()) -> non_neg_integer().
 k_wire({k_base, N, _}) -> N;
 k_wire({k_enum, N, _}) -> N;

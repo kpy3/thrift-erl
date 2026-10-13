@@ -178,8 +178,9 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
         Records ++
         Callbacks.
 
-%% Names of the module's struct-mode definitions reachable from the
-%% service's parameter, reply and throws types.
+%% Names of the module's structs of every representation (record, map,
+%% native, sum) reachable from the service's parameter, reply and
+%% throws types.
 -spec service_struct_names(#tg_service{}, #tg_module{}) -> [binary()].
 service_struct_names(Svc, Mod) ->
     ByName = #{S#tg_struct.name => S || S <- Mod#tg_module.structs},

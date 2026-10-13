@@ -1152,10 +1152,6 @@ pairs_lc() ->
         {generate, ?ANNO, tuple_pat([v("KE"), v("VE")]), v("Sorted")}
     ]}.
 
-%% Container element expressions: base and enum types inline at the use
-%% site, struct references as struct calls, nested containers as helper
-%% calls — the same dispatch the struct fields go through.
-
 %% Value patterns that stay underscored where the encoded expression
 %% never reads the value (a uuid encode is the constant error) — the
 %% generated code must not warn on the unused binding.
@@ -1194,6 +1190,10 @@ uuid_error_clause(Arity) ->
 -spec uuid_decode_error_clause(arity()) -> ast().
 uuid_decode_error_clause(Arity) ->
     clause([v("_" ++ integer_to_list(I)) || I <- lists:seq(1, Arity)], none, [uuid_decode_error()]).
+
+%% Container element expressions: base and enum types inline at the use
+%% site, struct references as struct calls, nested containers as helper
+%% calls — the same dispatch the struct fields go through.
 
 -spec encode_elem_expr(wire_type(), ast(), #ectx{}, #{integer() => pos_integer()}) -> ast().
 encode_elem_expr({base, B}, V, _Ctx, _Enums) ->

@@ -935,6 +935,7 @@ const_literal(Value) ->
 %% The divider label naming the IDL construct the following forms
 %% implement (the declared name, not the derived tag).
 
+-doc "The section divider label naming an IDL definition (the declared name, not the derived tag).".
 -spec section_label(#tg_struct{} | #tg_enum{} | #tg_typedef{}) -> string().
 section_label(#tg_struct{kind = union, name = Name}) ->
     "Union " ++ unicode:characters_to_list(Name);
@@ -953,6 +954,7 @@ section_label(#tg_typedef{name = Name}) ->
 %% `| undefined' — the value an absent wire field leaves behind;
 %% `required' fields have none.
 
+-doc "The typed record declaration of a record-mode struct (remote type references under `qualify`).".
 -spec record_form(#tg_struct{}, binary(), #ectx{}) -> erl_syntax:forms().
 record_form(S, Prefix, Ctx) ->
     Anno = erl_anno:new(0),
@@ -1033,6 +1035,7 @@ native_mode(S) ->
 %% sum unions keep their tagged-tuple form whatever the struct_type
 %% says, and anything unrecognized falls back to the record.
 
+-doc "The struct_type axis of a definition: `map`, `native`, or `record` when absent or unrecognized.".
 -spec struct_type(#tg_struct{}) -> record | map | native.
 struct_type(S) ->
     case maps:get(struct_type, S#tg_struct.erl, undefined) of
@@ -1185,10 +1188,12 @@ service_functions(Mod) ->
         ),
     Kept.
 
+-doc "The method's params struct as a wire descriptor.".
 -spec params_desc(#tg_function{}, #ectx{}) -> desc().
 params_desc(F, Ctx) ->
     {struct, {struct, [field_desc(P, Ctx) || P <- F#tg_function.params]}}.
 
+-doc "The method's reply type as a wire descriptor, `undefined` for `void`.".
 -spec reply_desc(#tg_function{}, #ectx{}) -> desc() | undefined.
 reply_desc(F, Ctx) ->
     case F#tg_function.return_type of
@@ -1198,6 +1203,7 @@ reply_desc(F, Ctx) ->
             type_desc(Type, Ctx)
     end.
 
+-doc "The method's declared exceptions as wire descriptors.".
 -spec exceptions_desc(#tg_function{}, #ectx{}) -> [desc()].
 exceptions_desc(F, Ctx) ->
     [field_desc(T, Ctx) || T <- F#tg_function.throws].
@@ -1482,6 +1488,7 @@ current_prefix(Ctx) ->
 types_module_atom(Name) ->
     binary_to_atom(<<(sanitize(Name))/binary, "_types">>, utf8).
 
+-doc "The module key with dots replaced by underscores (an atom-safe module name).".
 -spec sanitize(binary()) -> binary().
 sanitize(Name) ->
     binary:replace(Name, <<".">>, <<"_">>, [global]).

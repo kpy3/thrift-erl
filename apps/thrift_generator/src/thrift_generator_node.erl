@@ -18,10 +18,6 @@
 Builds the payload record of an AST node from its kind atom and
 constructor arguments.
 
-One builder replaces one module per definition kind: every
-`thrift_generator_<kind>:build_node/N` was a pure record constructor,
-so the kind vocabulary is data — the ?NODE_BUILDERS table in
-`thrift_generator.hrl`, colocated with the payload records it names.
 The `type_module` field of #thrift_generator_node{} keeps carrying the
 kind atom: the semantic pass dispatches on it, and the atom still
 names the kind even though no per-kind module exists anymore.
