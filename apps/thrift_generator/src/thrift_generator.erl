@@ -84,11 +84,8 @@ generate(ThriftFile, OutDir, Opts) ->
         write_all(Sources, OutDir, [])
     end).
 
--doc """
-The generate pipeline without writing: load (with includes), semantic
-analysis, code emission — the same in-memory sources `generate/3`
-writes.
-""".
+%% Internal: the generate pipeline without writing, shared by
+%% generate/3 and check/3 through with_sources/3.
 -spec sources(file:filename_all(), generate_opts()) ->
     {ok, [thrift_generator_emitter:source()]} | {error, term()}.
 sources(ThriftFile, Opts) ->
