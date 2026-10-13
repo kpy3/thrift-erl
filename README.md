@@ -139,6 +139,30 @@ service name (`Ping` in `namespace erl ping.api` generates
 already matches are left untouched, so regenerating an unchanged IDL
 does not churn mtimes.
 
+The full flag set (`generate` stays accepted as an optional
+subcommand):
+
+- `-h` / `--help` — print the usage and exit;
+- `-o` / `--out-dir <dir>` — directory for the generated sources
+  (default: the current directory);
+- `--repr record|map|native` — the value representation
+  (`erl.struct_type`) for definitions without an explicit annotation
+  of their own (default: record);
+- `--union-type record|sum` — the union representation
+  (`erl.union_type`) for unions without an explicit annotation
+  (default: record);
+- `--set list|sets|ordset` — the in-process set implementation
+  (`erl.set`) for sets without an explicit annotation (default: list);
+- `--typedef-type alias|nominal` — the typedef flavor (`erl.type`)
+  for typedefs without an explicit annotation (default: alias);
+- `--check` — verify freshness instead of writing (see below);
+- `--compact-errors` — one-line error entries (see below).
+
+Each of the four option axes picks the generated flavor only where the
+IDL carries no explicit annotation of its own: an explicit annotation
+wins, and a file-wide namespace default (`erl.set` / `erl.union_type`
+on the `namespace erl` header) overrides the flag for its file.
+
 Errors render as rebar3/elp-style source excerpts — the offending
 line under a gutter, a `╰──` marker naming the problem. Positions
 carry columns (the scanner threads `{Line, Column}` pairs through
@@ -174,12 +198,25 @@ In the consumer project's `rebar.config`:
 
 {thrift, [
     {files, ["src/my_api.thrift"]},
-    {out_dir, "src"}
+    {out_dir, "src"},
+    {repr, record},        %% record | map | native
+    {union_type, record},  %% record | sum
+    {set, list},           %% list | sets | ordset
+    {typedef_type, alias}  %% alias | nominal
 ]},
 
 %% regenerate before every compilation:
 {provider_hooks, [{pre, [{compile, {default, thrift}}]}]}
 ```
+
+The four option axes mirror the standalone generator's flags and apply
+only to definitions without an explicit annotation of their own — a
+file-wide namespace default overrides the option for its file. An
+invalid value fails the provider with a rendered
+`{bad_opt, {Key, Value, Allowed}}` error instead of a raw crash, and
+the freshness checks (`rebar3 thrift --check` and the CLI `--check`)
+count artifacts as stale unless they were generated with the same
+option values.
 
 `rebar3 thrift` regenerates the sources (unchanged files are not
 rewritten). `rebar3 thrift --check` verifies freshness instead of
@@ -272,16 +309,25 @@ ok = ping_api_ping_server:stop(Server).
 
 `start_link` options (a map at creation time, not app env):
 
+- `service` — the module implementing the `thrift_erl_service`
+  behaviour (for generated services, `<prefix>_<svc>_server`);
+  required by the client and by a single-service server (a multiplexed
+  server passes `services` instead) — the generated server supplies
+  its own;
 - `transport` — `framed` (the default), `buffered`, or `http`;
 - `protocol` — `binary` (the default), `compact`, `json`, or any
   module implementing the `thrift_erl_protocol` behaviour;
-- server: `port`, `handler`, `max_frame_size`, `max_connections`,
-  `timeout` (the umbrella: TLS handshake and inter-message silence),
-  `handshake_timeout` / `idle_timeout` (naming each meaning
-  specifically), `active_n`, `backlog`;
+- server: `port`, `handler`, `name` (the locally registered name of
+  the supervisor, default `thrift_erl_server`), `max_frame_size`,
+  `max_connections`, `timeout` (the umbrella: TLS handshake and
+  inter-message silence), `handshake_timeout` / `idle_timeout` (naming
+  each meaning specifically), `active_n`, `backlog`;
 - client: `host`, `port`, `timeout` (connect and TLS handshake;
   per-call timeouts ride the call itself; `connect_timeout` overrides
-  the umbrella), `max_frame_size`, `active_n`;
+  the umbrella), `max_frame_size`, `active_n`, `max_queue_depth` (how
+  many calls may wait while another is on the wire; overflow answers
+  `{error, queue_full}`; the default `infinity` keeps the classic
+  unbounded queue);
 - both: `on_event` — the observability callback (see
   [Observability](#observability)).
 
@@ -340,10 +386,19 @@ Struct = #{__struct__ => ping_api_ping_request, message => <<"hi">>},
 ```
 
 Details worth knowing: a field absent on the wire is absent from the
-maps (the record carries `undefined` in its slot instead), the
-`__struct__` tag is the same record tag the record repr uses, and
-every form encodes back to the same bytes — the input representation
-is auto-detected:
+maps (the record carries `undefined` in its slot instead), and the
+`__struct__` tag is the same record tag the record repr uses. Every
+struct in `<mod>_types.erl` gets a fixed set of codec functions
+(prefix = the `erl` namespace prefix, then the lowercased struct name):
+
+```erlang
+{ok, Req} = ping_api_types:ping_api_ping_request_from_map(Map),
+%% the protocol goes into the last argument of every codec:
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, my_protocol_mod).
+```
+
+Encoding accepts any representation and auto-detects it — every form
+encodes back to the same bytes:
 
 ```erlang
 {ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req),
@@ -352,9 +407,11 @@ is auto-detected:
 {ok, Bin} = ping_api_types:ping_api_encode_ping_request(Native).
 ```
 
-The facade adds options on top — `strict => true` fails a map/struct
-input carrying keys that match no declared field, instead of dropping
-them silently:
+On the facade `thrift_erl:encode/2` accepts any representation and
+auto-detects it, `thrift_erl:decode/3` produces the requested one, and
+`thrift_erl:encode/4` takes an options map on top: `strict => true`
+fails a map/struct input carrying keys that match no declared field
+(`{error, {unknown_fields, Keys}}`) instead of dropping them silently:
 
 ```erlang
 {error, {unknown_fields, [extra]}} =
@@ -362,27 +419,10 @@ them silently:
                       #{message => <<"hi">>, extra => 1}, binary, #{strict => true}).
 ```
 
-`encode/2` accepts any representation and auto-detects it; `decode/3`
-produces the requested one. `thrift_erl:encode/4` takes an options map
-on top: `strict => true` fails a map/struct-map input carrying keys
-that match no declared field (`{error, {unknown_fields, Keys}}`)
-instead of dropping them silently. A value that matches no
-representation answers `{error, {value_does_not_match_type, Value}}`
-from every entry point. Every struct in `<mod>_types.erl` gets a
-fixed set of codec functions (prefix = the `erl` namespace prefix, then the lowercased struct name):
-
-```erlang
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req),
-{ok, Req} = ping_api_types:ping_api_decode_ping_request(Bin),                  %% record
-{ok, Map} = ping_api_types:ping_api_decode_ping_request(Bin, map),             %% atom-key map
-{ok, Struct} = ping_api_types:ping_api_decode_ping_request(Bin, struct),
-{ok, Req} = ping_api_types:ping_api_ping_request_from_map(Map),
-%% the protocol goes into the last argument of every codec:
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, my_protocol_mod).
-```
-
 Decoding is strict: trailing bytes answer `{error, trailing}`,
-truncation `{error, truncated}`.
+truncation `{error, truncated}`. A value that matches no
+representation answers `{error, {value_does_not_match_type, Value}}`
+from every entry point.
 
 `convert/2` reshapes typed values without touching bytes (it also
 lives on `thrift_erl:convert/3` for hand-written descriptors):
@@ -653,7 +693,7 @@ in multiplexed mode: a name whose prefix is not a hosted service (or a
 plain name) is refused with the `UNKNOWN_METHOD` application
 exception, and the connection stays usable. A single-service server
 stays liberal: it answers plain names and keeps answering names that
-carry any `Service:' prefix, so a multiplexed client pointed at a
+carry any `Service:` prefix, so a multiplexed client pointed at a
 non-multiplexed service still finds its functions. The golden suite
 covers the wire compatibility both ways: the official Apache
 multiplexed client (`thrift_client_util:new_multiplexed`) runs against
@@ -713,9 +753,18 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
 
 ## Codegen annotations
 
-- `erl.struct_type = "map"` — emit the struct as a map
-  (plus `erl.struct_type.map.key_type = "atom"` for atom keys);
-  the default is records;
+- `erl.struct_type = "map"` — emit the struct as a map (keys are
+  atoms by default; `erl.struct_type.map.key_type = "binary"` keeps
+  the wire's binary keys); the default is records;
+- `erl.struct_type = "native"` — EEP-79 native records on OTP 29+
+  (what the values look like is covered under
+  [Representations and protocols](#representations-and-protocols));
+- `erl.union_type = "sum"` — a union as a sum type of tuples
+  `{FieldAtom, Value}`: no record (the hrl carries only the type
+  alias), the wire shape stays the usual one field, and record- and
+  sum-union representations interoperate; a file-wide default rides
+  the `namespace erl` (or `namespace *`) header, an explicit
+  annotation on the union wins;
 - `erl.set = "sets" | "ordset"` — the in-process set implementation a
   decoded set is built into: `sets` (the v2 `sets` module) or
   `ordsets`; the default keeps the plain wire list — deliberately
@@ -754,12 +803,16 @@ include a fresh membuffer transport and protocol per operation, which
 its API requires; both sides run on the same ThriftTest payloads. Our
 codec compiles type descriptors once — referenced structs in a shared
 `persistent_term` cache, inline descriptors in a per-process memo — so
-nested schemas are never re-resolved per wire occurrence. For the
-binary protocol the emitter also writes specialized per-type codecs
-into `<mod>_types.erl`; named struct references dispatch to them via a
-`binary_codec/1` probe (`encode_<X>_wire`/`decode_<X>_wire` with no
-descriptor interpretation on the hot path), while the generic engine
-remains the compact/json path and the introspection fallback.
+nested schemas are never re-resolved per wire occurrence. The emitter
+also writes specialized per-struct wire codecs into `<mod>_types.erl`
+for all three protocols — `encode_<X>_wire`/`decode_<X>_wire`,
+`encode_<X>_compact`/`decode_<X>_compact` and
+`encode_<X>_json`/`decode_<X>_json`, each behind its `binary_codec/1`,
+`compact_codec/1` or `json_codec/1` index — and named struct references
+dispatch straight into them, with no descriptor interpretation on the
+hot path. The generic engine remains for inline descriptors,
+introspection and as the equivalence reference the PropEr suite pins
+the specialized codecs to.
 
 | case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
