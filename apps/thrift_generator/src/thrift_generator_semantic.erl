@@ -863,7 +863,7 @@ parent_functions(ParentName, Loc, ByName, InProgress, Ctx0) when is_binary(Paren
                         analyze_service(ParentNode, ByName, InProgress, Ctx),
                     {Fns, C1};
                 _ ->
-                    {[], err(Loc, "unknown service ~ts", [ParentName], Ctx)}
+                    unknown_service(Loc, ParentName, Ctx)
             end;
         {ok, {Module, LocalName, service}} ->
             included_service_functions(Module, LocalName, Loc, Ctx);
@@ -878,24 +878,24 @@ parent_functions(ParentName, Loc, ByName, InProgress, Ctx0) when is_binary(Paren
 -spec included_service_functions(binary(), binary(), loc(), #ctx{}) ->
     {[#tg_function{}], #ctx{}}.
 included_service_functions(Module, LocalName, Loc, Ctx) ->
-    Found =
-        lists:filtermap(
-            fun({_ModuleName, Model}) ->
-                case [S || S <- Model#tg_module.services, S#tg_service.name =:= LocalName] of
-                    [#tg_service{functions = Fns}] ->
-                        {true, Fns};
-                    _ ->
-                        false
-                end
-            end,
-            maps:to_list(maps:filter(fun(M, _) -> M =:= Module end, Ctx#ctx.analyzed))
-        ),
-    case Found of
-        [Fns | _] ->
+    Services =
+        case maps:find(Module, Ctx#ctx.analyzed) of
+            {ok, #tg_module{services = Found}} -> Found;
+            error -> []
+        end,
+    case [S || S <- Services, S#tg_service.name =:= LocalName] of
+        [#tg_service{functions = Fns}] ->
             {Fns, Ctx};
-        [] ->
-            {[], err(Loc, "unknown service ~ts", [LocalName], Ctx)}
+        _ ->
+            unknown_service(Loc, LocalName, Ctx)
     end.
+
+%% Both service-resolution paths answer a missing parent the same way:
+%% no functions and a located error.
+
+-spec unknown_service(loc(), binary(), #ctx{}) -> {[#tg_function{}], #ctx{}}.
+unknown_service(Loc, Name, Ctx) ->
+    {[], err(Loc, "unknown service ~ts", [Name], Ctx)}.
 
 -spec merge_functions([#tg_function{}], [#tg_function{}], loc(), #ctx{}) ->
     {[#tg_function{}], #ctx{}}.
@@ -1045,21 +1045,12 @@ reject_misplaced_set_impl(Ann, Loc, Ctx) ->
 %% The erl.set annotation on the `namespace erl` (or `*`) header is the
 %% file-wide set implementation: every set type of the module without
 %% an explicit annotation gets it injected during analysis, so the
-%% emitter keeps reading the plain type annotation. The namespace pick
-%% mirrors the loader: the erl scope wins over the wildcard one.
+%% emitter keeps reading the plain type annotation.
 
 -spec namespace_set_default(#tg_loaded{}, #ctx{}) -> #ctx{}.
 namespace_set_default(Loaded, Ctx) ->
     Headers = (Loaded#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.headers,
-    case namespace_set_annotation(Headers, <<"erl">>) of
-        undefined ->
-            case namespace_set_annotation(Headers, <<"*">>) of
-                undefined -> Ctx;
-                Found -> apply_namespace_set_default(Found, Ctx)
-            end;
-        Found ->
-            apply_namespace_set_default(Found, Ctx)
-    end.
+    namespace_default(Headers, set, fun apply_namespace_set_default/2, Ctx).
 
 %% The erl.union_type annotation on the namespace header is the
 %% file-wide union representation ("record", the default, or "sum" —
@@ -1069,14 +1060,24 @@ namespace_set_default(Loaded, Ctx) ->
 -spec namespace_union_default(#tg_loaded{}, #ctx{}) -> #ctx{}.
 namespace_union_default(Loaded, Ctx) ->
     Headers = (Loaded#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.headers,
-    case namespace_annotation(Headers, <<"erl">>, union_type) of
+    namespace_default(Headers, union_type, fun apply_namespace_union_default/2, Ctx).
+
+%% The file-wide default of one annotation axis on the namespace
+%% headers: the erl scope wins over the wildcard one (the same pick the
+%% loader applies), the found annotation goes to the axis-specific
+%% applier.
+
+-spec namespace_default([ast_node()], atom(), fun(({ast_node(), binary()}, #ctx{}) -> #ctx{}), #ctx{}) ->
+    #ctx{}.
+namespace_default(Headers, Key, Apply, Ctx) ->
+    case namespace_annotation(Headers, <<"erl">>, Key) of
         undefined ->
-            case namespace_annotation(Headers, <<"*">>, union_type) of
+            case namespace_annotation(Headers, <<"*">>, Key) of
                 undefined -> Ctx;
-                Found -> apply_namespace_union_default(Found, Ctx)
+                Found -> Apply(Found, Ctx)
             end;
         Found ->
-            apply_namespace_union_default(Found, Ctx)
+            Apply(Found, Ctx)
     end.
 
 -spec namespace_annotation([ast_node()], binary(), atom()) -> {ast_node(), binary()} | undefined.
@@ -1091,10 +1092,6 @@ namespace_annotation(Headers, Scope, Key) ->
         [Found | _] -> Found;
         [] -> undefined
     end.
-
--spec namespace_set_annotation([ast_node()], binary()) -> {ast_node(), binary()} | undefined.
-namespace_set_annotation(Headers, Scope) ->
-    namespace_annotation(Headers, Scope, set).
 
 -spec namespace_scope_is(ast_node(), binary()) -> boolean().
 namespace_scope_is(Node, Scope) ->
@@ -1363,7 +1360,7 @@ try_const_and_enum(Name, Module, Ctx) ->
 -spec try_enum_member(binary(), #{binary() := [binary()]}) ->
     {ok, {enum_member, binary()}} | error.
 try_enum_member(Name, Enums) ->
-    case split_member(Name) of
+    case split_ref(Name) of
         {EnumName, Member} ->
             case Enums of
                 #{EnumName := Members} -> member_if_declared(Member, Members);
@@ -1425,15 +1422,6 @@ find_first(Try, [Candidate | Rest]) ->
             find_first(Try, Rest);
         {ok, _} = Found ->
             Found
-    end.
-
--spec split_member(binary()) -> {binary(), binary()} | error.
-split_member(Name) ->
-    case binary:split(Name, <<".">>) of
-        [EnumName, Member] ->
-            {EnumName, Member};
-        _ ->
-            error
     end.
 
 -spec in_range(i8 | i16 | i32 | i64, integer()) -> boolean().

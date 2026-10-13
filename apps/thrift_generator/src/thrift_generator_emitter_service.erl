@@ -228,9 +228,7 @@ expand_structs([Name | Rest], ByName, Seen) ->
         false ->
             FieldRefs = [
                 ref_names(F#tg_field.type)
-             || {_, S} <- maps:to_list(ByName),
-                S#tg_struct.name =:= Name,
-                F <- S#tg_struct.fields
+             || F <- (maps:get(Name, ByName))#tg_struct.fields
             ],
             expand_structs(lists:append(FieldRefs) ++ Rest, ByName, Seen#{Name => true})
     end.
