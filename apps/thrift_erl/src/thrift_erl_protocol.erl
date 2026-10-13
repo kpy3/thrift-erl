@@ -38,9 +38,11 @@ The module also hosts what the implementations share:
   `TApplicationException` descriptor with its code-to-name table, plus
   the shared encode/decode of that exception payload;
 - cold-path helpers the three implementations would otherwise carry
-  three copies of: enum member conversion, required-field bookkeeping,
-  the message-type table, struct resolution through `struct_info/1`
-  with the schema cache, and the per-process memo over inline
+  three copies of: enum member conversion, the encode-time union and
+  required-field checks with the decode-time required marking, the
+  message-type table, struct resolution through `struct_info/1` with
+  the schema cache, the specialized-codec probe of the generated
+  per-protocol index, and the per-process memo over inline
   descriptors.
 
 Hot-path pieces stay in the implementations on purpose: the per-type
@@ -58,6 +60,9 @@ helpers work on wire shapes only they understand.
     enum_to_int/2,
     enum_from_int/2,
     all_present/2,
+    check_present_fields/5,
+    mark_present/2,
+    codec/4,
     struct_fields/1,
     resolve_struct/4,
     memo_compiled/5
@@ -262,6 +267,44 @@ all_present([Name | Rest], Map) ->
         #{} -> false
     end.
 
+%% The encode-time union/required checks of the three engines: a union
+%% must carry exactly one declared field, any other kind every required
+%% one. `FieldName' extracts the wire name from the protocol's own
+%% compiled field tuple, so one body serves all three field shapes and
+%% the error tags stay identical everywhere.
+
+-spec check_present_fields(
+    struct | union | exception, [binary()], [tuple()], struct_value(), fun((tuple()) -> binary())
+) ->
+    ok | {error, term()}.
+check_present_fields(union, _ReqNames, Fields, Map, FieldName) ->
+    Present = [FieldName(Field) || Field <- Fields, maps:is_key(FieldName(Field), Map)],
+    case length(Present) of
+        1 -> ok;
+        0 -> {error, {encode, union_empty}};
+        _ -> {error, {encode, union_multiple}}
+    end;
+check_present_fields(_Kind, ReqNames, _Fields, Map, _FieldName) ->
+    %% Fast path walks the (usually empty) required list with early
+    %% exit; the full missing list is only built on the error path.
+    case all_present(ReqNames, Map) of
+        true ->
+            ok;
+        false ->
+            Missing = [Name || Name <- ReqNames, not maps:is_key(Name, Map)],
+            {error, {encode, {missing_required_fields, Missing}}}
+    end.
+
+%% Removes a satisfied required field from the decode-time required map
+%% (id to name) once its value has been decoded.
+
+-spec mark_present(#{integer() => binary()}, integer()) -> #{integer() => binary()}.
+mark_present(Required, Id) ->
+    case Required of
+        #{Id := _} -> maps:remove(Id, Required);
+        #{} -> Required
+    end.
+
 %% The fields of a struct descriptor, resolving a ref through the
 %% descriptor module's `struct_info/1`.
 
@@ -331,6 +374,64 @@ resolve_struct(Mod, Module, Name, Compile) ->
             end;
         Compiled ->
             {ok, Compiled}
+    end.
+
+%% The specialized-codec probe: a generated types module exports one
+%% index per protocol (`binary_codec`/`compact_codec`/`json_codec`)
+%% handing out its per-struct function pairs. The persistent_term cache
+%% stores only whether the module exports the index — the funs come
+%% fresh from the module on every call, so reloading a types module (as
+%% the test suite does) never leaves a fun from a purged version in the
+%% cache. The export fact is still cached once, so a module without the
+%% index pays the probe once; the key includes the protocol module
+%% because the three protocols probe different index functions of the
+%% same module. Version drift between a cached export and the current
+%% module remains the documented no-hot-swap scenario (see the protocol
+%% moduledocs).
+
+-spec codec(module(), module(), binary(), atom()) -> {ok, fun(), fun()} | error.
+codec(Mod, Module, Name, Index) ->
+    Key = {Mod, codec_export, Module},
+    case persistent_term:get(Key, probe) of
+        yes ->
+            case probe(Module, Name, Index) of
+                {ok, _, _} = Found ->
+                    Found;
+                none ->
+                    error
+            end;
+        no ->
+            error;
+        probe ->
+            Found = probe(Module, Name, Index),
+            persistent_term:put(
+                Key,
+                case Found of
+                    {ok, _, _} -> yes;
+                    none -> no
+                end
+            ),
+            case Found of
+                {ok, _, _} -> Found;
+                none -> error
+            end
+    end.
+
+-spec probe(module(), binary(), atom()) -> {ok, fun(), fun()} | none.
+probe(Module, Name, Index) ->
+    Loaded =
+        case code:ensure_loaded(Module) of
+            {module, Module} -> true;
+            {error, _} -> false
+        end,
+    case Loaded andalso erlang:function_exported(Module, Index, 1) of
+        true ->
+            case Module:Index(Name) of
+                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
+                error -> none
+            end;
+        false ->
+            none
     end.
 
 %% The per-process memo over inline `{Kind, Fields}` descriptors

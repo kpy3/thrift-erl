@@ -464,60 +464,9 @@ decode_ref_struct(Module, Name, Bin) ->
             end
     end.
 
-%% The specialized-codec probe: generated types modules export
-%% `binary_codec/1` handing out their per-struct wire function pairs.
-%% The persistent_term cache stores only whether the module exports the
-%% lookup — the funs themselves come fresh from the module on every
-%% call, so reloading a types module (as the test suite does) never
-%% leaves a fun from a purged version in the cache. The export fact is
-%% still cached once, so a module without the export pays the probe
-%% once. Version drift between a cached export and the current module
-%% remains the documented no-hot-swap scenario.
-
 -spec binary_codec(module(), binary()) -> {ok, fun(), fun()} | error.
 binary_codec(Module, Name) ->
-    Key = {?MODULE, codec_export, Module},
-    case persistent_term:get(Key, probe) of
-        yes ->
-            case probe_codec(Module, Name) of
-                {ok, _, _} = Found ->
-                    Found;
-                none ->
-                    error
-            end;
-        no ->
-            error;
-        probe ->
-            Found = probe_codec(Module, Name),
-            persistent_term:put(
-                Key,
-                case Found of
-                    {ok, _, _} -> yes;
-                    none -> no
-                end
-            ),
-            case Found of
-                {ok, _, _} -> Found;
-                none -> error
-            end
-    end.
-
--spec probe_codec(module(), binary()) -> {ok, fun(), fun()} | none.
-probe_codec(Module, Name) ->
-    Loaded =
-        case code:ensure_loaded(Module) of
-            {module, Module} -> true;
-            {error, _} -> false
-        end,
-    case Loaded andalso erlang:function_exported(Module, binary_codec, 1) of
-        true ->
-            case Module:binary_codec(Name) of
-                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
-                error -> none
-            end;
-        false ->
-            none
-    end.
+    thrift_erl_protocol:codec(?MODULE, Module, Name, binary_codec).
 
 %% Compiles an inline `{Kind, Fields}` descriptor (like the params
 %% structs of `function_info/2`), memoized per process. Generated
@@ -570,27 +519,10 @@ encode_fields_c([{Id, W, Name, CType} | Rest], Map) ->
 
 -spec check_present_fields(struct | union | exception, [binary()], [tuple()], struct_value()) ->
     ok | {error, term()}.
-check_present_fields(union, _ReqNames, Fields, Map) ->
-    Present = [Name || {_, _, Name, _CT} <- Fields, maps:is_key(Name, Map)],
-    case length(Present) of
-        1 -> ok;
-        0 -> {error, {encode, union_empty}};
-        _ -> {error, {encode, union_multiple}}
-    end;
-check_present_fields(_Kind, ReqNames, _Fields, Map) ->
-    %% Fast path walks the (usually empty) required list with early
-    %% exit; the full missing list is only built on the error path.
-    case all_present(ReqNames, Map) of
-        true ->
-            ok;
-        false ->
-            Missing = [Name || Name <- ReqNames, not maps:is_key(Name, Map)],
-            {error, {encode, {missing_required_fields, Missing}}}
-    end.
-
--spec all_present([binary()], struct_value()) -> boolean().
-all_present(Names, Map) ->
-    thrift_erl_protocol:all_present(Names, Map).
+check_present_fields(Kind, ReqNames, Fields, Map) ->
+    thrift_erl_protocol:check_present_fields(
+        Kind, ReqNames, Fields, Map, fun({_Id, _Wire, Name, _CType}) -> Name end
+    ).
 
 -spec decode_struct_c(c_struct(), binary()) -> decode_result(struct_value()).
 decode_struct_c(#{by_id := ById, required := Required}, Bin) ->
@@ -612,11 +544,7 @@ decode_struct_fields_c(ById, Required, <<TypeByte:8/big-unsigned, Id:16/big-sign
         #{Id := {TypeByte, CType, Name}} ->
             case decode_c(CType, Rest) of
                 {ok, Value, Rest1} ->
-                    Required1 =
-                        case Required of
-                            #{Id := _} -> maps:remove(Id, Required);
-                            #{} -> Required
-                        end,
+                    Required1 = thrift_erl_protocol:mark_present(Required, Id),
                     decode_struct_fields_c(ById, Required1, Rest1, Acc#{Name => Value});
                 more ->
                     more;

@@ -424,7 +424,7 @@ decode_field_k(ById, Required, Id, Nibble, Bin, LastId, Acc) ->
                     case decode_field_value_k(KType, Nibble, Bin) of
                         {ok, Value, Rest} ->
                             decode_struct_fields_k(
-                                ById, mark_present(Required, Id), Rest, LastId, Acc#{Name => Value}
+                                ById, thrift_erl_protocol:mark_present(Required, Id), Rest, LastId, Acc#{Name => Value}
                             );
                         more ->
                             more;
@@ -440,13 +440,6 @@ decode_field_k(ById, Required, Id, Nibble, Bin, LastId, Acc) ->
                 more -> more;
                 {error, _} = Error -> Error
             end
-    end.
-
--spec mark_present(#{integer() => binary()}, integer()) -> #{integer() => binary()}.
-mark_present(Required, Id) ->
-    case Required of
-        #{Id := _} -> maps:remove(Id, Required);
-        #{} -> Required
     end.
 
 %% A boolean field's payload rides in the header nibble; every other
@@ -500,25 +493,10 @@ k_wire({k_unsupported, _, _}) -> 0.
     struct | union | exception, [binary()], [{integer(), k_type(), binary()}], thrift_erl_binary:struct_value()
 ) ->
     ok | {error, term()}.
-check_present_fields(union, _ReqNames, Fields, Map) ->
-    Present = [Name || {_, _, Name} <- Fields, maps:is_key(Name, Map)],
-    case length(Present) of
-        1 -> ok;
-        0 -> {error, {encode, union_empty}};
-        _ -> {error, {encode, union_multiple}}
-    end;
-check_present_fields(_Kind, ReqNames, _Fields, Map) ->
-    case all_present(ReqNames, Map) of
-        true ->
-            ok;
-        false ->
-            Missing = [Name || Name <- ReqNames, not maps:is_key(Name, Map)],
-            {error, {encode, {missing_required_fields, Missing}}}
-    end.
-
--spec all_present([binary()], thrift_erl_binary:struct_value()) -> boolean().
-all_present(Names, Map) ->
-    thrift_erl_protocol:all_present(Names, Map).
+check_present_fields(Kind, ReqNames, Fields, Map) ->
+    thrift_erl_protocol:check_present_fields(
+        Kind, ReqNames, Fields, Map, fun({_Id, _KType, Name}) -> Name end
+    ).
 
 %%--------------------------------------------------------------------
 %% Containers
@@ -935,60 +913,9 @@ decode_ref_struct(Module, Name, Bin) ->
             end
     end.
 
-%% The specialized-codec probe: generated types modules export
-%% `compact_codec/1` handing out their per-struct wire function pairs.
-%% The persistent_term cache stores only whether the module exports the
-%% lookup — the funs themselves come fresh from the module on every
-%% call, so reloading a types module (as the test suite does) never
-%% leaves a fun from a purged version in the cache. The export fact is
-%% still cached once, so a module without the export pays the probe
-%% once. Version drift between a cached export and the current module
-%% remains the documented no-hot-swap scenario (see the moduledoc).
-
 -spec compact_codec(module(), binary()) -> {ok, fun(), fun()} | error.
 compact_codec(Module, Name) ->
-    Key = {?MODULE, codec_export, Module},
-    case persistent_term:get(Key, probe) of
-        yes ->
-            case probe_codec(Module, Name) of
-                {ok, _, _} = Found ->
-                    Found;
-                none ->
-                    error
-            end;
-        no ->
-            error;
-        probe ->
-            Found = probe_codec(Module, Name),
-            persistent_term:put(
-                Key,
-                case Found of
-                    {ok, _, _} -> yes;
-                    none -> no
-                end
-            ),
-            case Found of
-                {ok, _, _} -> Found;
-                none -> error
-            end
-    end.
-
--spec probe_codec(module(), binary()) -> {ok, fun(), fun()} | none.
-probe_codec(Module, Name) ->
-    Loaded =
-        case code:ensure_loaded(Module) of
-            {module, Module} -> true;
-            {error, _} -> false
-        end,
-    case Loaded andalso erlang:function_exported(Module, compact_codec, 1) of
-        true ->
-            case Module:compact_codec(Name) of
-                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
-                error -> none
-            end;
-        false ->
-            none
-    end.
+    thrift_erl_protocol:codec(?MODULE, Module, Name, compact_codec).
 
 -spec memo_compiled(thrift_erl_binary:type_desc(), struct | union | exception, [
     thrift_erl_binary:field_desc()
