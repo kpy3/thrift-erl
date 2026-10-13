@@ -42,6 +42,7 @@
     drain_waits_for_inflight_call/1,
     drain_deadline_expires/1,
     drain_closes_listener_and_idle_connections/1,
+    handshake_timeout_reaches_acceptor/1,
     client_stats/1,
     client_stats_queue_full/1
 ]).
@@ -67,6 +68,7 @@ all() ->
         drain_waits_for_inflight_call,
         drain_deadline_expires,
         drain_closes_listener_and_idle_connections,
+        handshake_timeout_reaches_acceptor,
         client_stats,
         client_stats_queue_full
     ].
@@ -450,6 +452,28 @@ drain_closes_listener_and_idle_connections(_Config) ->
         catch
             _:_ -> ok
         end
+    end.
+
+%% The acceptor stores only whitelisted connection options, and the
+%% accept loop resolves `handshake_timeout' from that stored map: a key
+%% missing from the whitelist would silently fall back to the 5000 ms
+%% default instead of the value the caller named.
+
+handshake_timeout_reaches_acceptor(_Config) ->
+    {ok, Server} =
+        thrift_erl_server:start_link(#{
+            port => 0, handler => ?HANDLER, service => ?SERVICE, handshake_timeout => 250
+        }),
+    try
+        {_, Acceptor, worker, [thrift_erl_acceptor]} =
+            lists:keyfind(acceptor, 1, supervisor:which_children(Server)),
+        %% element 3 of the module-private acceptor state: connection_opts
+        ConnectionOpts = element(3, sys:get_state(Acceptor)),
+        ?assertEqual(250, maps:get(handshake_timeout, ConnectionOpts)),
+        %% what handle_info(accept) resolves the handshake slice from
+        ?assertEqual(250, thrift_erl_options:handshake_timeout(ConnectionOpts))
+    after
+        thrift_erl_server:stop(Server)
     end.
 
 %% Per-connection counters: every caller-facing answer is counted by
