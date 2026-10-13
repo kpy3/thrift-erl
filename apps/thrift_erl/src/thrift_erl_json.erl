@@ -412,7 +412,7 @@ format_double(V) ->
 
 -spec encode_struct_j(j_struct(), struct_value()) -> {ok, iodata()} | {error, term()}.
 encode_struct_j(#{kind := Kind, fields := Fields, required_names := ReqNames}, Map) ->
-    case check_present_fields(Kind, ReqNames, Map) of
+    case check_present_fields(Kind, ReqNames, Fields, Map) of
         ok ->
             case present_field_chunks(Fields, Map, []) of
                 {ok, Chunks} ->
@@ -451,29 +451,14 @@ present_field_chunks([{Id, CJType, Name} | Rest], Map, Acc) ->
             present_field_chunks(Rest, Map, Acc)
     end.
 
--spec check_present_fields(struct | union | exception, [binary()], struct_value()) ->
+-spec check_present_fields(
+    struct | union | exception, [binary()], [{integer(), j_type(), binary()}], struct_value()
+) ->
     ok | {error, term()}.
-check_present_fields(union, _ReqNames, Map) ->
-    case maps:keys(Map) of
-        [_] ->
-            ok;
-        [] ->
-            {error, {encode, union_empty}};
-        _ ->
-            {error, {encode, union_multiple}}
-    end;
-check_present_fields(_Kind, ReqNames, Map) ->
-    case all_present(ReqNames, Map) of
-        true ->
-            ok;
-        false ->
-            Missing = [Name || Name <- ReqNames, not maps:is_key(Name, Map)],
-            {error, {encode, {missing_required_fields, Missing}}}
-    end.
-
--spec all_present([binary()], struct_value()) -> boolean().
-all_present(Names, Map) ->
-    thrift_erl_protocol:all_present(Names, Map).
+check_present_fields(Kind, ReqNames, Fields, Map) ->
+    thrift_erl_protocol:check_present_fields(
+        Kind, ReqNames, Fields, Map, fun({_Id, _CJType, Name}) -> Name end
+    ).
 
 %% The top-level struct decode folds the envelope's closing bracket
 %% (see the moduledoc); nested struct decodes never see one.
@@ -581,7 +566,7 @@ field_value_j(ById, Required, Id, Tag, Bin) ->
                 true ->
                     case decode_j(CJType, Bin) of
                         {ok, Value, Rest} ->
-                            {ok, Value, Rest, mark_present(Required, Id)};
+                            {ok, Value, Rest, thrift_erl_protocol:mark_present(Required, Id)};
                         Other ->
                             Other
                     end;
@@ -608,13 +593,6 @@ maybe_put(undefined, _Value, Acc) ->
     Acc;
 maybe_put(Name, Value, Acc) ->
     Acc#{Name => Value}.
-
--spec mark_present(#{integer() => binary()}, integer()) -> #{integer() => binary()}.
-mark_present(Required, Id) ->
-    case Required of
-        #{Id := _} -> maps:remove(Id, Required);
-        #{} -> Required
-    end.
 
 %%--------------------------------------------------------------------
 %% Containers
@@ -1346,62 +1324,9 @@ resolve_compiled(Module, Name) ->
             {error, {decode, {unknown_struct, {Module, Name}}}}
     end.
 
-%% The specialized-codec probe: generated types modules export
-%% `json_codec/1` handing out their per-struct wire function pairs. The
-%% persistent_term cache stores only whether the module exports the
-%% lookup — the funs themselves come fresh from the module on every
-%% call, so reloading a types module (as the test suite does) never
-%% leaves a fun from a purged version in the cache. The export fact is
-%% still cached once, so a module without the export pays the probe
-%% once. Version drift between a cached export and the current module
-%% remains the documented no-hot-swap scenario (see the moduledoc).
-%% The decode fun of a pair folds the envelope's closing `]` — nested
-%% refs therefore stay on the generic engine (see the moduledoc).
-
 -spec json_codec(module(), binary()) -> {ok, fun(), fun()} | error.
 json_codec(Module, Name) ->
-    Key = {?MODULE, codec_export, Module},
-    case persistent_term:get(Key, probe) of
-        yes ->
-            case probe_codec(Module, Name) of
-                {ok, _, _} = Found ->
-                    Found;
-                none ->
-                    error
-            end;
-        no ->
-            error;
-        probe ->
-            Found = probe_codec(Module, Name),
-            persistent_term:put(
-                Key,
-                case Found of
-                    {ok, _, _} -> yes;
-                    none -> no
-                end
-            ),
-            case Found of
-                {ok, _, _} -> Found;
-                none -> error
-            end
-    end.
-
--spec probe_codec(module(), binary()) -> {ok, fun(), fun()} | none.
-probe_codec(Module, Name) ->
-    Loaded =
-        case code:ensure_loaded(Module) of
-            {module, Module} -> true;
-            {error, _} -> false
-        end,
-    case Loaded andalso erlang:function_exported(Module, json_codec, 1) of
-        true ->
-            case Module:json_codec(Name) of
-                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
-                error -> none
-            end;
-        false ->
-            none
-    end.
+    thrift_erl_protocol:codec(?MODULE, Module, Name, json_codec).
 
 %% Inline `{Kind, Fields}` descriptors (params structs of
 %% `function_info/2`) are literals, so the per-process memo hits on
