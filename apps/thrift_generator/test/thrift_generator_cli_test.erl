@@ -113,7 +113,7 @@ diagnostic_excerpt_test() ->
     ),
     ok.
 
-%% Unreadable sources fall back to the compact path:line: message.
+%% Unreadable sources fall back to the compact path:line[:column]: message.
 
 diagnostic_compact_fallback_test() ->
     Rendered = thrift_generator_diagnostic:format(

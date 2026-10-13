@@ -41,7 +41,7 @@ freshness gate.
 
 Errors render as rebar3/elp-style source excerpts (the offending line
 under a gutter, a `╰──` marker naming the problem); `--compact-errors`
-switches to one-line `path:line: message` entries. The rendering is
+switches to one-line `path:line[:column]: message` entries. The rendering is
 shared with the rebar3 plugin through `format_error/1`.
 """.
 
@@ -186,8 +186,8 @@ command() ->
                 long => "-compact-errors",
                 type => boolean,
                 help => [
-                    "print errors as one-line path:line: message entries"
-                    " instead of the default source-excerpt blocks"
+                    "print errors as one-line path:line[:column]: message"
+                    " entries instead of the default source-excerpt blocks"
                 ]
             }
         ]
