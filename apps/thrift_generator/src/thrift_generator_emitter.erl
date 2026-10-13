@@ -44,7 +44,6 @@ the descriptor terms, which keeps the emitter declarative.
     has_record/1,
     params_desc/2,
     record_form/3,
-    record_mode/1,
     reply_desc/2,
     sanitize/1,
     section_label/1,

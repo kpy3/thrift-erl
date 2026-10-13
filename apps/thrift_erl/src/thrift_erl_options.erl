@@ -42,7 +42,6 @@ default.
     max_frame_size/1,
     active_n/1,
     http_path/1,
-    backlog/1,
     max_connections/1,
     on_event/1
 ]).
@@ -50,7 +49,6 @@ default.
 -define(DEFAULT_TIMEOUT, 5000).
 -define(DEFAULT_MAX_FRAME_SIZE, 64 * 1024 * 1024).
 -define(DEFAULT_ACTIVE_N, 100).
--define(DEFAULT_BACKLOG, 1024).
 -define(DEFAULT_MAX_CONNECTIONS, 1024).
 -define(DEFAULT_HTTP_PATH, <<"/">>).
 
@@ -122,11 +120,6 @@ active_n(Opts) ->
 -spec http_path(map()) -> binary().
 http_path(Opts) ->
     maps:get(http_path, Opts, ?DEFAULT_HTTP_PATH).
-
--doc "The listen backlog, default 1024.".
--spec backlog(map()) -> pos_integer().
-backlog(Opts) ->
-    maps:get(backlog, Opts, ?DEFAULT_BACKLOG).
 
 -doc "The live-connection cap, default 1024.".
 -spec max_connections(map()) -> pos_integer().

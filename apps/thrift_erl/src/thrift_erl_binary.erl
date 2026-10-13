@@ -60,7 +60,6 @@ between incompatible versions.
     decode_message/1,
     encode_application_exception/2,
     decode_application_exception/1,
-    type_id/1,
     struct_fields/1,
     skip_by_wire/2
 ]).
@@ -870,9 +869,8 @@ base_size(uuid) -> 16;
 base_size(string) -> 0;
 base_size(binary) -> 0.
 
-%% Total counterpart of `type_id/1` for compilation: an unknown base
-%% name yields `error` so the codec reports it as a value/type mismatch
-%% instead of crashing.
+%% Total for compilation: an unknown base name yields `error` so the
+%% codec reports it as a value/type mismatch instead of crashing.
 -spec base_wire(base_type() | term()) -> non_neg_integer() | error.
 base_wire(bool) -> ?BOOL;
 base_wire(i8) -> ?I8;
@@ -884,22 +882,6 @@ base_wire(uuid) -> ?UUID;
 base_wire(string) -> ?STRING;
 base_wire(binary) -> ?STRING;
 base_wire(_) -> error.
-
--spec type_id(type_desc()) -> non_neg_integer().
-type_id({base, bool}) -> ?BOOL;
-type_id({base, i8}) -> ?I8;
-type_id({base, i16}) -> ?I16;
-type_id({base, i32}) -> ?I32;
-type_id({base, i64}) -> ?I64;
-type_id({base, double}) -> ?DOUBLE;
-type_id({base, uuid}) -> ?UUID;
-type_id({base, S}) when S =:= string; S =:= binary -> ?STRING;
-type_id({enum, _}) -> ?I32;
-type_id({list, _}) -> ?LIST;
-type_id({set, _}) -> ?SET;
-type_id({set, _, _}) -> ?SET;
-type_id({map, _, _}) -> ?MAP;
-type_id({struct, _}) -> ?STRUCT.
 
 -doc """
 Returns the field descriptors of a struct type descriptor

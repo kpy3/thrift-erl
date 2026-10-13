@@ -38,7 +38,6 @@
     type :: thrift_type(),
     name :: binary(),
     default :: const_value() | undefined,
-    erl = #{} :: erl_annotations(),
     doc = undefined :: doc()
 }).
 
@@ -61,7 +60,6 @@
 -record(tg_enum, {
     name :: binary(),
     values :: [{integer(), binary()}],
-    erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
     line = 0 :: non_neg_integer(),
     %% 1-based column of the opening token (for diagnostics)
@@ -84,7 +82,6 @@
     name :: binary(),
     type :: thrift_type(),
     value :: const_value(),
-    erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
     line = 0 :: non_neg_integer(),
     %% 1-based column of the opening token (for diagnostics)
@@ -106,7 +103,6 @@
     name :: binary(),
     extends :: binary() | undefined,
     functions :: [#tg_function{}],
-    erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
     line = 0 :: non_neg_integer(),
     %% 1-based column of the opening token (for diagnostics)

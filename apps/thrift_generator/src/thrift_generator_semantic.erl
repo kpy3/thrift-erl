@@ -531,7 +531,6 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
             type = Type1,
             name = FieldName,
             default = DefaultResolved,
-            erl = FieldNode#thrift_generator_node.annotations,
             doc = FieldNode#thrift_generator_node.doc
         },
     analyze_fields(Rest, Kind, Next, Seen#{Id => FieldName}, [Field | Acc], Ctx5).
@@ -549,7 +548,6 @@ analyze_enum(Node, {Acc, Ctx}) ->
                 #tg_enum{
                     name = Name,
                     values = lists:reverse(Pairs),
-                    erl = Node#thrift_generator_node.annotations,
                     doc = Node#thrift_generator_node.doc,
                     line = Node#thrift_generator_node.line,
                     col = Node#thrift_generator_node.col
@@ -692,7 +690,6 @@ analyze_const(Node, {Acc, Ctx}) ->
                             name = Name,
                             type = apply_set_default(Type, Ctx1),
                             value = Resolved,
-                            erl = Node#thrift_generator_node.annotations,
                             doc = Node#thrift_generator_node.doc,
                             line = Node#thrift_generator_node.line,
                             col = Node#thrift_generator_node.col
@@ -836,7 +833,6 @@ analyze_service(Node, ByName, InProgress, Ctx0) ->
                     name = Name,
                     extends = Extends,
                     functions = Merged,
-                    erl = Node#thrift_generator_node.annotations,
                     doc = Node#thrift_generator_node.doc,
                     line = Node#thrift_generator_node.line,
                     col = Node#thrift_generator_node.col
