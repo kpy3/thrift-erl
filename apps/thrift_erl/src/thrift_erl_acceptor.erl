@@ -134,6 +134,7 @@ init(Opts) ->
                     protocol,
                     max_frame_size,
                     timeout,
+                    handshake_timeout,
                     idle_timeout,
                     active_n,
                     on_event,
