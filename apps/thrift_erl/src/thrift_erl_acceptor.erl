@@ -296,9 +296,6 @@ start_connection(Socket, #state{connections = Connections} = State) ->
             State
     end.
 
-%% Schedules the next accept when below the connection cap; at the cap
-%% stays silent — the next 'DOWN' resumes accepting.
-
 -spec finish_drain(undefined | {pid(), gen_server:reply_tag()}, #state{}) -> #state{}.
 finish_drain(From, #state{drain_timer = Timer} = State) ->
     case Timer of
@@ -313,6 +310,9 @@ reply_drain(undefined) ->
     ok;
 reply_drain(From) ->
     gen_server:reply(From, ok).
+
+%% Schedules the next accept when below the connection cap; at the cap
+%% stays silent — the next 'DOWN' resumes accepting.
 
 -spec schedule_accept(#state{}) -> #state{}.
 schedule_accept(#state{accepting = true} = State) ->

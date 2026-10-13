@@ -559,9 +559,9 @@ encode_exception_reply(Name, SeqId, ExceptionName, ExceptionValue, Info, #state{
     end,
     case lists:search(Pred, Exceptions) of
         {value, {_, _, _, FieldName, _} = Field} ->
-            %% Encoding the one-field reply struct produces exactly the
-            %% old hand-assembled bytes (field header, value, stop)
-            %% without the connection knowing protocol wire details.
+            %% Encoding the one-field reply struct produces the same
+            %% bytes (field header, value, stop) without the connection
+            %% knowing protocol wire details.
             PayloadDesc = {struct, {struct, [Field]}},
             case (State#state.protocol):encode(PayloadDesc, #{FieldName => ExceptionValue}) of
                 {ok, Payload} ->
@@ -651,7 +651,7 @@ function_name(Name) ->
 %%--------------------------------------------------------------------
 
 %% One timer guards the stream whether it is idle (empty buffer) or
-%% mid-message: the receive-timeout semantics of the old passive loop.
+%% mid-message.
 
 -spec arm_idle_timer(#state{}) -> #state{}.
 arm_idle_timer(#state{timeout = infinity} = State) ->

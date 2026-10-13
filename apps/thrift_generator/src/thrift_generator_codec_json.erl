@@ -1542,9 +1542,6 @@ dec_pairs_clauses(DecPairs, DecPair) ->
         ])
     ].
 
-%% One pair: `:`, the value decode, then the key text conversion — the
-%% generic decode_pair_j order.
-
 %% One pair as its own function: `:`, the value decode, then the key
 %% text conversion — the generic decode_pair_j order, answering
 %% {ok, Key, {Value, Rest}}. A function (not an inlined tree) keeps the
