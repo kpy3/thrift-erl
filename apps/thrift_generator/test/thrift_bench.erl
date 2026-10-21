@@ -19,12 +19,12 @@ Manual codec-level benchmark of the protocol implementations in the
 repository, measured with erlperf and driven from the same ThriftTest
 fixture as the golden interop suite:
 
-- **ours (binary)** — `thrift_erl_binary` over the ref descriptors of
+- **ours (binary)** — `thrift_runtime_binary` over the ref descriptors of
   the in-memory generated `goldentest_types` module, which engages the
   specialized per-struct wire codecs (the path generated code takes);
-- **ours (compact)** — `thrift_erl_compact` over the same ref
+- **ours (compact)** — `thrift_runtime_compact` over the same ref
   descriptors and its specialized codecs;
-- **ours (json)** — `thrift_erl_json` over the same ref descriptors
+- **ours (json)** — `thrift_runtime_json` over the same ref descriptors
   and its specialized codecs;
 - **reference (binary)** — the vendored Apache Thrift 0.25.0 Erlang
   runtime (`thrift_binary_protocol` over `thrift_membuffer_transport`)
@@ -80,7 +80,7 @@ two implementations on the same machine are meaningful.
 -type case_spec() :: #{
     name := binary(),
     official_name := atom(),
-    our_value := thrift_erl_binary:struct_value(),
+    our_value := thrift_runtime_binary:struct_value(),
     official_value := tuple(),
     official_check := fun((tuple()) -> ok)
 }.
@@ -168,16 +168,16 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     %% specialized codecs — the path generated code takes. The inline
     %% `Desc' is always the generic interpreter.
     BinDesc = {struct, {ref, goldentest_types, Name}},
-    {ok, Encoded} = thrift_erl_binary:encode(BinDesc, OurValue),
+    {ok, Encoded} = thrift_runtime_binary:encode(BinDesc, OurValue),
     BinaryWire = iolist_to_binary(Encoded),
-    {ok, CompactEncoded} = thrift_erl_compact:encode(BinDesc, OurValue),
+    {ok, CompactEncoded} = thrift_runtime_compact:encode(BinDesc, OurValue),
     CompactWire = iolist_to_binary(CompactEncoded),
-    {ok, JsonEncoded} = thrift_erl_json:encode(BinDesc, OurValue),
+    {ok, JsonEncoded} = thrift_runtime_json:encode(BinDesc, OurValue),
     JsonWire = iolist_to_binary(JsonEncoded),
     %% The official JSON reader's unit is the message array (it primes
     %% its parser on `read(message_begin)'), so the JSON decode side is
     %% measured at message level for both implementations.
-    JsonMessage = iolist_to_binary(thrift_erl_json:encode_message(call, <<"bench">>, 0, JsonWire)),
+    JsonMessage = iolist_to_binary(thrift_runtime_json:encode_message(call, <<"bench">>, 0, JsonWire)),
 
     %% Correctness before timing. The specialized and generic paths of
     %% the same protocol must produce identical bytes, every codec path
@@ -185,51 +185,51 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     %% protocol must accept our bytes for that protocol — the same
     %% wire-compatibility proof the golden suite runs over TCP, here at
     %% the codec level.
-    {ok, GenericBinary} = thrift_erl_binary:encode(Desc, OurValue),
+    {ok, GenericBinary} = thrift_runtime_binary:encode(Desc, OurValue),
     ?assertEqual(BinaryWire, iolist_to_binary(GenericBinary)),
-    {ok, GenericCompact} = thrift_erl_compact:encode(Desc, OurValue),
+    {ok, GenericCompact} = thrift_runtime_compact:encode(Desc, OurValue),
     ?assertEqual(CompactWire, iolist_to_binary(GenericCompact)),
-    {ok, GenericJson} = thrift_erl_json:encode(Desc, OurValue),
+    {ok, GenericJson} = thrift_runtime_json:encode(Desc, OurValue),
     ?assertEqual(JsonWire, iolist_to_binary(GenericJson)),
-    {ok, OurDecoded, <<>>} = thrift_erl_binary:decode(BinDesc, BinaryWire),
+    {ok, OurDecoded, <<>>} = thrift_runtime_binary:decode(BinDesc, BinaryWire),
     ?assertEqual(OurValue, OurDecoded),
     {_, {ok, OfficialDecoded}} = official_decode(BinaryWire, binary, OfficialName),
     Check(OfficialDecoded),
-    {ok, OurCompactDecoded, <<>>} = thrift_erl_compact:decode(BinDesc, CompactWire),
+    {ok, OurCompactDecoded, <<>>} = thrift_runtime_compact:decode(BinDesc, CompactWire),
     ?assertEqual(OurValue, OurCompactDecoded),
     {_, {ok, CompactDecoded}} = official_decode(CompactWire, compact, OfficialName),
     Check(CompactDecoded),
-    {ok, OurJsonDecoded, <<>>} = thrift_erl_json:decode(BinDesc, JsonWire),
+    {ok, OurJsonDecoded, <<>>} = thrift_runtime_json:decode(BinDesc, JsonWire),
     ?assertEqual(OurValue, OurJsonDecoded),
     {_, {ok, JsonDecoded}} = official_decode_message(JsonMessage, OfficialName),
     Check(JsonDecoded),
 
     %% Ours: the specialized codecs (ref descriptors).
-    SpecBinaryEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(BinDesc, OurValue) end),
+    SpecBinaryEncode = erlbench(fun() -> {ok, _} = thrift_runtime_binary:encode(BinDesc, OurValue) end),
     SpecBinaryDecode =
-        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(BinDesc, BinaryWire) end),
-    SpecCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(BinDesc, OurValue) end),
+        erlbench(fun() -> {ok, _, <<>>} = thrift_runtime_binary:decode(BinDesc, BinaryWire) end),
+    SpecCompactEncode = erlbench(fun() -> {ok, _} = thrift_runtime_compact:encode(BinDesc, OurValue) end),
     SpecCompactDecode =
-        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(BinDesc, CompactWire) end),
-    SpecJsonEncode = erlbench(fun() -> {ok, _} = thrift_erl_json:encode(BinDesc, OurValue) end),
+        erlbench(fun() -> {ok, _, <<>>} = thrift_runtime_compact:decode(BinDesc, CompactWire) end),
+    SpecJsonEncode = erlbench(fun() -> {ok, _} = thrift_runtime_json:encode(BinDesc, OurValue) end),
     SpecJsonDecode =
         erlbench(fun() ->
-            {ok, _, _, _, Payload} = thrift_erl_json:decode_message(JsonMessage),
-            {ok, _, <<>>} = thrift_erl_json:decode(BinDesc, Payload)
+            {ok, _, _, _, Payload} = thrift_runtime_json:decode_message(JsonMessage),
+            {ok, _, <<>>} = thrift_runtime_json:decode(BinDesc, Payload)
         end),
     %% Ours: the generic interpreter over inline descriptors — what a
     %% caller with hand-written struct_info tuples gets.
-    GenBinaryEncode = erlbench(fun() -> {ok, _} = thrift_erl_binary:encode(Desc, OurValue) end),
+    GenBinaryEncode = erlbench(fun() -> {ok, _} = thrift_runtime_binary:encode(Desc, OurValue) end),
     GenBinaryDecode =
-        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_binary:decode(Desc, BinaryWire) end),
-    GenCompactEncode = erlbench(fun() -> {ok, _} = thrift_erl_compact:encode(Desc, OurValue) end),
+        erlbench(fun() -> {ok, _, <<>>} = thrift_runtime_binary:decode(Desc, BinaryWire) end),
+    GenCompactEncode = erlbench(fun() -> {ok, _} = thrift_runtime_compact:encode(Desc, OurValue) end),
     GenCompactDecode =
-        erlbench(fun() -> {ok, _, <<>>} = thrift_erl_compact:decode(Desc, CompactWire) end),
-    GenJsonEncode = erlbench(fun() -> {ok, _} = thrift_erl_json:encode(Desc, OurValue) end),
+        erlbench(fun() -> {ok, _, <<>>} = thrift_runtime_compact:decode(Desc, CompactWire) end),
+    GenJsonEncode = erlbench(fun() -> {ok, _} = thrift_runtime_json:encode(Desc, OurValue) end),
     GenJsonDecode =
         erlbench(fun() ->
-            {ok, _, _, _, Payload} = thrift_erl_json:decode_message(JsonMessage),
-            {ok, _, <<>>} = thrift_erl_json:decode(Desc, Payload)
+            {ok, _, _, _, Payload} = thrift_runtime_json:decode_message(JsonMessage),
+            {ok, _, <<>>} = thrift_runtime_json:decode(Desc, Payload)
         end),
     ReferenceBinaryEncode =
         erlbench(fun() -> ok = official_write(OfficialValue, OfficialName, binary) end),
@@ -274,7 +274,7 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     ]),
     ok.
 
--spec xtruct_map(binary(), integer(), integer(), integer()) -> thrift_erl_binary:struct_value().
+-spec xtruct_map(binary(), integer(), integer(), integer()) -> thrift_runtime_binary:struct_value().
 xtruct_map(StringThing, ByteThing, I32Thing, I64Thing) ->
     #{
         <<"string_thing">> => StringThing,
@@ -292,7 +292,7 @@ official_xtruct(StringThing, ByteThing, I32Thing, I64Thing) ->
         i64_thing = I64Thing
     }.
 
--spec our_insanity() -> thrift_erl_binary:struct_value().
+-spec our_insanity() -> thrift_runtime_binary:struct_value().
 our_insanity() ->
     #{
         <<"userMap">> => #{

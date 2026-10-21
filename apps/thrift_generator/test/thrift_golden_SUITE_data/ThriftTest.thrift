@@ -3,7 +3,7 @@
 // (see vendor/apache-thrift-erl/ThriftTest.thrift) with the `uuid` base
 // type removed - the official Erlang generator (0.25.0) does not support
 // `uuid`, so both sides of the interop pair generate from this variant.
-// Our own uuid support is covered by the thrift_erl unit tests.
+// Our own uuid support is covered by the thrift_runtime unit tests.
 // Do not edit; regenerate from the upstream file instead.
 
 /*

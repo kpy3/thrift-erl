@@ -37,7 +37,7 @@ the shared form-building vocabulary lives in
 -include("thrift_generator_model.hrl").
 
 %% The client's default per-call timeout mirrors the runtime's
-%% `thrift_erl_options:connect_timeout` default.
+%% `thrift_runtime_options:connect_timeout` default.
 -define(DEFAULT_TIMEOUT, 5000).
 
 %%--------------------------------------------------------------------
@@ -169,7 +169,7 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
         thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [
             %% Only parameter types reach the -callback specs (the reply
-            %% is hidden behind thrift_erl_service:handler_result(),
+            %% is hidden behind thrift_runtime_service:handler_result(),
             %% declared exceptions never appear there), so records
             %% reachable only through replies or throws are unused as
             %% far as the compiler can see.
@@ -237,7 +237,7 @@ expand_structs([Name | Rest], ByName, Seen) ->
 -spec callback_form(#tg_function{}, #ectx{}) -> erl_syntax:forms().
 callback_form(F, Ctx) ->
     ParamTypes = [thrift_generator_emitter:erlang_type(Field#tg_field.type, Ctx) || Field <- F#tg_function.params],
-    RetType = thrift_generator_emitter_syntax:remote_type(thrift_erl_service, handler_result),
+    RetType = thrift_generator_emitter_syntax:remote_type(thrift_runtime_service, handler_result),
     FunType = thrift_generator_emitter_syntax:fun_type(ParamTypes, RetType),
     thrift_generator_emitter_syntax:doc_form(F#tg_function.doc, callback_doc(F)) ++
         callback_attribute(F#tg_function.name, length(ParamTypes), FunType).
@@ -260,7 +260,7 @@ callback_doc(F) ->
                 io_lib:format(
                     "Handler callback for ~ts: called as"
                     " `Handler:~ts(Args...)` in declaration order; answers"
-                    " a `thrift_erl_service:handler_result()`.",
+                    " a `thrift_runtime_service:handler_result()`.",
                     [Name, Name]
                 )
             )
@@ -279,7 +279,7 @@ server_forms(Svc, Mod, TypesMod, ServerMod) ->
         unicode:characters_to_binary([
             io_lib:format(
                 "Server entry points for the ~ts service. `start_link/1`"
-                " takes the same options map as `thrift_erl_server`"
+                " takes the same options map as `thrift_runtime_server`"
                 " (minus `service`).",
                 [Svc#tg_service.name]
             ),
@@ -299,7 +299,7 @@ server_forms(Svc, Mod, TypesMod, ServerMod) ->
         ),
     thrift_generator_emitter_syntax:header(ServerMod, Mod#tg_module.path) ++
         thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
-        [thrift_generator_emitter_syntax:attribute(behaviour, thrift_erl_service)] ++
+        [thrift_generator_emitter_syntax:attribute(behaviour, thrift_runtime_service)] ++
         [
             thrift_generator_emitter_syntax:export_form([{service_info, 0}, {start_link, 1}, {stop, 1}, {port, 1}])
         ] ++
@@ -317,26 +317,26 @@ server_forms(Svc, Mod, TypesMod, ServerMod) ->
             undefined,
             <<
                 "Starts the server supervisor with the given options (the"
-                " same map as `thrift_erl_server`, minus `service`)."
+                " same map as `thrift_runtime_server`, minus `service`)."
             >>
         ) ++
         thrift_generator_emitter_syntax:fn_form(start_link, [
             erl_syntax:clause(
                 [V("Opts")], none, [
-                    thrift_generator_emitter_syntax:application(thrift_erl_server, start_link, [MapUpdate])
+                    thrift_generator_emitter_syntax:application(thrift_runtime_server, start_link, [MapUpdate])
                 ]
             )
         ]) ++
         thrift_generator_emitter_syntax:doc_form(undefined, <<"Stops the server and every connection it accepted.">>) ++
         thrift_generator_emitter_syntax:fn_form(stop, [
             erl_syntax:clause(
-                [V("Pid")], none, [thrift_generator_emitter_syntax:application(thrift_erl_server, stop, [V("Pid")])]
+                [V("Pid")], none, [thrift_generator_emitter_syntax:application(thrift_runtime_server, stop, [V("Pid")])]
             )
         ]) ++
         thrift_generator_emitter_syntax:doc_form(undefined, <<"The port the server listens on.">>) ++
         thrift_generator_emitter_syntax:fn_form(port, [
             erl_syntax:clause(
-                [V("Pid")], none, [thrift_generator_emitter_syntax:application(thrift_erl_server, port, [V("Pid")])]
+                [V("Pid")], none, [thrift_generator_emitter_syntax:application(thrift_runtime_server, port, [V("Pid")])]
             )
         ]).
 
@@ -346,7 +346,7 @@ client_forms(Svc, Mod, ServerMod, ClientMod, Ctx) ->
         unicode:characters_to_binary([
             io_lib:format(
                 "Typed client for the ~ts service. `start_link/1` takes the"
-                " same options map as `thrift_erl_client` (minus `service`).~ts",
+                " same options map as `thrift_runtime_client` (minus `service`).~ts",
                 [
                     Svc#tg_service.name,
                     repr_text(Svc, Mod, " Struct arguments and results are converted to ~ts at the boundary.")
@@ -368,7 +368,7 @@ client_forms(Svc, Mod, ServerMod, ClientMod, Ctx) ->
 
 %% One wrapper pair per function: `Name/N` applies the default timeout,
 %% `Name/(N+1)` the call itself. Non-oneway replies come back through
-%% `thrift_erl_record:call_result_from_wire`, so records surface here.
+%% `thrift_runtime_record:call_result_from_wire`, so records surface here.
 
 -spec client_fn(#tg_function{}, #ectx{}) ->
     {[erl_syntax:forms()], [erl_syntax:forms()]}.
@@ -386,7 +386,7 @@ client_fn(F, Ctx) ->
     %% client a foreign descriptor.
     WireArgs =
         erl_syntax:application(
-            erl_syntax:atom(thrift_erl_record),
+            erl_syntax:atom(thrift_runtime_record),
             erl_syntax:atom(args_to_wire),
             [
                 thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:params_desc(F, Ctx)),
@@ -402,7 +402,7 @@ client_fn(F, Ctx) ->
                 RawCall = client_bridge_call(call, WireName, WireArgs),
                 [
                     erl_syntax:application(
-                        erl_syntax:atom(thrift_erl_record),
+                        erl_syntax:atom(thrift_runtime_record),
                         erl_syntax:atom(call_result_from_wire),
                         [
                             thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:reply_desc(F, Ctx)),
@@ -424,14 +424,14 @@ client_fn(F, Ctx) ->
             thrift_generator_emitter_syntax:fn_form(Name, [LongClause]),
     {Exports, Forms}.
 
-%% The long-form wrapper delegates to `thrift_erl_client` either the
+%% The long-form wrapper delegates to `thrift_runtime_client` either the
 %% oneway or the request/response call; both take the same shape.
 
 -spec client_bridge_call(oneway | call, erl_syntax:syntaxTree(), erl_syntax:syntaxTree()) ->
     erl_syntax:syntaxTree().
 client_bridge_call(Method, FunName, WireArgs) ->
     erl_syntax:application(
-        erl_syntax:atom(thrift_erl_client),
+        erl_syntax:atom(thrift_runtime_client),
         erl_syntax:atom(Method),
         [
             erl_syntax:variable("Client"),
@@ -501,9 +501,9 @@ spec_form(F, Arity, RetType) ->
 
 -spec call_ret() -> erl_syntax:syntaxTree().
 call_ret() ->
-    thrift_generator_emitter_syntax:remote_type(thrift_erl_client, call_result).
+    thrift_generator_emitter_syntax:remote_type(thrift_runtime_client, call_result).
 
-%% `ok | {error, term()}` for oneway, `thrift_erl_client:call_result()`
+%% `ok | {error, term()}` for oneway, `thrift_runtime_client:call_result()`
 %% for regular calls.
 
 -spec oneway_ret(#tg_function{}) -> erl_syntax:syntaxTree().
@@ -529,7 +529,7 @@ start_link_form(ServerMod) ->
         undefined,
         <<
             "Connects to the server and links the client to the caller;"
-            " the options map is `thrift_erl_client`'s, minus `service`."
+            " the options map is `thrift_runtime_client`'s, minus `service`."
         >>
     ) ++
         thrift_generator_emitter_syntax:fn_form(start_link, [
@@ -538,7 +538,7 @@ start_link_form(ServerMod) ->
                 none,
                 [
                     erl_syntax:application(
-                        erl_syntax:atom(thrift_erl_client),
+                        erl_syntax:atom(thrift_runtime_client),
                         erl_syntax:atom(start_link),
                         [MapUpdate]
                     )
@@ -561,7 +561,7 @@ stop_form() ->
                 none,
                 [
                     erl_syntax:application(
-                        erl_syntax:atom(thrift_erl_client),
+                        erl_syntax:atom(thrift_runtime_client),
                         erl_syntax:atom(stop),
                         [erl_syntax:variable("Pid")]
                     )

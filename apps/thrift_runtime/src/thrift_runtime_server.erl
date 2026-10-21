@@ -1,0 +1,124 @@
+%% Copyright 2026 Sergei Yelin
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%    http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+
+-module(thrift_runtime_server).
+
+-moduledoc """
+Supervision root of a Thrift server: one acceptor, restartable.
+
+`start_link(Opts)` takes the same map as `thrift_runtime_acceptor` (plus an
+optional `name`); the acceptor is a permanent child, so a crashing
+listener comes back. All configuration is given here at creation time.
+
+Example:
+
+```
+{ok, Server} = thrift_runtime_server:start_link(#{port => 0, handler => my_handler, service => my_service}),
+{ok, Port} = thrift_runtime_server:port(Server).
+```
+
+Multiplexed (several services on one port, clients opt in with the
+`multiplex` option on the client side):
+
+```
+{ok, Server} = thrift_runtime_server:start_link(#{
+    port => 0,
+    services => #{
+        <<"First">> => #{handler => first_handler, service => first_service},
+        <<"Second">> => #{handler => second_handler, service => second_service}
+    }
+}).
+```
+""".
+
+-behaviour(supervisor).
+
+-export([start_link/1, stop/1, stop/2, port/1]).
+
+-export([init/1]).
+
+-export_type([options/0]).
+
+-type options() :: thrift_runtime_acceptor:options().
+-doc """
+Starts the server supervision tree.
+
+A failed init answers `{error, Reason}` only: the trapping around the
+start shields the caller from the failed supervisor's exit race, the
+same dance `thrift_runtime_client` does.
+""".
+-spec start_link(options()) -> {ok, pid()} | ignore | {error, term()}.
+start_link(Opts) ->
+    Name = maps:get(name, Opts, ?MODULE),
+    process_flag(trap_exit, true),
+    Result = supervisor:start_link({local, Name}, ?MODULE, Opts),
+    process_flag(trap_exit, false),
+    Result.
+
+%% gen_server:stop, not supervisor:stop/1: the supervisor IS a
+%% gen_server, this is literally what supervisor:stop/1 does — but that
+%% wrapper only exists from OTP 29 on, and the runtime builds on 28.
+%% Waiting with `infinity' lets a busy connection child answer its
+%% in-flight call before its own shutdown.
+
+-doc "Stops the server: the acceptor and, through it, all connections.".
+-spec stop(pid() | atom()) -> ok.
+stop(Server) ->
+    gen_server:stop(Server, normal, infinity).
+
+-doc """
+Stops the server, optionally draining first.
+
+With `#{drain := Timeout}` the acceptor closes the listen socket, lets
+in-flight calls finish (up to `Timeout`; `infinity` allowed) and lets
+pending accepts unwind, then the supervision tree is stopped as by
+`stop/1` — whatever the deadline leaves over is terminated the normal
+supervised way, so a connection stuck past the deadline fails its
+calls. Without the key this is plain `stop/1`.
+""".
+-spec stop(pid() | atom(), #{drain => timeout()}) -> ok.
+stop(Server, #{drain := Timeout}) ->
+    Acceptor = whereis_acceptor(Server),
+    ok = thrift_runtime_acceptor:drain(Acceptor, Timeout),
+    stop(Server);
+stop(Server, _Opts) ->
+    stop(Server).
+
+-doc "Returns the bound port (useful with `port = 0`).".
+-spec port(pid() | atom()) -> {ok, inet:port_number()}.
+port(Server) ->
+    Acceptor = whereis_acceptor(Server),
+    thrift_runtime_acceptor:port(Acceptor).
+
+-doc false.
+-spec init(options()) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
+init(Opts) ->
+    Children = [
+        #{
+            id => acceptor,
+            start => {thrift_runtime_acceptor, start_link, [maps:remove(name, Opts)]},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker
+        }
+    ],
+    {ok, {#{strategy => one_for_all, intensity => 5, period => 10}, Children}}.
+
+-spec whereis_acceptor(pid() | atom()) -> pid().
+whereis_acceptor(Server) ->
+    [Acceptor] = [
+        Pid
+     || {_, Pid, worker, [thrift_runtime_acceptor]} <- supervisor:which_children(Server)
+    ],
+    Acceptor.

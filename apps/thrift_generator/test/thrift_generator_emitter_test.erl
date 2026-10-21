@@ -375,11 +375,11 @@ set_annotation_test() ->
     ?assertEqual({ok, Bin}, t_types:encode_bag(Record)),
 
     %% The wire codec itself stays list-shaped: 2-tuple descriptors and
-    %% raw lists roundtrip through thrift_erl_binary untouched.
+    %% raw lists roundtrip through thrift_runtime_binary untouched.
     WireDesc = {set, {base, i32}},
-    {ok, WireIo} = thrift_erl_binary:encode(WireDesc, [1, 2]),
+    {ok, WireIo} = thrift_runtime_binary:encode(WireDesc, [1, 2]),
     WireBin = iolist_to_binary(WireIo),
-    ?assertEqual({ok, [1, 2], <<>>}, thrift_erl_binary:decode(WireDesc, WireBin)),
+    ?assertEqual({ok, [1, 2], <<>>}, thrift_runtime_binary:decode(WireDesc, WireBin)),
     ok.
 
 %% The namespace-level erl.set is the file-wide default: unannotated
@@ -554,7 +554,7 @@ native_representation_test() ->
     {ok, Bin} = t_types:encode_p(#{x => 7, label => <<"hi">>}),
     {ok, #{x := 7, label := <<"hi">>}} = t_types:decode_p(Bin, map),
     ?assertEqual({error, {no_record, p}}, t_types:decode_p(Bin, record)),
-    case thrift_erl_native:supported() of
+    case thrift_runtime_native:supported() of
         true ->
             {ok, Native} = t_types:decode_p(Bin),
             ?assertEqual(t_types, records:get_module(Native)),
@@ -880,7 +880,7 @@ doc_pipeline_test() ->
     ),
     ?assertMatch(
         {match, _},
-        re:run(TypesSrc, <<"whole binary into the given `thrift_erl:repr\\(\\)`">>)
+        re:run(TypesSrc, <<"whole binary into the given `thrift_runtime:repr\\(\\)`">>)
     ),
     %% enum and constant docs
     ?assertMatch({match, _}, re:run(TypesSrc, <<"Color codes\\.\\\\n\\\\nMaps an enum member">>)),
