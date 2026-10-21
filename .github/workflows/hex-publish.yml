@@ -70,17 +70,14 @@ jobs:
       - name: Publish thrift_runtime
         working-directory: apps/thrift_runtime
         run: |
-          rebar3 edoc
           rebar3 hex publish -y
 
       - name: Publish thrift_generator
         working-directory: apps/thrift_generator
         run: |
-          rebar3 edoc
           rebar3 hex publish -y
 
       - name: Publish rebar3_thrift
         working-directory: apps/rebar3_thrift
         run: |
-          rebar3 edoc
           rebar3 hex publish -y
