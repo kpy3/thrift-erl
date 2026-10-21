@@ -20,9 +20,9 @@ Specialized compact-protocol wire codecs emitted into `<mod>_types.erl`.
 The compact sibling of `thrift_generator_codec` (the binary protocol):
 for every struct, union and exception the module gets
 `encode_<prefix>_compact/1` and `decode_<prefix>_compact/1` with the
-same contracts as `thrift_erl_compact:encode/2` and `decode/2`, plus
+same contracts as `thrift_runtime_compact:encode/2` and `decode/2`, plus
 the module-level `compact_codec/1` handing the pair out by wire struct
-name. `thrift_erl_compact` probes that export whenever it meets a
+name. `thrift_runtime_compact` probes that export whenever it meets a
 `{struct, {ref, Module, Name}}` descriptor and dispatches to the
 specialized code, falling back to its descriptor-driven engine for
 modules without the export (hand-written descriptors, inline RPC
@@ -37,7 +37,7 @@ sorted by encoded-key term order, `missing_required_fields` in
 declaration order on encode and ascending field-id order on decode,
 identical error terms, and `more` on every truncated input. Unknown
 field ids are skipped by nibble through the runtime's
-`thrift_erl_compact:skip_nibble/2`. The thrift_codec_test equivalence
+`thrift_runtime_compact:skip_nibble/2`. The thrift_codec_test equivalence
 properties pin all of this against the generic engine.
 
 The `uuid` base type has no compact encoding: encoding through a uuid
@@ -47,7 +47,7 @@ ever matches on decode (a `field_type_mismatch`).
 
 Nesting and naming follow the binary emitter: same-module struct
 references become direct calls to the sibling functions, cross-module
-references go through `thrift_erl_compact:encode/2` and `decode/2`;
+references go through `thrift_runtime_compact:encode/2` and `decode/2`;
 containers get private `*_c` helpers named after the rendered element
 type (the suffix keeps them clear of the binary codec's helpers emitted
 into the same module); enum members are inlined as case clauses at
@@ -302,7 +302,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         <<
             "Encodes the wire representation (a map keyed by binary field"
             " names) with the compact protocol, byte-compatible with"
-            " thrift_erl_compact:encode/2."
+            " thrift_runtime_compact:encode/2."
         >>,
     thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
         [
@@ -473,7 +473,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     Doc =
         <<
             "Decodes the compact protocol into the wire representation,"
-            " byte-compatible with thrift_erl_compact:decode/2; `more` on"
+            " byte-compatible with thrift_runtime_compact:decode/2; `more` on"
             " truncated input, unknown field ids skipped by nibble."
         >>,
     thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
@@ -674,7 +674,7 @@ req_expr(_F) ->
 -spec skip_clause(atom()) -> ast().
 skip_clause(FieldsLoop) ->
     clause([v("Id"), v("Nibble"), v("Bin"), v("Req"), v("Acc")], none, [
-        'case'(remote(thrift_erl_compact, skip_nibble, [v("Nibble"), v("Bin")]), [
+        'case'(remote(thrift_runtime_compact, skip_nibble, [v("Nibble"), v("Bin")]), [
             ok_bind_clause(v("Rest"), call_local(FieldsLoop, [v("Rest"), v("Req"), v("Acc"), v("Id")])),
             clause([at(more)], none, [at(more)]),
             error_clause()
@@ -780,14 +780,14 @@ struct_encode_call(TypesMod, Local, V, Ctx) when TypesMod =:= Ctx#ectx.current -
     {Encode, _Decode} = struct_compact_pair(Local, Ctx),
     call_local(Encode, [V]);
 struct_encode_call(TypesMod, Local, V, _Ctx) ->
-    remote(thrift_erl_compact, encode, [literal({struct, {ref, TypesMod, Local}}), V]).
+    remote(thrift_runtime_compact, encode, [literal({struct, {ref, TypesMod, Local}}), V]).
 
 -spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
 struct_decode_call(TypesMod, Local, Bin, Ctx) when TypesMod =:= Ctx#ectx.current ->
     {_Encode, Decode} = struct_compact_pair(Local, Ctx),
     call_local(Decode, [Bin]);
 struct_decode_call(TypesMod, Local, Bin, _Ctx) ->
-    remote(thrift_erl_compact, decode, [literal({struct, {ref, TypesMod, Local}}), Bin]).
+    remote(thrift_runtime_compact, decode, [literal({struct, {ref, TypesMod, Local}}), Bin]).
 
 -spec decode_compact_expr(wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}, string()) ->
     ast().
@@ -1437,11 +1437,11 @@ compact_codec_forms(Mod, Ctx) ->
     Doc =
         <<
             "The compact-protocol wire codecs of this module's structs, by wire"
-            " struct name: `{ok, {Encode, Decode}}' where `Encode/1` takes the"
-            " wire map to `{ok, iodata()} | {error, _}' and `Decode/1` takes a"
-            " binary to `{ok, WireMap, Rest} | more | {error, _}' -- the same"
-            " contracts as `thrift_erl_compact:encode/2` and `decode/2'."
-            " Unknown names answer `error'; `thrift_erl_compact' probes this"
+            " struct name: `{ok, {Encode, Decode}}` where `Encode/1` takes the"
+            " wire map to `{ok, iodata()} | {error, _}` and `Decode/1` takes a"
+            " binary to `{ok, WireMap, Rest} | more | {error, _}` -- the same"
+            " contracts as `thrift_runtime_compact:encode/2` and `decode/2`."
+            " Unknown names answer `error`; `thrift_runtime_compact` probes this"
             " export to dispatch named-struct references to the specialized"
             " code."
         >>,

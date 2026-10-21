@@ -20,9 +20,9 @@ Specialized binary-protocol wire codecs emitted into `<mod>_types.erl`.
 For every struct, union and exception the module gets
 `encode_<prefix>_wire/1` and `decode_<prefix>_wire/1`: direct
 binary-pattern code over the wire representation (maps keyed by binary
-field names), with the same contracts as `thrift_erl_binary:encode/2`
-and `thrift_erl_binary:decode/2`. The module-level `binary_codec/1`
-hands the function pair out by wire struct name; `thrift_erl_binary`
+field names), with the same contracts as `thrift_runtime_binary:encode/2`
+and `thrift_runtime_binary:decode/2`. The module-level `binary_codec/1`
+hands the function pair out by wire struct name; `thrift_runtime_binary`
 probes that export whenever it meets a `{struct, {ref, Module, Name}}`
 descriptor and dispatches to the specialized code, falling back to its
 descriptor-driven engine for modules without the export (hand-written
@@ -40,7 +40,7 @@ of this against the generic engine.
 
 Nesting: same-module struct references become direct calls to the
 sibling wire functions; cross-module references go through
-`thrift_erl_binary:encode/2` and `decode/2`, which re-enter the codec
+`thrift_runtime_binary:encode/2` and `decode/2`, which re-enter the codec
 probe. Containers get private `enc_*/dec_*` helpers named after the
 rendered element type; enum members are inlined as case clauses at
 every use site.
@@ -295,7 +295,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         <<
             "Encodes the wire representation (a map keyed by binary field"
             " names) with the binary protocol, byte-compatible with"
-            " thrift_erl_binary:encode/2."
+            " thrift_runtime_binary:encode/2."
         >>,
     thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
         [
@@ -381,7 +381,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     Doc =
         <<
             "Decodes the binary protocol into the wire representation,"
-            " byte-compatible with thrift_erl_binary:decode/2; `more` on"
+            " byte-compatible with thrift_runtime_binary:decode/2; `more` on"
             " truncated input, unknown field ids skipped by wire type."
         >>,
     thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
@@ -512,7 +512,7 @@ field_clauses_one(F, T, FieldsName, Ctx, Enums) ->
 -spec skip_clause(atom()) -> ast().
 skip_clause(FieldsName) ->
     clause([v("_")], none, [
-        'case'(remote(thrift_erl_binary, skip_by_wire, [v("Type"), v("Rest")]), [
+        'case'(remote(thrift_runtime_binary, skip_by_wire, [v("Type"), v("Rest")]), [
             clause([tuple_t([at(ok), v("Rest1")])], none, [
                 call_local(FieldsName, [v("Rest1"), v("Req"), v("Acc")])
             ]),
@@ -615,14 +615,14 @@ struct_encode_call(TypesMod, Local, V, Ctx) when TypesMod =:= Ctx#ectx.current -
     {Encode, _Decode} = struct_wire_pair(Local, Ctx),
     call_local(Encode, [V]);
 struct_encode_call(TypesMod, Local, V, _Ctx) ->
-    remote(thrift_erl_binary, encode, [literal({struct, {ref, TypesMod, Local}}), V]).
+    remote(thrift_runtime_binary, encode, [literal({struct, {ref, TypesMod, Local}}), V]).
 
 -spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
 struct_decode_call(TypesMod, Local, Bin, Ctx) when TypesMod =:= Ctx#ectx.current ->
     {_Encode, Decode} = struct_wire_pair(Local, Ctx),
     call_local(Decode, [Bin]);
 struct_decode_call(TypesMod, Local, Bin, _Ctx) ->
-    remote(thrift_erl_binary, decode, [literal({struct, {ref, TypesMod, Local}}), Bin]).
+    remote(thrift_runtime_binary, decode, [literal({struct, {ref, TypesMod, Local}}), Bin]).
 
 -spec decode_wire_expr(wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}, string()) -> ast().
 decode_wire_expr({base, bool}, Bin, _Ctx, _Enums, Suffix) ->
@@ -1011,11 +1011,11 @@ binary_codec_forms(Mod, Ctx) ->
     Doc =
         <<
             "The binary-protocol wire codecs of this module's structs, by wire"
-            " struct name: `{ok, {Encode, Decode}}' where `Encode/1` takes the"
-            " wire map to `{ok, iodata()} | {error, _}' and `Decode/1` takes a"
-            " binary to `{ok, WireMap, Rest} | more | {error, _}' -- the same"
-            " contracts as `thrift_erl_binary:encode/2` and `decode/2'."
-            " Unknown names answer `error'; `thrift_erl_binary' probes this"
+            " struct name: `{ok, {Encode, Decode}}` where `Encode/1` takes the"
+            " wire map to `{ok, iodata()} | {error, _}` and `Decode/1` takes a"
+            " binary to `{ok, WireMap, Rest} | more | {error, _}` -- the same"
+            " contracts as `thrift_runtime_binary:encode/2` and `decode/2`."
+            " Unknown names answer `error`; `thrift_runtime_binary` probes this"
             " export to dispatch named-struct references to the specialized"
             " code."
         >>,

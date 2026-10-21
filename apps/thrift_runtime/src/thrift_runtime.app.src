@@ -1,5 +1,5 @@
 {application, thrift_runtime, [
-    {description, "Apache Thrift runtime for generated Erlang clients and servers"},
+    {description, "Apache Thrift-compatible runtime for Erlang clients and servers"},
     {vsn, "0.6.1"},
     {registered, []},
     {applications, [
@@ -9,5 +9,7 @@
     {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
-    {links, []}
+    {links, [
+        {"GitHub", "https://github.com/kpy3/thrift-erl"}
+    ]}
 ]}.
