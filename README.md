@@ -62,7 +62,7 @@ the in-process contract differs, it is deliberate.
   selectable per struct, uniform all the way down, reshaped without
   touching bytes via `convert/2`. Sum-typed unions, atom enums and a
   selectable set implementation come with the IDL mapping.
-- **A runtime with no dependencies.** `thrift_erl` stands on kernel
+- **A runtime with no dependencies.** `thrift_runtime` stands on kernel
   and stdlib alone, generated code depends on nothing else, and the
   generator itself never ships to production.
 - **Modern OTP.** Requires OTP 28+, old data structures (dicts, sets v1, etc)
@@ -98,13 +98,13 @@ the in-process contract differs, it is deliberate.
 
 ```
 apps/thrift_generator/   IDL parser (leex/yecc), semantics, emitter, CLI
-apps/thrift_erl/         runtime: binary, compact & JSON protocols, transports, server, client
+apps/thrift_runtime/         runtime: binary, compact & JSON protocols, transports, server, client
 apps/rebar3_thrift/      rebar3 plugin (the thrift provider)
 vendor/apache-thrift-erl official Apache Thrift Erlang runtime (0.25.0),
                          test profile only — the golden interop fixture
 ```
 
-Generated code depends only on `thrift_erl` (kernel + stdlib).
+Generated code depends only on `thrift_runtime` (kernel + stdlib).
 The generator is never a runtime dependency.
 
 ## Build and tests
@@ -309,16 +309,16 @@ ok = ping_api_ping_server:stop(Server).
 
 `start_link` options (a map at creation time, not app env):
 
-- `service` — the module implementing the `thrift_erl_service`
+- `service` — the module implementing the `thrift_runtime_service`
   behaviour (for generated services, `<prefix>_<svc>_server`);
   required by the client and by a single-service server (a multiplexed
   server passes `services` instead) — the generated server supplies
   its own;
 - `transport` — `framed` (the default), `buffered`, or `http`;
 - `protocol` — `binary` (the default), `compact`, `json`, or any
-  module implementing the `thrift_erl_protocol` behaviour;
+  module implementing the `thrift_runtime_protocol` behaviour;
 - server: `port`, `handler`, `name` (the locally registered name of
-  the supervisor, default `thrift_erl_server`), `max_frame_size`,
+  the supervisor, default `thrift_runtime_server`), `max_frame_size`,
   `max_connections`, `timeout` (the umbrella: TLS handshake and
   inter-message silence), `handshake_timeout` / `idle_timeout` (naming
   each meaning specifically), `active_n`, `backlog`;
@@ -349,8 +349,8 @@ ok = ping_api_ping_server:stop(Server, #{drain => 10_000}).
 
 Structs live in two independent axes. The **protocol** axis picks the
 wire format (`binary`, `compact` and `json` are built in; any
-`thrift_erl_protocol` module plugs in). The **representation** axis
-(`thrift_erl:repr()`) picks the in-process shape:
+`thrift_runtime_protocol` module plugs in). The **representation** axis
+(`thrift_runtime:repr()`) picks the in-process shape:
 
 - `record` — the generated record (the default for plain structs);
 - `map` — plain atom-key maps matching the IDL field names;
@@ -407,15 +407,15 @@ encodes back to the same bytes:
 {ok, Bin} = ping_api_types:ping_api_encode_ping_request(Native).
 ```
 
-On the facade `thrift_erl:encode/2` accepts any representation and
-auto-detects it, `thrift_erl:decode/3` produces the requested one, and
-`thrift_erl:encode/4` takes an options map on top: `strict => true`
+On the facade `thrift_runtime:encode/2` accepts any representation and
+auto-detects it, `thrift_runtime:decode/3` produces the requested one, and
+`thrift_runtime:encode/4` takes an options map on top: `strict => true`
 fails a map/struct input carrying keys that match no declared field
 (`{error, {unknown_fields, Keys}}`) instead of dropping them silently:
 
 ```erlang
 {error, {unknown_fields, [extra]}} =
-    thrift_erl:encode(ping_api_types:struct_info(<<"PingRequest">>),
+    thrift_runtime:encode(ping_api_types:struct_info(<<"PingRequest">>),
                       #{message => <<"hi">>, extra => 1}, binary, #{strict => true}).
 ```
 
@@ -425,7 +425,7 @@ representation answers `{error, {value_does_not_match_type, Value}}`
 from every entry point.
 
 `convert/2` reshapes typed values without touching bytes (it also
-lives on `thrift_erl:convert/3` for hand-written descriptors):
+lives on `thrift_runtime:convert/3` for hand-written descriptors):
 
 ```erlang
 {ok, Map} = ping_api_types:convert(Req, map),
@@ -460,11 +460,11 @@ macros.
 
 ### The compact protocol
 
-`thrift_erl_compact` implements the Apache compact wire format: zigzag
+`thrift_runtime_compact` implements the Apache compact wire format: zigzag
 varint integers, delta-encoded field ids, nibble-packed type tags and
 collections whose header carries the element type. Every `protocol`
 slot accepts the atom `compact` — clients, servers, the facade and the
-generated codecs all resolve it through `thrift_erl:protocol_module/1`
+generated codecs all resolve it through `thrift_runtime:protocol_module/1`
 the same way as `binary`:
 
 ```erlang
@@ -474,8 +474,8 @@ the same way as `binary`:
 {ok, Client} = ping_api_ping_client:start_link(#{
     host => "127.0.0.1", port => 9090, protocol => compact, transport => buffered
 }),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_erl_compact),
-{ok, Req, <<>>} = thrift_erl_compact:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_runtime_compact),
+{ok, Req, <<>>} = thrift_runtime_compact:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
 The same values take up to ~2.5× fewer wire bytes than binary on
@@ -489,7 +489,7 @@ proves the official reader accepts our compact bytes struct by struct.
 
 ### The JSON protocol
 
-`thrift_erl_json` implements the Apache JSON wire format: a message is
+`thrift_runtime_json` implements the Apache JSON wire format: a message is
 the array `[1,"name",type,seqid,payload]`, a struct is an object keyed
 by field id where every value is a one-key object naming the type
 (`{"1":{"i32":5}}`), a list or set is `["i32",2,1,2]`, and a map is an
@@ -504,8 +504,8 @@ ins:
 {ok, Client} = ping_api_ping_client:start_link(#{
     host => "127.0.0.1", port => 9090, protocol => json, transport => buffered
 }),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_erl_json),
-{ok, Req, <<>>} = thrift_erl_json:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
+{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_runtime_json),
+{ok, Req, <<>>} = thrift_runtime_json:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
 Two bends are documented on the module: the envelope's closing bracket
@@ -548,10 +548,10 @@ runs the full ThriftTest battery against our HTTP server.
 
 ## Pooling
 
-`thrift_erl_client` is deliberately connection-per-process with no
+`thrift_runtime_client` is deliberately connection-per-process with no
 automatic reconnection: any failure fails the outstanding calls and
 stops the process, so a pool sees the death immediately and replaces
-the worker. The unlinked `thrift_erl_client:start/1` (plus
+the worker. The unlinked `thrift_runtime_client:start/1` (plus
 `service => ping_api_ping_server`) is the pool-worker entry:
 
 ```erlang
@@ -559,16 +559,16 @@ ClientOpts = #{host => "127.0.0.1", port => 9090, service => ping_api_ping_serve
 
 %% poolboy
 {ok, Pool} = poolboy:start_link(#{
-    worker_module => {thrift_erl_client, start, [ClientOpts]},
+    worker_module => {thrift_runtime_client, start, [ClientOpts]},
     size => 10, max_overflow => 5
 }),
-Reply = poolboy:transaction(Pool, fun(C) -> thrift_erl_client:call(C, <<"poke">>, [], 5000) end).
+Reply = poolboy:transaction(Pool, fun(C) -> thrift_runtime_client:call(C, <<"poke">>, [], 5000) end).
 
 %% pooler
 %% in config: {[{pools, [[{name, ping}, {max_count, 10}, {init_count, 2},
-%%                        {start_mfa, {thrift_erl_client, start, [ClientOpts]}}]]}]}
+%%                        {start_mfa, {thrift_runtime_client, start, [ClientOpts]}}]]}]}
 Client = pooler:take_member(ping),
-try thrift_erl_client:call(Client, <<"poke">>, [], 5000)
+try thrift_runtime_client:call(Client, <<"poke">>, [], 5000)
 after pooler:return_member(ping, Client, ok) end.
 ```
 
@@ -577,14 +577,14 @@ leaving them hanging. Sockets run in `{active, N}` delivery mode, so a
 dead peer is noticed even on an idle connection. Calls are serialized
 per connection; concurrent callers queue in order. Each worker also
 carries counters for pool health checks:
-`thrift_erl_client:get_stats/1` answers `#{calls_ok, calls_failed}`
+`thrift_runtime_client:get_stats/1` answers `#{calls_ok, calls_failed}`
 (every `{error, _}` answer counts failed, a declared exception
 included) and `get_and_reset_stats/1` zeroes them.
 
 ## Reconnecting client
 
 When the caller is not a pool but a long-lived consumer,
-`thrift_erl_reconnecting_client` wraps the simple client with
+`thrift_runtime_reconnecting_client` wraps the simple client with
 automatic reconnection and statistics. The wrapped client keeps its
 no-reconnect contract; the wrapper observes its death, retries with
 exponential backoff (`reconnect_min` → doubled → `reconnect_max`,
@@ -594,17 +594,17 @@ start — the wrapper keeps trying, like the reference Apache
 `thrift_reconnecting_client`:
 
 ```erlang
-{ok, Client} = thrift_erl_reconnecting_client:start_link(
+{ok, Client} = thrift_runtime_reconnecting_client:start_link(
     #{host => "localhost", port => 9090, service => ping_api_ping_server,
       reconnect_min => 500, reconnect_max => 30000}
 ),
-{ok, undefined} = thrift_erl_reconnecting_client:call(Client, <<"poke">>, [], 5000),
+{ok, undefined} = thrift_runtime_reconnecting_client:call(Client, <<"poke">>, [], 5000),
 
 %% the pool health-check surface
 #{connected := true, calls_ok := 3, calls_failed := 0,
   connects := 1, connect_failures := 0} =
-    thrift_erl_reconnecting_client:get_stats(Client),
-thrift_erl_reconnecting_client:get_and_reset_stats(Client).
+    thrift_runtime_reconnecting_client:get_stats(Client),
+thrift_runtime_reconnecting_client:get_and_reset_stats(Client).
 ```
 
 Server-reported exceptions are protocol replies: they come back
@@ -623,7 +623,7 @@ server. Handlers must still be fast — they run on the call path.
 
 ```erlang
 %% a client: one event per caller-facing answer, a plain fun
-{ok, Client} = thrift_erl_client:start_link(#{
+{ok, Client} = thrift_runtime_client:start_link(#{
     host => "localhost", port => 9090, service => ping_api_ping_server,
     on_event => fun(#{type := Type, function := Fun, duration_us := Us}) ->
                         logger:info("thrift ~ts ~ts: ~p us", [Type, Fun, Us])
@@ -631,13 +631,13 @@ server. Handlers must still be fast — they run on the call path.
 
 %% a server: {M, F, Args} carries context, the event rides last
 %% (the call becomes my_metrics:record(<<"Ping">>, Event))
-{ok, Server} = thrift_erl_server:start_link(#{
+{ok, Server} = thrift_runtime_server:start_link(#{
     port => 9090, handler => ping_handler, service => ping_api_ping_server,
     on_event => {my_metrics, record, [<<"Ping">>]}}).
 ```
 
 The catalogue — one map per event, `type` first (the full contract
-lives in the `thrift_erl_events` moduledoc):
+lives in the `thrift_runtime_events` moduledoc):
 
 - **client** — exactly one event per caller-facing answer, so counting
   them reproduces `get_stats/1`: `#{type => call_ok, function => Fun,
@@ -671,7 +671,7 @@ changes):
 
 ```erlang
 %% server: host two services on one port
-{ok, Server} = thrift_erl_server:start_link(#{
+{ok, Server} = thrift_runtime_server:start_link(#{
     port => 9090,
     services => #{
         <<"Widgets">> => #{handler => WidgetsHandler, service => shop_widgets_server},
@@ -680,9 +680,9 @@ changes):
 }),
 
 %% clients pick their service; function names stay plain
-{ok, Widgets} = thrift_erl_client:start_link(
+{ok, Widgets} = thrift_runtime_client:start_link(
     #{host => "localhost", port => 9090, service => shop_widgets_server, multiplex => <<"Widgets">>}),
-{ok, Users} = thrift_erl_client:start_link(
+{ok, Users} = thrift_runtime_client:start_link(
     #{host => "localhost", port => 9090, service => shop_users_server, multiplex => <<"Users">>}),
 ```
 
@@ -708,13 +708,13 @@ option (`certs_keys`, `verify`, `cacerts`, ...) applies:
 
 ```erlang
 %% server: present a certificate
-{ok, Server} = thrift_erl_server:start_link(#{
+{ok, Server} = thrift_runtime_server:start_link(#{
     port => 9090, handler => ping_handler, service => ping_api_ping_server,
     ssl_opts => [{certs_keys, [#{certfile => "cert.pem", keyfile => "key.pem"}]}]
 }),
 
 %% client: verify the server
-{ok, Client} = thrift_erl_client:start_link(#{
+{ok, Client} = thrift_runtime_client:start_link(#{
     host => "localhost", port => 9090, service => ping_api_ping_server,
     ssl_opts => [{verify, verify_peer}, {cacerts, CaDer},
                  {server_name_indication, "localhost"}]
@@ -814,7 +814,7 @@ hot path. The generic engine remains for inline descriptors,
 introspection and as the equivalence reference the PropEr suite pins
 the specialized codecs to.
 
-| case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
+| case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
 | Xtruct (42 B)     | encode | 2.54 M/s | 453 K/s | 5.6x |
 | Xtruct            | decode | 1.36 M/s | 223 K/s | 6.1x |
@@ -824,10 +824,10 @@ the specialized codecs to.
 | Insanity          | decode | 14.0 K/s | 2.6 K/s | 5.4x |
 
 The **compact protocol** runs the same payload set on both sides —
-`thrift_erl_compact` against the vendored `thrift_compact_protocol`
+`thrift_runtime_compact` against the vendored `thrift_compact_protocol`
 (28 B / 24 B / 1.2 KB on the wire, roughly half the binary encoding):
 
-| case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
+| case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
 | Xtruct (28 B)      | encode | 1.53 M/s | 252 K/s | 6.1x |
 | Xtruct             | decode | 851 K/s  | 215 K/s | 4.0x |
@@ -837,11 +837,11 @@ The **compact protocol** runs the same payload set on both sides —
 | Insanity           | decode | 7.9 K/s  | 2.4 K/s | 3.3x |
 
 The **JSON protocol** runs the same payload set on both sides —
-`thrift_erl_json` against the vendored `thrift_json_protocol`
+`thrift_runtime_json` against the vendored `thrift_json_protocol`
 (87 B / 110 B / 6.7 KB on the wire; decode is measured at message
 level, since the official JSON reader primes on a whole message):
 
-| case | operation | thrift_erl | Apache Thrift 0.25.0 | speedup |
+| case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
 | Xtruct (87 B)      | encode | 794 K/s | 113 K/s | 7.1x |
 | Xtruct             | decode | 101 K/s | 63 K/s  | 1.6x |

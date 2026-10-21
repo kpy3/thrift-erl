@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### All applications
+
+- The runtime application is renamed to `thrift_runtime` ahead of the
+  first hex.pm release: `thrift_erl` is already taken on the registry.
+  Module names change with it (`thrift_erl_client` →
+  `thrift_runtime_client` and so on); the wire format, public APIs and
+  behaviour are unchanged.
+
 ## [0.6.1] — 2026-10-13
 
 A consolidation release. The server's specific `handshake_timeout`
@@ -17,7 +25,7 @@ as they are; and the three protocol modules share their cold-path
 plumbing instead of carrying three copies. The full gate is green on
 both OTP 28 and 29.
 
-### Runtime (`thrift_erl`)
+### Runtime (`thrift_runtime`)
 
 - The acceptor's connection-options whitelist silently dropped
   `handshake_timeout`: a server setting the specific key (without the
@@ -35,7 +43,7 @@ both OTP 28 and 29.
 
 - The codec probe (`binary_codec`/`compact_codec`/`json_codec` dispatch
   to the specialized per-struct codecs) and the union/required
-  field-presence checks live in `thrift_erl_protocol` once instead of
+  field-presence checks live in `thrift_runtime_protocol` once instead of
   three near-identical copies (~200 lines). The `persistent_term` cache
   key still names the protocol module and the probe still takes its funs
   fresh from the module on every call.
@@ -54,8 +62,8 @@ both OTP 28 and 29.
 
 ### Generator (`thrift_generator`)
 
-- Dead code out — unused exports (`thrift_erl_binary:type_id/1`,
-  `thrift_erl_options:backlog/1`, `record_mode/1`), an inert `-doc` on
+- Dead code out — unused exports (`thrift_runtime_binary:type_id/1`,
+  `thrift_runtime_options:backlog/1`, `record_mode/1`), an inert `-doc` on
   the unexported `sources/2`, the write-only `erl` fields of four model
   records — followed by behavior-preserving simplifications: one
   `mode/1` dispatch instead of four three-boolean products, a shared
@@ -161,15 +169,15 @@ The CI gate is clean on both OTP 28 and 29.
   sum-union tuple — identifies the exception. The explicit-name form
   `{error, {exception, Name, Value}}` stays valid for hand-written
   descriptors and map-representation exceptions (plain maps carry no
-  identity) and remains the raw `thrift_erl_client:call/4` wire-level
+  identity) and remains the raw `thrift_runtime_client:call/4` wire-level
   shape.
 
 ### Project
 
 - Renamed the project **thrift-erl**, after the flagship runtime
-  library `thrift_erl`: it has been a full Thrift stack for Erlang
+  library `thrift_runtime`: it has been a full Thrift stack for Erlang
   (IDL compiler, runtime, rebar3 plugin) for a while, not just a
-  generator. Application and module names are unchanged — `thrift_erl`
+  generator. Application and module names are unchanged — `thrift_runtime`
   is baked into all generated code and stays the public contract. The
   README now opens with a "Why over the official Apache Thrift
   runtime" summary.
@@ -239,8 +247,8 @@ code actually runs.
 - Specialized JSON wire codecs: the same contract with the `_json`
   suffix and a `json_codec/1` index. The envelope's closing `]` folds
   only at top-level entry points: the pair's decode side is the
-  non-folding struct body, `thrift_erl_json:decode/2` applies the
-  fold, and the new `thrift_erl_json:decode_nested/2` serves generated
+  non-folding struct body, `thrift_runtime_json:decode/2` applies the
+  fold, and the new `thrift_runtime_json:decode_nested/2` serves generated
   cross-module references fold-free (nested same-module references
   are local `_body` calls). Map keys outside the JSON object model
   (uuid, struct, list, set, map) answer constant `type_not_supported`
@@ -252,7 +260,7 @@ code actually runs.
   `write_all` skips unchanged files, so regeneration no longer bumps
   mtimes of identical outputs (no spurious recompiles).
 
-### Runtime (`thrift_erl`)
+### Runtime (`thrift_runtime`)
 
 - Observability callbacks: the `on_event` option (absent, a 1-arity
   fun, or `{M, F, A}` with the event appended to the arguments) on the
@@ -283,7 +291,7 @@ code actually runs.
   instead of killing the caller with the child's exit signal after
   the answer arrived.
 - Server stop works on OTP 28 again: `supervisor:stop/1` only exists
-  from OTP 29 on, so `thrift_erl_server:stop/1` (and the drain path of
+  from OTP 29 on, so `thrift_runtime_server:stop/1` (and the drain path of
   `stop/2`) stops the supervisor as the gen_server it is —
   `gen_server:stop(Server, normal, infinity)`, waiting so a busy
   connection answers its in-flight request before its own shutdown.
@@ -298,7 +306,7 @@ code actually runs.
 - Both toolchains analyze the native axis cleanly. Elvis parses raw
   sources without the preprocessor, so on an OTP-28 toolchain it
   cannot resolve the OTP-29 builtin `record()` in exported specs —
-  `thrift_erl_native` now exports the spec-level alias
+  `thrift_runtime_native` now exports the spec-level alias
   `native_record()` (opaque; `record()` on 29, `term()` on 28)
   instead. Dialyzer on 28 keeps the facade's native arms alive the
   same way: the release stubs answer through the unfoldable
@@ -377,14 +385,14 @@ UTF-8 end to end.
   alias, so the modules compile clean under `warnings_as_errors`
   without the suppression.
 
-### Runtime (`thrift_erl`)
+### Runtime (`thrift_runtime`)
 
 - Sum-union support: `record_fields/1` understands the
   `{sum, [FieldAtoms]}` mode and `tag_index` keys by field atoms.
   Decoding an empty or multi-field union raises `{invalid_union, Map}`,
   encoding a value that matches no field raises
   `{value_does_not_match_type, V}`.
-- `thrift_erl_names` mirrors the generator's snake_case pass, so native
+- `thrift_runtime_names` mirrors the generator's snake_case pass, so native
   record tags, `tag_index` keys and map-mode `__struct__` tags agree
   with the generated identities.
 - The specialized-codec cache stores only the fact of an export (not
@@ -431,7 +439,7 @@ references.
   Apache is on the wire. Writing `erl.set` after the name is now a
   semantic error instead of a silently ignored annotation.
 
-### Runtime (`thrift_erl`)
+### Runtime (`thrift_runtime`)
 
 - Specialized-codec dispatch: named struct references probe the
   generated `binary_codec/1` export (hits and misses cached) and fall
@@ -443,10 +451,10 @@ references.
 ## [0.1.0] — 2026-10-09
 
 Initial release. An alternative Apache Thrift IDL generator and the
-`thrift_erl` runtime library for Erlang/OTP 28+. Generated code is
+`thrift_runtime` runtime library for Erlang/OTP 28+. Generated code is
 binary-compatible with the stock Apache Thrift implementation (verified
 both ways by golden interop tests against the official 0.25.0 Erlang
-runtime) and depends only on `thrift_erl` — kernel and stdlib, no
+runtime) and depends only on `thrift_runtime` — kernel and stdlib, no
 external dependencies. The generator itself is never a runtime
 dependency.
 
@@ -481,14 +489,14 @@ dependency.
   -o src`) and the `rebar3 thrift` plugin provider (`files` / `out_dir`,
   typically wired as a pre-compile hook).
 
-### Runtime (`thrift_erl`)
+### Runtime (`thrift_runtime`)
 
 - Three wire protocols built in — `binary`, `compact` (zigzag varints,
   delta-encoded field ids, nibble-packed type tags) and `json` (the
-  Apache JSON wire format) — resolved through the `thrift_erl_protocol`
+  Apache JSON wire format) — resolved through the `thrift_runtime_protocol`
   behaviour, so any module can plug into every `protocol` slot.
 - Four in-process representations behind one facade
-  (`thrift_erl:encode/decode/convert`): `record` (generated records),
+  (`thrift_runtime:encode/decode/convert`): `record` (generated records),
   `map` (atom-key maps), `struct` (tagged maps) and `native` (EEP-79
   native records, OTP 29+; older releases answer
   `{error, {unsupported_repr, native}}`). Encode auto-detects the
@@ -528,7 +536,7 @@ dependency.
   0.25.0 Erlang runtime, in both directions, over the buffered, framed
   and HTTP transports, in the binary, compact and JSON protocols,
   including the official multiplexed client.
-- Codec benchmark (`scripts/bench`, erlperf): `thrift_erl` against the
+- Codec benchmark (`scripts/bench`, erlperf): `thrift_runtime` against the
   official runtime on the same ThriftTest payloads — binary, compact
   and JSON, encode and decode (numbers in the README).
 - Quality gates in CI (OTP 28 and 29 matrix): compile with

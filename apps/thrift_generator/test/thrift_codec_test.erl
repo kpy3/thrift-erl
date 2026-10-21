@@ -23,7 +23,7 @@ The specialized entry (`{struct, {ref, Module, Name}}` descriptors,
 dispatched through the module's `binary_codec/1` / `compact_codec/1` /
 `json_codec/1`) must behave exactly like the generic engine
 (`{struct, {Kind, Fields}}` inline descriptors interpreted by
-`thrift_erl_binary` / `thrift_erl_compact` / `thrift_erl_json`):
+`thrift_runtime_binary` / `thrift_runtime_compact` / `thrift_runtime_json`):
 identical bytes, identical values and identical error terms. The
 generic side is itself proven by the golden-byte tests and the golden
 interop suite, so equivalence here makes the specialized code
@@ -129,10 +129,10 @@ check(Prop) ->
 %% and the compact protocol.
 
 prop_wire_matches_generic() ->
-    prop_matches_generic(thrift_erl_binary).
+    prop_matches_generic(thrift_runtime_binary).
 
 prop_compact_matches_generic() ->
-    prop_matches_generic(thrift_erl_compact).
+    prop_matches_generic(thrift_runtime_compact).
 
 prop_matches_generic(Engine) ->
     ?FORALL(
@@ -159,21 +159,21 @@ prop_matches_generic(Engine) ->
 %% the truncation semantics the buffered transport builds on.
 
 prop_wire_prefix_never_completes() ->
-    prop_prefix_never_completes(thrift_erl_binary, fun goldentest_types:binary_codec/1, fun not_more/1).
+    prop_prefix_never_completes(thrift_runtime_binary, fun goldentest_types:binary_codec/1, fun not_more/1).
 
 prop_compact_prefix_never_completes() ->
     prop_prefix_never_completes(
-        thrift_erl_compact, fun goldentest_types:compact_codec/1, fun not_more/1
+        thrift_runtime_compact, fun goldentest_types:compact_codec/1, fun not_more/1
     ).
 
 prop_json_matches_generic() ->
-    prop_matches_generic(thrift_erl_json).
+    prop_matches_generic(thrift_runtime_json).
 
 prop_json_prefix_never_completes() ->
     %% Unlike binary/compact, a JSON prefix cut inside a literal (`tru')
     %% errors in the generic engine too — the broken answer is a
     %% completed decode, not a non-`more' one.
-    prop_prefix_never_completes(thrift_erl_json, fun goldentest_types:json_codec/1, fun completed/1).
+    prop_prefix_never_completes(thrift_runtime_json, fun goldentest_types:json_codec/1, fun completed/1).
 
 not_more(Answer) ->
     Answer =/= more.
@@ -220,7 +220,7 @@ negative_battery_test() ->
     ok = load_fixture(),
     Inline = fun(Name) -> {struct, goldentest_types:struct_info(Name)} end,
     Ref = fun(Name) -> {struct, {ref, goldentest_types, Name}} end,
-    Enc = fun(Desc, Value) -> normalize(thrift_erl_binary:encode(Desc, Value)) end,
+    Enc = fun(Desc, Value) -> normalize(thrift_runtime_binary:encode(Desc, Value)) end,
 
     %% Missing required field (CrazyNesting's list_field, id 3).
     Crazy = <<"CrazyNesting">>,
@@ -234,8 +234,8 @@ negative_battery_test() ->
     %% Decode-time missing required: the stop byte alone.
     MissingStop = <<0>>,
     ExpectedMissing = {error, {decode, {missing_required_fields, [<<"list_field">>]}}},
-    ?assertEqual(ExpectedMissing, thrift_erl_binary:decode(Inline(Crazy), MissingStop)),
-    ?assertEqual(ExpectedMissing, thrift_erl_binary:decode(Ref(Crazy), MissingStop)),
+    ?assertEqual(ExpectedMissing, thrift_runtime_binary:decode(Inline(Crazy), MissingStop)),
+    ?assertEqual(ExpectedMissing, thrift_runtime_binary:decode(Ref(Crazy), MissingStop)),
 
     %% Union rules: empty and multiple fields present (SomeUnion's first
     %% two field names come from the descriptor, not hard-coded).
@@ -256,43 +256,43 @@ negative_battery_test() ->
     %% Known id with the wrong wire type: field_type_mismatch.
     WrongWire = <<8, 0, 4, 0, 0, 0, 1, 0>>,
     ExpectedMismatch = {error, {decode, {field_type_mismatch, 4}}},
-    ?assertEqual(ExpectedMismatch, thrift_erl_binary:decode(Inline(<<"Xtruct">>), WrongWire)),
-    ?assertEqual(ExpectedMismatch, thrift_erl_binary:decode(Ref(<<"Xtruct">>), WrongWire)),
+    ?assertEqual(ExpectedMismatch, thrift_runtime_binary:decode(Inline(<<"Xtruct">>), WrongWire)),
+    ?assertEqual(ExpectedMismatch, thrift_runtime_binary:decode(Ref(<<"Xtruct">>), WrongWire)),
 
     %% Container headers: element type mismatch and bad sizes.
     BadElem = <<15, 0, 2, 8, 0, 0, 0, 0, 0>>,
     ?assertEqual(
         {error, {decode, {element_type_mismatch, 8}}},
-        thrift_erl_binary:decode(Ref(<<"Insanity">>), BadElem)
+        thrift_runtime_binary:decode(Ref(<<"Insanity">>), BadElem)
     ),
     BadMapType = <<13, 0, 1, 11, 10, 0, 0, 0, 0, 0>>,
     ?assertEqual(
         {error, {decode, map_type_mismatch}},
-        thrift_erl_binary:decode(Ref(<<"Insanity">>), BadMapType)
+        thrift_runtime_binary:decode(Ref(<<"Insanity">>), BadMapType)
     ),
     BadMapSize = <<13, 0, 1, 8, 10, 255, 255, 255, 255, 0>>,
     ?assertEqual(
         {error, {decode, bad_map_size}},
-        thrift_erl_binary:decode(Ref(<<"Insanity">>), BadMapSize)
+        thrift_runtime_binary:decode(Ref(<<"Insanity">>), BadMapSize)
     ),
     BadSeqSize = <<15, 0, 2, 12, 255, 255, 255, 255, 0>>,
     ?assertEqual(
         {error, {decode, bad_sequence_size}},
-        thrift_erl_binary:decode(Ref(<<"Insanity">>), BadSeqSize)
+        thrift_runtime_binary:decode(Ref(<<"Insanity">>), BadSeqSize)
     ),
 
     %% Negative string length.
     BadString = <<11, 0, 1, 255, 255, 255, 255>>,
     ?assertEqual(
         {error, {decode, bad_string_length}},
-        thrift_erl_binary:decode(Ref(<<"Xtruct">>), BadString)
+        thrift_runtime_binary:decode(Ref(<<"Xtruct">>), BadString)
     ),
 
     %% Unknown field ids are skipped by wire type.
     Unknown = <<10, 0, 99, 0, 0, 0, 0, 0, 0, 0, 1, 11, 0, 1, 0, 0, 0, 1, $a, 0>>,
     ExpectedSkip = {ok, #{<<"string_thing">> => <<"a">>}, <<>>},
-    ?assertEqual(ExpectedSkip, thrift_erl_binary:decode(Inline(<<"Xtruct">>), Unknown)),
-    ?assertEqual(ExpectedSkip, thrift_erl_binary:decode(Ref(<<"Xtruct">>), Unknown)),
+    ?assertEqual(ExpectedSkip, thrift_runtime_binary:decode(Inline(<<"Xtruct">>), Unknown)),
+    ?assertEqual(ExpectedSkip, thrift_runtime_binary:decode(Ref(<<"Xtruct">>), Unknown)),
 
     %% Wrong value shapes: bad enum atom, bad scalar type, non-map struct.
     BadEnum = #{<<"userMap">> => #{'NOPE' => 1}, <<"xtructs">> => []},
@@ -318,12 +318,12 @@ negative_battery_test() ->
     UnknownEnumKey = <<13, 0, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0, 1, 0>>,
     ?assertEqual(
         {ok, #{<<"userMap">> => #{99 => 1}}, <<>>},
-        thrift_erl_binary:decode(Ref(<<"Insanity">>), UnknownEnumKey)
+        thrift_runtime_binary:decode(Ref(<<"Insanity">>), UnknownEnumKey)
     ),
     I32Field = <<8, 0, 9, 0, 0, 0, 9, 0>>,
     ?assertEqual(
         {ok, #{<<"i32_thing">> => 9}, <<>>},
-        thrift_erl_binary:decode(Ref(<<"Xtruct">>), I32Field)
+        thrift_runtime_binary:decode(Ref(<<"Xtruct">>), I32Field)
     ),
     ok.
 
@@ -339,9 +339,9 @@ compact_negative_battery_test() ->
     ok = load_fixture(),
     Inline = fun(Name) -> {struct, goldentest_types:struct_info(Name)} end,
     Ref = fun(Name) -> {struct, {ref, goldentest_types, Name}} end,
-    Enc = fun(Desc, Value) -> normalize(thrift_erl_compact:encode(Desc, Value)) end,
+    Enc = fun(Desc, Value) -> normalize(thrift_runtime_compact:encode(Desc, Value)) end,
     Dec = fun(Name, Bytes) ->
-        {thrift_erl_compact:decode(Inline(Name), Bytes), thrift_erl_compact:decode(Ref(Name), Bytes)}
+        {thrift_runtime_compact:decode(Inline(Name), Bytes), thrift_runtime_compact:decode(Ref(Name), Bytes)}
     end,
 
     %% Known id with the wrong nibble: field_type_mismatch (Xtruct's
@@ -441,9 +441,9 @@ uuid_compact_battery_test() ->
     ok = load_uuid_fixture(),
     Inline = fun(Name) -> {struct, compactuuid_types:struct_info(Name)} end,
     Ref = fun(Name) -> {struct, {ref, compactuuid_types, Name}} end,
-    Enc = fun(Desc, Value) -> normalize(thrift_erl_compact:encode(Desc, Value)) end,
+    Enc = fun(Desc, Value) -> normalize(thrift_runtime_compact:encode(Desc, Value)) end,
     Dec = fun(Name, Bytes) ->
-        {thrift_erl_compact:decode(Inline(Name), Bytes), thrift_erl_compact:decode(Ref(Name), Bytes)}
+        {thrift_runtime_compact:decode(Inline(Name), Bytes), thrift_runtime_compact:decode(Ref(Name), Bytes)}
     end,
     UuidError = {error, {encode, {type_not_supported, {base, uuid}, compact}}},
 
@@ -550,9 +550,9 @@ json_negative_battery_test() ->
     ok = load_fixture(),
     Inline = fun(Name) -> {struct, goldentest_types:struct_info(Name)} end,
     Ref = fun(Name) -> {struct, {ref, goldentest_types, Name}} end,
-    Enc = fun(Desc, Value) -> normalize(thrift_erl_json:encode(Desc, Value)) end,
+    Enc = fun(Desc, Value) -> normalize(thrift_runtime_json:encode(Desc, Value)) end,
     Dec = fun(Name, Doc) ->
-        {thrift_erl_json:decode(Inline(Name), Doc), thrift_erl_json:decode(Ref(Name), Doc)}
+        {thrift_runtime_json:decode(Inline(Name), Doc), thrift_runtime_json:decode(Ref(Name), Doc)}
     end,
 
     %% Missing required fields: declaration order on encode, ascending
@@ -592,7 +592,7 @@ json_negative_battery_test() ->
     ),
     ?assertEqual(
         {ok, #{<<"string_thing">> => <<"a">>}, <<"]">>},
-        thrift_erl_json:decode_nested(Ref(<<"Xtruct">>), Folded)
+        thrift_runtime_json:decode_nested(Ref(<<"Xtruct">>), Folded)
     ),
     Trailing = <<"{\"1\":{\"str\":\"a\"}}x">>,
     ?assertEqual(
@@ -665,9 +665,9 @@ uuid_json_battery_test() ->
     ok = load_uuid_fixture(),
     Inline = fun(Name) -> {struct, compactuuid_types:struct_info(Name)} end,
     Ref = fun(Name) -> {struct, {ref, compactuuid_types, Name}} end,
-    Enc = fun(Desc, Value) -> normalize(thrift_erl_json:encode(Desc, Value)) end,
+    Enc = fun(Desc, Value) -> normalize(thrift_runtime_json:encode(Desc, Value)) end,
     Dec = fun(Name, Doc) ->
-        {thrift_erl_json:decode(Inline(Name), Doc), thrift_erl_json:decode(Ref(Name), Doc)}
+        {thrift_runtime_json:decode(Inline(Name), Doc), thrift_runtime_json:decode(Ref(Name), Doc)}
     end,
     UuidError = {error, {encode, {type_not_supported, {base, uuid}, json}}},
 
@@ -705,7 +705,7 @@ uuid_json_battery_test() ->
     %% The uuid-free shape encodes: empty uuid-element list header with
     %% the empty tag, empty uuid-valued map with the empty value tag.
     UuidFree = #{<<"history">> => [], <<"tags_rev">> => #{}},
-    {ok, UuidFreeIo} = thrift_erl_json:encode(Inline(<<"UuidBox">>), UuidFree),
+    {ok, UuidFreeIo} = thrift_runtime_json:encode(Inline(<<"UuidBox">>), UuidFree),
     UuidFreeDoc = iolist_to_binary(UuidFreeIo),
     ?assertEqual(
         {{ok, UuidFreeDoc}, {ok, UuidFreeDoc}},
@@ -768,9 +768,9 @@ deep_struct_case(Name) ->
             end,
     lists:foreach(
         fun(Value) ->
-            deep_struct_case_one(Name, Value, thrift_erl_binary, fun goldentest_types:binary_codec/1),
-            deep_struct_case_one(Name, Value, thrift_erl_compact, fun goldentest_types:compact_codec/1),
-            deep_struct_case_one(Name, Value, thrift_erl_json, fun goldentest_types:json_codec/1)
+            deep_struct_case_one(Name, Value, thrift_runtime_binary, fun goldentest_types:binary_codec/1),
+            deep_struct_case_one(Name, Value, thrift_runtime_compact, fun goldentest_types:compact_codec/1),
+            deep_struct_case_one(Name, Value, thrift_runtime_json, fun goldentest_types:json_codec/1)
         end,
         Values
     ).
@@ -798,7 +798,7 @@ deep_struct_case_one(Name, Value, Engine, Codec) ->
                 fun(Prefix) ->
                     case Decode(Prefix) of
                         more -> ok;
-                        {error, _} when Engine =:= thrift_erl_json -> ok;
+                        {error, _} when Engine =:= thrift_runtime_json -> ok;
                         Other -> ?assertEqual(more, Other)
                     end
                 end,
@@ -868,15 +868,15 @@ unknown_name_test() ->
     ?assertEqual(error, goldentest_types:json_codec(<<"Nope">>)),
     ?assertEqual(
         {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
-        thrift_erl_binary:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
+        thrift_runtime_binary:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
     ),
     ?assertEqual(
         {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
-        thrift_erl_compact:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
+        thrift_runtime_compact:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<0>>)
     ),
     ?assertEqual(
         {error, {decode, {unknown_struct, {goldentest_types, <<"Nope">>}}}},
-        thrift_erl_json:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<"{}">>)
+        thrift_runtime_json:decode({struct, {ref, goldentest_types, <<"Nope">>}}, <<"{}">>)
     ),
     ok.
 

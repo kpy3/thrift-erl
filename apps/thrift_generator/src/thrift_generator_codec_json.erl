@@ -21,7 +21,7 @@ an `encode_<X>_json/1` (wire map → `{ok, iodata()} | {error, _}`), a
 _}`, consuming the message envelope's closing `]` like the top-level
 generic decode) and a `json_codec/1` dispatcher (`{ok, {Encode,
 Decode}} | error` by wire struct name). The clauses mirror the generic
-engine (`thrift_erl_json`) byte for byte and error term for error term
+engine (`thrift_runtime_json`) byte for byte and error term for error term
 — the same discipline as the binary and compact emitters, proven by
 the PropEr equivalence properties and the negative battery in
 `thrift_codec_test`.
@@ -34,7 +34,7 @@ fields/field/after-function triple walking the JSON object with the
 shared scanner primitives (`json_skip_ws`, `json_expect`,
 `json_scan_string`, `json_scan_number` — emitted once per module, when
 something calls them) and a per-id/tag dispatch whose unknown-id clause
-delegates to the exported `thrift_erl_json:skip_by_tag/2`.
+delegates to the exported `thrift_runtime_json:skip_by_tag/2`.
 
 Every type tag (`"i32"`, `"str"`, `"rec"`, ...) and the
 `"id":{"tag":` field prefixes are compile-time literals. Doubles use
@@ -320,7 +320,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         <<
             "Encodes the wire representation (a map keyed by binary field"
             " names) with the JSON protocol, byte-compatible with"
-            " thrift_erl_json:encode/2."
+            " thrift_runtime_json:encode/2."
         >>,
     thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
         [
@@ -444,7 +444,7 @@ encode_json_expr({base, S}, V, _Ctx, _Enums) when S =:= string; S =:= binary ->
 encode_json_expr({base, uuid}, V, _Ctx, _Enums) ->
     'case'(V, [clause([v("_")], none, [uuid_error()])]);
 encode_json_expr({enum, Desc}, V, _Ctx, _Enums) ->
-    'case'(remote(thrift_erl_protocol, enum_to_int, [enum_desc_lit(Desc), V]), [
+    'case'(remote(thrift_runtime_protocol, enum_to_int, [enum_desc_lit(Desc), V]), [
         ok_bind_clause(v("Int"), ok_t(remote(erlang, integer_to_binary, [v("Int")]))),
         clause([at(error)], none, [err_encode(tuple_t([at(unknown_enum_value), V]))])
     ]);
@@ -481,7 +481,7 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
             {Encode, _Decode} = struct_json_pair(Local, Ctx),
             call_local(Encode, [V]);
         false ->
-            remote(thrift_erl_json, encode, [literal({struct, {ref, TypesMod, Local}}), V])
+            remote(thrift_runtime_json, encode, [literal({struct, {ref, TypesMod, Local}}), V])
     end.
 
 -spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
@@ -494,7 +494,7 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
             {_Encode, Decode} = struct_json_pair(Local, Ctx),
             call_local(decode_body_name(Decode), [Bin]);
         false ->
-            remote(thrift_erl_json, decode_nested, [literal({struct, {ref, TypesMod, Local}}), Bin])
+            remote(thrift_runtime_json, decode_nested, [literal({struct, {ref, TypesMod, Local}}), Bin])
     end.
 
 %% The emitter derives the types-module atom from the module key with
@@ -526,7 +526,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     Doc =
         <<
             "Decodes the JSON protocol into the wire representation,"
-            " byte-compatible with thrift_erl_json:decode/2; `more` on"
+            " byte-compatible with thrift_runtime_json:decode/2; `more` on"
             " truncated input, unknown fields skipped by wire tag."
         >>,
     thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
@@ -822,7 +822,7 @@ skip_clause() ->
     %% Like every dispatch clause, the skip consumes the field entry's
     %% closing brace before answering the 5-tuple.
     clause([v("_Id"), v("Tag"), v("Bin"), v("Req")], none, [
-        'case'(remote(thrift_erl_json, skip_by_tag, [v("Tag"), v("Bin")]), [
+        'case'(remote(thrift_runtime_json, skip_by_tag, [v("Tag"), v("Bin")]), [
             ok_bind_clause(
                 v("Rest"),
                 'case'(call_local(json_expect, [v("Rest"), i(125)]), [
@@ -877,7 +877,7 @@ decode_json_expr({base, uuid}, Bin, _Ctx, _Enums) ->
 decode_json_expr({enum, Desc}, Bin, _Ctx, _Enums) ->
     'case'(call_local(json_scan_number, [Bin]), [
         clause([tuple_t([at(ok), tuple_pat([at(int), v("Int")]), v("Rest")])], none, [
-            'case'(remote(thrift_erl_protocol, enum_from_int, [enum_desc_lit(Desc), v("Int")]), [
+            'case'(remote(thrift_runtime_protocol, enum_from_int, [enum_desc_lit(Desc), v("Int")]), [
                 ok_bind_clause(v("Atom"), ok3(v("Atom"), v("Rest"))),
                 clause([at(error)], none, [ok3(v("Int"), v("Rest"))])
             ])
@@ -1149,7 +1149,7 @@ key_text_clauses({base, B}) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
 key_text_clauses({enum, Desc}) ->
     [
         clause([v("V")], none, [
-            'case'(remote(thrift_erl_protocol, enum_to_int, [enum_desc_lit(Desc), v("V")]), [
+            'case'(remote(thrift_runtime_protocol, enum_to_int, [enum_desc_lit(Desc), v("V")]), [
                 ok_bind_clause(v("Int"), ok_t(remote(erlang, integer_to_binary, [v("Int")]))),
                 clause([at(error)], none, [err_encode(tuple_t([at(unknown_enum_value), v("V")]))])
             ])
@@ -1196,7 +1196,7 @@ key_from_text_clauses({enum, Desc}) ->
             try_catch(
                 [
                     {match, ?ANNO, v("Int"), remote(erlang, binary_to_integer, [v("Text")])},
-                    'case'(remote(thrift_erl_protocol, enum_from_int, [enum_desc_lit(Desc), v("Int")]), [
+                    'case'(remote(thrift_runtime_protocol, enum_from_int, [enum_desc_lit(Desc), v("Int")]), [
                         ok_bind_clause(v("Atom"), ok_t(v("Atom"))),
                         clause([at(error)], none, [ok_t(v("Int"))])
                     ])

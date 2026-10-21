@@ -22,11 +22,11 @@ unions (map representation via the `erl.struct_type = "map"`
 annotation, tagged-tuple sums via `erl.union_type = "sum"` on a union
 or its namespace header), the introspection surface (`struct_info/1`,
 `enum_info/1`, `function_info/2`, `service_info/0`) and the
-record-field index (`record_fields/1`) that `thrift_erl_record` uses
+record-field index (`record_fields/1`) that `thrift_runtime_record` uses
 to bridge records and the wire.
 
 Per service: `<svc>_handler.erl` (the `-callback` behaviour),
-`<svc>_server.erl` (a `thrift_erl_service` implementation plus the
+`<svc>_server.erl` (a `thrift_runtime_service` implementation plus the
 server entry points) and `<svc>_client.erl` (typed call wrappers that
 convert records at the boundary).
 
@@ -69,8 +69,8 @@ the descriptor terms, which keeps the emitter declarative.
     hrl => binary()
 }.
 
-%% Wire-level descriptor terms — the same shapes thrift_erl_binary and
-%% thrift_erl_record consume.
+%% Wire-level descriptor terms — the same shapes thrift_runtime_binary and
+%% thrift_runtime_record consume.
 
 -type desc() :: term().
 
@@ -520,7 +520,7 @@ struct_codec_one(S, Ctx) ->
         thrift_generator_emitter_syntax:fn_form(Encode, [
             thrift_generator_emitter_syntax:fn_clause(
                 [erl_syntax:variable("Value")],
-                thrift_generator_emitter_syntax:application(thrift_erl, encode, [
+                thrift_generator_emitter_syntax:application(thrift_runtime, encode, [
                     thrift_generator_emitter_syntax:abstract(Desc), erl_syntax:variable("Value")
                 ])
             )
@@ -532,7 +532,7 @@ struct_codec_one(S, Ctx) ->
         thrift_generator_emitter_syntax:fn_form(Encode, [
             thrift_generator_emitter_syntax:fn_clause(
                 [erl_syntax:variable("Value"), erl_syntax:variable("Protocol")],
-                thrift_generator_emitter_syntax:application(thrift_erl, encode, [
+                thrift_generator_emitter_syntax:application(thrift_runtime, encode, [
                     thrift_generator_emitter_syntax:abstract(Desc),
                     erl_syntax:variable("Value"),
                     erl_syntax:variable("Protocol")
@@ -552,7 +552,7 @@ struct_codec_one(S, Ctx) ->
         thrift_generator_emitter_syntax:fn_form(Decode, [
             thrift_generator_emitter_syntax:fn_clause(
                 [erl_syntax:variable("Binary")],
-                thrift_generator_emitter_syntax:application(thrift_erl, decode, [
+                thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
                     thrift_generator_emitter_syntax:abstract(Desc),
                     erl_syntax:variable("Binary"),
                     thrift_generator_emitter_syntax:abstract(DefaultRepr)
@@ -560,13 +560,13 @@ struct_codec_one(S, Ctx) ->
             )
         ]) ++
         thrift_generator_emitter_syntax:doc_form(
-            Doc, <<"Decodes the whole binary into the given `thrift_erl:repr()`.">>
+            Doc, <<"Decodes the whole binary into the given `thrift_runtime:repr()`.">>
         ) ++
         [DecodeSpec(2)] ++
         thrift_generator_emitter_syntax:fn_form(Decode, [
             thrift_generator_emitter_syntax:fn_clause(
                 [erl_syntax:variable("Binary"), erl_syntax:variable("Repr")],
-                thrift_generator_emitter_syntax:application(thrift_erl, decode, [
+                thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
                     thrift_generator_emitter_syntax:abstract(Desc),
                     erl_syntax:variable("Binary"),
                     erl_syntax:variable("Repr")
@@ -588,7 +588,7 @@ struct_codec_one(S, Ctx) ->
                     erl_syntax:variable("Repr"),
                     erl_syntax:variable("Protocol")
                 ],
-                thrift_generator_emitter_syntax:application(thrift_erl, decode, [
+                thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
                     thrift_generator_emitter_syntax:abstract(Desc),
                     erl_syntax:variable("Binary"),
                     erl_syntax:variable("Repr"),
@@ -616,9 +616,9 @@ struct_codec_one(S, Ctx) ->
                             [erl_syntax:variable("Map")],
                             erl_syntax:tuple([
                                 erl_syntax:atom(ok),
-                                thrift_generator_emitter_syntax:application(thrift_erl_record, from_wire, [
+                                thrift_generator_emitter_syntax:application(thrift_runtime_record, from_wire, [
                                     thrift_generator_emitter_syntax:abstract(Desc),
-                                    thrift_generator_emitter_syntax:application(thrift_erl_record, to_wire, [
+                                    thrift_generator_emitter_syntax:application(thrift_runtime_record, to_wire, [
                                         thrift_generator_emitter_syntax:abstract(Desc), erl_syntax:variable("Map")
                                     ]),
                                     thrift_generator_emitter_syntax:abstract(record)
@@ -639,7 +639,7 @@ struct_ref(S, Ctx) ->
 %% The identity tag a struct value carries: the (prefixed) record tag in
 %% record mode, the lowercased wire name in map mode — no record exists
 %% there, so the struct representation tags it by name. The same rule
-%% thrift_erl_record applies when it builds struct maps, so convert/2
+%% thrift_runtime_record applies when it builds struct maps, so convert/2
 %% finds every struct by the tag its own values carry.
 
 -spec struct_index_tag(#tg_struct{}, binary()) -> atom().
@@ -652,7 +652,7 @@ struct_index_tag(S, Prefix) ->
 %% The input side of encode_: the definition's exported alias (record,
 %% map and sum modes); native records are runtime-minted, so their input
 %% stays term(). Record mode also accepts the wire-shaped map — both
-%% normalize inside thrift_erl_record:to_wire.
+%% normalize inside thrift_runtime_record:to_wire.
 
 -spec value_type(#tg_struct{}) -> erl_syntax:syntaxTree().
 value_type(S) ->
@@ -697,7 +697,7 @@ tag_index_forms(Mod, Ctx) ->
                 thrift_generator_emitter_syntax:fun_type(
                     [],
                     {remote_type, Anno, [
-                        {atom, Anno, thrift_erl}, {atom, Anno, tag_index}, []
+                        {atom, Anno, thrift_runtime}, {atom, Anno, tag_index}, []
                     ]}
                 )
             ]}},
@@ -707,7 +707,7 @@ tag_index_forms(Mod, Ctx) ->
                     [
                         thrift_generator_emitter_syntax:term_type(),
                         {remote_type, Anno, [
-                            {atom, Anno, thrift_erl}, {atom, Anno, repr}, []
+                            {atom, Anno, thrift_runtime}, {atom, Anno, repr}, []
                         ]}
                     ],
                     {type, Anno, union, [
@@ -720,7 +720,7 @@ tag_index_forms(Mod, Ctx) ->
         thrift_generator_emitter_syntax:doc_form(
             undefined,
             <<
-                "The struct tag -> descriptor map `thrift_erl:convert/3` takes:"
+                "The struct tag -> descriptor map `thrift_runtime:convert/3` takes:"
                 " record tags for record-mode structs, wire names for"
                 " map-mode ones, sum-union field atoms for sums. Several"
                 " sum unions of one module may share a field name; the"
@@ -745,7 +745,7 @@ tag_index_forms(Mod, Ctx) ->
         thrift_generator_emitter_syntax:fn_form(convert, [
             thrift_generator_emitter_syntax:fn_clause(
                 [erl_syntax:variable("Value"), erl_syntax:variable("Repr")],
-                thrift_generator_emitter_syntax:application(thrift_erl, convert, [
+                thrift_generator_emitter_syntax:application(thrift_runtime, convert, [
                     thrift_generator_emitter_syntax:application(
                         types_module_atom(Ctx#ectx.current), tag_index, []
                     ),

@@ -10,7 +10,7 @@ Upstream: Apache Thrift, `lib/erl` from the official source release
 Used **only** by the test profile as the golden reference for wire-format
 interop tests (`thrift_golden_SUITE`): our client against the official
 runtime's server and vice versa, on buffered and framed transports. It is
-never a dependency of the generator or of `thrift_erl` in production
+never a dependency of the generator or of `thrift_runtime` in production
 profiles.
 
 The companion `ThriftTest.thrift` in this directory is the same file that
