@@ -340,8 +340,6 @@ merge_type_annotations({list, T, Ann}, Extra) -> {list, T, maps:merge(Ann, Extra
 merge_type_annotations({set, T, Ann}, Extra) -> {set, T, maps:merge(Ann, Extra)};
 merge_type_annotations({map, K, V, Ann}, Extra) -> {map, K, V, maps:merge(Ann, Extra)}.
 
-% Filter annotations for the erl namespace
-
 filter_erl_annotations(Annotations) ->
     maps:fold(
         fun

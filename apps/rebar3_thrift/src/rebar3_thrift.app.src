@@ -12,5 +12,7 @@
     {env, [{providers, [rebar3_thrift, rebar3_thrift_clean]}]},
     {modules, []},
     {licenses, ["Apache-2.0"]},
-    {links, []}
+    {links, [
+        {"GitHub", "https://github.com/kpy3/thrift-erl"}
+    ]}
 ]}.

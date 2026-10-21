@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Module names change with it (`thrift_erl_client` →
   `thrift_runtime_client` and so on); the wire format, public APIs and
   behaviour are unchanged.
+- All three packages are wired for hexdocs.pm: rebar3_ex_doc runs as
+  the hex doc provider from each package directory (`rebar3 ex_doc`
+  is the local dry-run), every package carries its own README, and
+  `scripts/hex-prepublish` copies the project CHANGELOG/LICENSE into
+  the package directories before `rebar3 hex build`/`publish`. Doc
+  glitches the docs pipeline surfaced are fixed along the way: broken
+  `t:` type references, old-style `` `X' `` quoting that renders as
+  unclosed backquotes (runtime sources and the codec index doc
+  templates the generator emits), and a `%% @moduledoc` comment block
+  in `thrift_runtime_json` that never reached the compiled docs chunk.
 
 ## [0.6.1] — 2026-10-13
 

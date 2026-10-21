@@ -22,8 +22,8 @@ and the rendering to source text.
 Everything here is pure and descriptor-free — no `#tg_*` records and no
 resolution context — so the core emitter and the service emitter share
 one vocabulary for building and printing abstract forms. Callback and
-spec attributes carry raw `erl_parse' type nodes (`erl_prettypr' cannot
-lay them), so those are rendered as raw forms (`erl_pp'), while
+spec attributes carry raw `erl_parse` type nodes (`erl_prettypr` cannot
+lay them), so those are rendered as raw forms (`erl_pp`), while
 everything else stays trees.
 """.
 

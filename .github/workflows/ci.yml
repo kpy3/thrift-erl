@@ -41,6 +41,16 @@ jobs:
         run: rebar3 eunit
       - name: Common Test
         run: rebar3 ct
+      - name: Docs thrift_runtime (ex_doc)
+        # Dry-run of what `rebar3 hex publish` runs per package.
+        # rebar3_thrift is absent on purpose: its standalone build
+        # resolves thrift_generator from hex, which becomes possible
+        # only after that package's first publish.
+        working-directory: apps/thrift_runtime
+        run: rebar3 ex_doc
+      - name: Docs thrift_generator (ex_doc)
+        working-directory: apps/thrift_generator
+        run: rebar3 ex_doc
       - name: Coverage report
         run: rebar3 cover
       - name: Upload coverage report

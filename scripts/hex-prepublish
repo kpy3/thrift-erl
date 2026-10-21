@@ -1,0 +1,13 @@
+#!/bin/sh
+# Copy the project-wide CHANGELOG.md and LICENSE.md into the three hex
+# package directories (apps/<app>/). `rebar3 hex build/publish` runs
+# with the app directory as the project root and collects package files
+# from there, so the package tarballs and the ex_doc runs can only see
+# these files once they exist in the app dir. The copies are
+# gitignored (see .gitignore); run this before every publish.
+set -eu
+cd "$(dirname "$0")/.."
+for app in thrift_runtime thrift_generator rebar3_thrift; do
+    cp CHANGELOG.md "apps/$app/CHANGELOG.md"
+    cp LICENSE.md "apps/$app/LICENSE.md"
+done
