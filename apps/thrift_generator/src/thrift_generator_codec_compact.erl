@@ -216,8 +216,10 @@ collect_calls(Forms) ->
     lists:append([walk(Form) || Form <- Forms]).
 
 -spec walk(term()) -> [atom()].
-walk({call, _, {atom, _, Name}, _}) ->
-    [Name];
+walk({call, _, {atom, _, Name}, Args}) ->
+    %% The arguments are walked too: a helper call may sit inside
+    %% another call's arguments.
+    [Name | walk(Args)];
 walk(Term) when is_tuple(Term) ->
     walk(tuple_to_list(Term));
 walk(Term) when is_list(Term) ->

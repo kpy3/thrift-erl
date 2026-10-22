@@ -26,10 +26,12 @@ engine (`thrift_runtime_json`) byte for byte and error term for error term
 the PropEr equivalence properties and the negative battery in
 `thrift_codec_test`.
 
-Shape of the generated encode: a chain of per-field functions building
-the list of `"id":{"tag":value}` chunks in declaration order (absent
-fields fall through), the entry wrapping it in `{...}` with commas
-joined exactly like the generic `lists:join`. The decode is a
+Shape of the generated encode: a chain of per-field functions
+accumulating the list of `"id":{"tag":value}` chunks in declaration
+order in reverse (absent fields fall through), each chunk carrying its
+own leading comma — empty before the first present chunk — so the
+entry only reverses the accumulator inside `{...}`, byte-identical to
+the generic `lists:join` shape. The decode is a
 fields/field/after-function triple walking the JSON object with the
 shared scanner primitives (`json_skip_ws`, `json_expect`,
 `json_scan_string`, `json_scan_number` — emitted once per module, when
@@ -226,8 +228,11 @@ used_helpers(Forms) ->
 -spec collect_calls(erl_syntax:forms()) -> [atom()].
 collect_calls(Tree) when is_list(Tree) ->
     lists:append([collect_calls(T) || T <- Tree]);
-collect_calls({call, _ANNO, {atom, _ANNO2, Name}, _Args}) ->
-    [Name];
+collect_calls({call, _ANNO, {atom, _ANNO2, Name}, Args}) ->
+    %% The arguments are walked too: a helper call may sit inside
+    %% another call's arguments — the chain passes its payload straight
+    %% into the continuation call.
+    [Name | collect_calls(Args)];
 collect_calls(Tuple) when is_tuple(Tuple) ->
     collect_calls(tuple_to_list(Tuple));
 collect_calls(_Other) ->
@@ -289,29 +294,30 @@ struct_forms(S, Ctx, Enums) ->
 %%--------------------------------------------------------------------
 
 %% Entry clauses (map guard, required/union check) plus a chain of
-%% per-field functions building the chunk list; the entry joins the
-%% chunks with commas inside the braces, exactly the generic
-%% encode_struct_j shape.
+%% per-field functions accumulating the chunk list in reverse; each
+%% chunk carries its own leading comma (empty for the first present
+%% field), so the entry only reverses — measured ~20% over the
+%% join-at-the-top shape on the bench structs.
 
 -spec encode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, #{integer() => pos_integer()}) ->
     erl_syntax:forms().
 encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
     Chain = atom_concat(Encode, <<"_fields">>),
     %% The checks hand off to the FIRST chain function; with no fields
-    %% the chain name itself is the empty chunk list.
+    %% the chain name itself answers the empty accumulator.
     Entry =
         case S#tg_struct.fields of
             [] -> Chain;
             _ -> chain_fn_name(Chain, 1)
         end,
     Wrap =
-        'case'(call_local(Entry, [v("Value")]), [
+        'case'(call_local(Entry, [v("Value"), bin_lit(<<"">>), nil()]), [
             ok_bind_clause(
-                v("Chunks"),
+                v("Acc"),
                 ok_t(
                     list_lit([
                         bin_lit(<<"{">>),
-                        remote(lists, join, [bin_lit(<<",">>), v("Chunks")]),
+                        remote(lists, reverse, [v("Acc")]),
                         bin_lit(<<"}">>)
                     ])
                 )
@@ -340,13 +346,17 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
 ) ->
     erl_syntax:forms().
 chain_forms(Chain, [], _Ctx, _Enums, _N) ->
-    %% Zero fields: the chain name itself is the empty chunk list.
-    [{function, ?ANNO, Chain, 1, [clause([v("_Value")], none, [ok_t(nil())])]}];
+    %% Zero fields: the chain name itself answers the empty accumulator.
+    [{function, ?ANNO, Chain, 3, [clause([v("_Value"), v("_Comma"), v("_Acc")], none, [ok_t(nil())])]}];
 chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
     chain_fns(Chain, Fields, Ctx, Enums, 1).
 
-%% The field functions proper: each appends its chunk in front of the
-%% remaining chunk list; the last one answers the empty list.
+%% The field functions proper: the last one answers the accumulated
+%% chunk list (in reverse), the earlier ones hand it on. Each chunk
+%% embeds its own leading comma — `Comma' is the empty binary until a
+%% chunk has been produced, `<<",">>' after — so the entry needs no
+%% join. The accumulator is threaded in reverse and reversed once at
+%% the top.
 
 -spec chain_fns(
     atom(), [{#tg_field{}, wire_type()}], #ectx{}, #{integer() => pos_integer()}, pos_integer()
@@ -355,26 +365,108 @@ chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
 chain_fns(_Chain, [], _Ctx, _Enums, _N) ->
     [];
 chain_fns(Chain, [{F, T}], Ctx, Enums, N) ->
-    [chain_fn(Chain, N, F, T, ok_t(nil()), Ctx, Enums)];
+    [chain_fn(Chain, N, F, T, stop, Ctx, Enums)];
 chain_fns(Chain, [{F, T} | Rest], Ctx, Enums, N) ->
-    Next = call_local(chain_fn_name(Chain, N + 1), [v("Value")]),
+    Next = {next, chain_fn_name(Chain, N + 1)},
     [chain_fn(Chain, N, F, T, Next, Ctx, Enums)] ++ chain_fns(Chain, Rest, Ctx, Enums, N + 1).
 
+%% The two continuations of one field. `stop' means the field is the
+%% last one — it answers the accumulator itself. `Prefix' is the
+%% field's `"id":{"tag":` literal; `Payload' the value's JSON encoding
+%% (a direct expression for the guarded base types, the destructured
+%% `E' for call-backed ones). The uuid clause passes a placeholder
+%% prefix (its present side is the constant error).
+
+-spec present_call({next, atom()} | stop, ast(), ast()) -> ast().
+present_call(stop, Prefix, Payload) ->
+    ok_t(cons(list_lit([v("Comma"), Prefix, Payload, bin_lit(<<"}">>)]), v("Acc")));
+present_call({next, Name}, Prefix, Payload) ->
+    Chunk = cons(list_lit([v("Comma"), Prefix, Payload, bin_lit(<<"}">>)]), v("Acc")),
+    call_local(Name, [v("Value"), bin_lit(<<",">>), Chunk]).
+
+-spec absent_call({next, atom()} | stop) -> ast().
+absent_call(stop) ->
+    ok_t(v("Acc"));
+absent_call({next, Name}) ->
+    call_local(Name, [v("Value"), v("Comma"), v("Acc")]).
+
 -spec chain_fn(
-    atom(), pos_integer(), #tg_field{}, wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}
+    atom(), pos_integer(), #tg_field{}, wire_type(), {next, atom()} | stop, #ectx{} | undefined, #{
+        integer() => pos_integer()
+    }
 ) ->
     erl_syntax:forms().
-chain_fn(Chain, N, F, {base, uuid}, Next, _Ctx, _Enums) ->
+chain_fn(Chain, N, F, {base, uuid}, NextStep, _Ctx, _Enums) ->
     %% A present uuid field never produces a chunk: the constant error
     %% fires before the value is read. An absent one skips on to the
-    %% rest of the chain, like any other field.
+    %% rest of the chain, like any other field. A last-link uuid never
+    %% reads the comma state (the present side is the constant error)
+    %% — underscored there.
+    CommaPat =
+        case NextStep of
+            stop -> v("_Comma");
+            {next, _} -> v("Comma")
+        end,
     Body =
         'case'(v("Value"), [
             clause([map_exact(name_lit(F#tg_field.name), v("_V"))], none, [uuid_error()]),
-            clause([v("_")], none, [Next])
+            clause([v("_")], none, [absent_call(NextStep)])
         ]),
-    {function, ?ANNO, chain_fn_name(Chain, N), 1, [clause([v("Value")], none, [Body])]};
-chain_fn(Chain, N, F, T, Next, Ctx, Enums) ->
+    {function, ?ANNO, chain_fn_name(Chain, N), 3, [clause([v("Value"), CommaPat, v("Acc")], none, [Body])]};
+chain_fn(Chain, N, F, {base, B} = T, NextStep, _Ctx, _Enums) when
+    B =:= bool; B =:= i8; B =:= i16; B =:= i32; B =:= i64; B =:= double; B =:= string; B =:= binary
+->
+    %% The guarded base types fold the type check into the map-match
+    %% clause and place the payload straight into the chunk — no {ok}
+    %% wrapper, no destructure case. The present-but-wrong-type clause
+    %% binds the value it reports, like the generic engine's mismatch.
+    Prefix =
+        bin_lit(
+            iolist_to_binary([
+                $", integer_to_binary(F#tg_field.id), <<"\":{\"">>, json_tag(T), <<"\":">>
+            ])
+        ),
+    Name = name_lit(F#tg_field.name),
+    Clauses =
+        case B of
+            bool ->
+                [
+                    clause([map_exact(Name, at(true))], none, [
+                        present_call(NextStep, Prefix, bin_lit(<<"true">>))
+                    ]),
+                    clause([map_exact(Name, at(false))], none, [
+                        present_call(NextStep, Prefix, bin_lit(<<"false">>))
+                    ]),
+                    clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])
+                ];
+            double ->
+                [
+                    clause([map_exact(Name, v("V"))], [remote(erlang, is_number, [v("V")])], [
+                        present_call(NextStep, Prefix, call_local(json_format_double, [v("V")]))
+                    ]),
+                    clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])
+                ];
+            S when S =:= string; S =:= binary ->
+                [
+                    clause([map_exact(Name, v("V"))], [remote(erlang, is_binary, [v("V")])], [
+                        present_call(NextStep, Prefix, list_lit([i(34), call_local(json_escape, [v("V")]), i(34)]))
+                    ]),
+                    clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])
+                ];
+            _ ->
+                [
+                    clause([map_exact(Name, v("V"))], [int_range(B, v("V"))], [
+                        present_call(NextStep, Prefix, remote(erlang, integer_to_binary, [v("V")]))
+                    ]),
+                    clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])
+                ]
+        end,
+    {function, ?ANNO, chain_fn_name(Chain, N), 3, [
+        clause([v("Value"), v("Comma"), v("Acc")], none, [
+            'case'(v("Value"), Clauses ++ [clause([v("_")], none, [absent_call(NextStep)])])
+        ])
+    ]};
+chain_fn(Chain, N, F, T, NextStep, Ctx, Enums) ->
     %% The whole `"id":{"tag":` prefix is one literal.
     Prefix =
         bin_lit(
@@ -386,21 +478,13 @@ chain_fn(Chain, N, F, T, Next, Ctx, Enums) ->
         'case'(v("Value"), [
             clause([map_exact(name_lit(F#tg_field.name), v("V"))], none, [
                 'case'(encode_json_expr(T, v("V"), Ctx, Enums), [
-                    clause([tuple_t([at(ok), v("E")])], none, [
-                        'case'(Next, [
-                            ok_bind_clause(
-                                v("RestChunks"),
-                                ok_t(cons(list_lit([Prefix, v("E"), bin_lit(<<"}">>)]), v("RestChunks")))
-                            ),
-                            error_clause()
-                        ])
-                    ]),
+                    clause([tuple_t([at(ok), v("E")])], none, [present_call(NextStep, Prefix, v("E"))]),
                     error_clause()
                 ])
             ]),
-            clause([v("_")], none, [Next])
+            clause([v("_")], none, [absent_call(NextStep)])
         ]),
-    {function, ?ANNO, chain_fn_name(Chain, N), 1, [clause([v("Value")], none, [Body])]}.
+    {function, ?ANNO, chain_fn_name(Chain, N), 3, [clause([v("Value"), v("Comma"), v("Acc")], none, [Body])]}.
 
 -spec chain_fn_name(atom(), pos_integer()) -> atom().
 chain_fn_name(Chain, N) ->
