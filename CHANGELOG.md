@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-10-22
+
+A codec-performance cycle. Ref-descriptor dispatch stops probing per
+call, nested same-module references call their sibling codecs directly
+instead of paying a full runtime dispatch, and the specialized JSON
+codecs get a flatter encode chain and a single-clause decode dispatch.
+The wire format, error semantics and the public API are unchanged: the
+PropEr equivalence batteries (specialized vs generic, byte for byte on
+all three protocols) and the golden interop suite guard every step.
+The full gate is green on both OTP 28 and 29.
+
+### Runtime (`thrift_runtime`)
+
+- Ref-descriptor dispatch is cache-first. The first use of a generated
+  module's codecs still probes and warms a `persistent_term` map, but
+  every later call reads that map locally in the protocol module and
+  invokes the target function directly — no hop through
+  `thrift_runtime_protocol:codec/4`, which ablation measured at
+  roughly a quarter of a dispatch call. That module remains the cold
+  path (first use, probe miss, reload), and the stale-codec recovery
+  (`undef` → `codec_stale/3` → re-probe → generic) is unchanged.
+
+### Generator (`thrift_generator`)
+
+- Same-module struct references emit a direct sibling call in the
+  binary and compact codecs. The locality test compared the reference
+  module atom against the binary module key and never fired, so every
+  nested reference inside one file took the full runtime dispatch —
+  the benchmark's `Insanity` struct makes about a hundred of them per
+  operation. Binary encode of `Insanity` goes from 24.1 to 38.6 K/s;
+  the JSON emitter had this right from the start.
+- The JSON decode dispatch is a single clause per (id, tag) pair, and
+  the decode body that the runtime dispatch calls by name is exported
+  explicitly — a missing export used to silently disable the
+  specialized JSON codecs (the fallback is byte-identical, so only the
+  engaged-codec test and the bench could tell).
+- The JSON encode chain accumulates chunks in reverse (one
+  `lists:reverse` at the top; every chunk carries its own separator)
+  and the base types fold their type check into guard clauses with the
+  payload placed directly — about 8% faster, roughly 1.4× the generic
+  engine on the same payloads.
+
+### Performance
+
+- README numbers re-measured on OTP 29 (an OTP 28 run confirms the
+  ratios) after this cycle: 4.6–8.3× on binary, 2.6–5.9× on compact,
+  10.1–16.8× on JSON encode and 1.1–1.5× on JSON decode against the
+  official 0.25.0 Erlang runtime; the specialized codecs sit at
+  0.9–1.5× of the generic engine across the matrix. No adopted change
+  measured slower than what it replaced, and every row improved
+  against the numbers this cycle started from. Three rows remain a few
+  percent below the absolutes published with 0.6.1 (binary Xtruct
+  encode, compact Xtruct2 encode, JSON Xtruct2 decode) — absolute
+  throughput is machine- and day-dependent, the same-run speedup
+  ratios are the meaningful axis.
+- Measured and rejected, each rolled back by its own gate and recorded
+  here so nobody pays for the experiment twice: caching external funs
+  instead of MFA atoms (±0–6% with a flipping sign — the BEAM
+  call-site export-entry cache erases the difference); flattening the
+  compact encode chain into straight-line functions (5–10% slower
+  than the chain — transition calls are noise next to payload work);
+  a JSON decode pipeline without the name thread (strictly less
+  bookkeeping, yet a stable −10% on JSON decode — a BEAM code-layout
+  effect, not extra work).
+- The bench script prints the specialized column first and labels its
+  axes honestly: the specialized path is a ref-descriptor dispatch, the
+  generic path is an inline descriptor with per-process memo.
+
 ## [0.7.0] — 2026-10-21
 
 ### All applications
