@@ -377,22 +377,24 @@ resolve_struct(Mod, Module, Name, Compile) ->
             {ok, Compiled}
     end.
 
-%% The specialized-codec dispatch: a generated types module exports one
-%% index per protocol (`binary_codec`/`compact_codec`/`json_codec`)
-%% handing out its per-struct function pairs. The probe resolves a pair
-%% once per struct name and the persistent_term cache keeps the
-%% underlying `{module, name}' of both funs, so the hot path is one
-%% persistent_term read plus a direct dynamic call — which always
-%% enters the current version of the types module. A reload that drops
-%% a codec surfaces as undef on that call: `codec_stale/3` removes the
-%% pair and the caller falls back to the generic engine — the
-%% revalidation the per-call probe used to do, paid only when it fires.
-%% A module without the index pays the probe once (`no'), a name the
-%% index does not know pays it once (`false'); the key includes the
-%% protocol module because the three protocols probe different index
-%% functions of the same module. Version drift between the cache and
-%% the current module remains the documented no-hot-swap scenario (see
-%% the protocol moduledocs).
+%% The cold path of the specialized-codec dispatch: a generated types
+%% module exports one index per protocol
+%% (`binary_codec`/`compact_codec`/`json_codec`) handing out its
+%% per-struct function pairs. The probe resolves a pair once per struct
+%% name and the persistent_term cache keeps the underlying `{module,
+%% name}' of both funs. The HOT path does not come through here: the
+%% protocol modules read the same cache in their own `codec_cached/2`
+%% (a cross-module hop into this module measured ~25% per call) and
+%% only re-enter `codec/4' when the cache has no verdict yet — first
+%% use, a probe miss, or a reload. A reload that drops a codec surfaces
+%% as undef on the hot-path call: `codec_stale/3` removes the pair and
+%% the caller falls back to the generic engine — the revalidation the
+%% per-call probe used to do, paid only when it fires. A module without
+%% the index pays the probe once, a name the index does not know pays
+%% it once (`false'); the key includes the protocol module because the
+%% three protocols probe different index functions of the same module.
+%% Version drift between the cache and the current module remains the
+%% documented no-hot-swap scenario (see the protocol moduledocs).
 
 -spec codec(module(), module(), binary(), atom()) -> {ok, module(), atom(), atom()} | error.
 codec(Mod, Module, Name, Index) ->
