@@ -160,28 +160,54 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
 %% the nested `k_ref' encoding. A generated module's specialized compact
 %% codec (found through the `compact_codec/1' probe) takes precedence
 %% over the compiled-scheme interpreter.
+%%
+%% The dispatch cache is read HERE, not through
+%% `thrift_runtime_protocol:codec/4': the hot path must stay in this
+%% module (measured ~25% per call for the extra hop), so the shared
+%% probe/cache machinery is only the cold path. After it warms the
+%% cache the ref entry re-enters and takes the hot branch.
 -spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
 encode_resolved(Module, Name, Value) ->
-    case compact_codec(Module, Name) of
-        {ok, CodecModule, EncodeName, _DecodeName} ->
+    case codec_cached(Module, Name) of
+        {EncodeName, _DecodeName} ->
             try
-                CodecModule:EncodeName(Value)
+                Module:EncodeName(Value)
             catch
                 %% The types module was reloaded without this codec:
                 %% drop the stale pair and take the generic path, same
                 %% as a probe miss. An undef from a still-installed
                 %% codec (a genuine bug) is re-raised.
                 error:undef:Stack ->
-                    case erlang:function_exported(CodecModule, EncodeName, 1) of
+                    case erlang:function_exported(Module, EncodeName, 1) of
                         true ->
                             erlang:raise(error, undef, Stack);
                         false ->
                             thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
-                            encode_ref_generic(Module, Name, Value)
+                            encode_resolved(Module, Name, Value)
                     end
             end;
-        error ->
-            encode_ref_generic(Module, Name, Value)
+        false ->
+            encode_ref_generic(Module, Name, Value);
+        cold ->
+            case compact_codec(Module, Name) of
+                {ok, _CodecModule, _EncodeName, _DecodeName} ->
+                    encode_resolved(Module, Name, Value);
+                error ->
+                    encode_ref_generic(Module, Name, Value)
+            end
+    end.
+
+%% The hot-path read of the dispatch cache this module owns the key of
+%% (`thrift_runtime_protocol:cache_mfa/3' writes it). Local on purpose:
+%% the shared `codec/4' adds a cross-module hop to every specialized
+%% call. `cold' means the cache has no verdict yet — the caller goes
+%% through the shared probe once, then re-enters the hot path.
+-spec codec_cached(module(), binary()) -> {atom(), atom()} | false | cold.
+codec_cached(Module, Name) ->
+    case persistent_term:get({?MODULE, codec_mfa, Module}, probe) of
+        #{Name := {EncodeName, DecodeName}} -> {EncodeName, DecodeName};
+        #{Name := false} -> false;
+        _ -> cold
     end.
 
 -spec encode_ref_generic(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
@@ -921,22 +947,29 @@ resolve_struct(Module, Name) ->
 
 -spec decode_ref_struct(module(), binary(), binary()) -> decode_result(thrift_runtime_binary:struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
-    case compact_codec(Module, Name) of
-        {ok, CodecModule, _EncodeName, DecodeName} ->
+    case codec_cached(Module, Name) of
+        {_EncodeName, DecodeName} ->
             try
-                CodecModule:DecodeName(Bin)
+                Module:DecodeName(Bin)
             catch
                 error:undef:Stack ->
-                    case erlang:function_exported(CodecModule, DecodeName, 1) of
+                    case erlang:function_exported(Module, DecodeName, 1) of
                         true ->
                             erlang:raise(error, undef, Stack);
                         false ->
                             thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
-                            decode_ref_generic(Module, Name, Bin)
+                            decode_ref_struct(Module, Name, Bin)
                     end
             end;
-        error ->
-            decode_ref_generic(Module, Name, Bin)
+        false ->
+            decode_ref_generic(Module, Name, Bin);
+        cold ->
+            case compact_codec(Module, Name) of
+                {ok, _CodecModule, _EncodeName, _DecodeName} ->
+                    decode_ref_struct(Module, Name, Bin);
+                error ->
+                    decode_ref_generic(Module, Name, Bin)
+            end
     end.
 
 -spec decode_ref_generic(module(), binary(), binary()) ->

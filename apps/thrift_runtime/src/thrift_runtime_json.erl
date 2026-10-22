@@ -126,26 +126,7 @@ after the struct proper (see the moduledoc).
 """.
 -spec decode(thrift_runtime_binary:type_desc(), binary()) -> decode_result(term()).
 decode({struct, {ref, Module, Name}}, Bin) ->
-    case json_codec(Module, Name) of
-        {ok, CodecModule, _EncodeName, DecodeName} ->
-            try
-                %% The generated pair decodes the struct proper; the
-                %% envelope's closing bracket folds here, exactly like
-                %% decode_struct_top below.
-                fold_bracket(CodecModule:DecodeName(Bin))
-            catch
-                error:undef:Stack ->
-                    case erlang:function_exported(CodecModule, DecodeName, 1) of
-                        true ->
-                            erlang:raise(error, undef, Stack);
-                        false ->
-                            thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
-                            decode_top_generic(Module, Name, Bin)
-                    end
-            end;
-        error ->
-            decode_top_generic(Module, Name, Bin)
-    end;
+    decode_ref_top(Module, Name, Bin);
 decode({struct, {Kind, Fields}}, Bin) when is_atom(Kind), is_list(Fields) ->
     decode_struct_top(memo_compiled(Kind, Fields), Bin);
 decode(TypeDesc, Bin) when is_binary(Bin) ->
@@ -158,6 +139,42 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
 decode(_TypeDesc, _Bin) ->
     more.
 
+%% The top-level ref decode with the envelope's closing bracket folded
+%% in: the generated pair decodes the struct proper, the fold here
+%% matches decode_struct_top below.
+%%
+%% The dispatch cache is read HERE, not through
+%% `thrift_runtime_protocol:codec/4': the hot path must stay in this
+%% module (measured ~25% per call for the extra hop), so the shared
+%% probe/cache machinery is only the cold path. After it warms the
+%% cache the ref entry re-enters and takes the hot branch.
+-spec decode_ref_top(module(), binary(), binary()) -> decode_result(term()).
+decode_ref_top(Module, Name, Bin) ->
+    case codec_cached(Module, Name) of
+        {_EncodeName, DecodeName} ->
+            try
+                fold_bracket(Module:DecodeName(Bin))
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(Module, DecodeName, 1) of
+                        true ->
+                            erlang:raise(error, undef, Stack);
+                        false ->
+                            thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
+                            decode_ref_top(Module, Name, Bin)
+                    end
+            end;
+        false ->
+            decode_top_generic(Module, Name, Bin);
+        cold ->
+            case json_codec(Module, Name) of
+                {ok, _CodecModule, _EncodeName, _DecodeName} ->
+                    decode_ref_top(Module, Name, Bin);
+                error ->
+                    decode_top_generic(Module, Name, Bin)
+            end
+    end.
+
 -doc """
 Non-folding struct decode for refs nested inside containers and struct
 fields: probes the generated JSON codec pair and falls back to the
@@ -168,22 +185,42 @@ The envelope's closing `]` is NOT consumed — only the top-level
 """.
 -spec decode_nested(thrift_runtime_binary:type_desc(), binary()) -> decode_result(term()).
 decode_nested({struct, {ref, Module, Name}}, Bin) ->
-    case json_codec(Module, Name) of
-        {ok, CodecModule, _EncodeName, DecodeName} ->
+    case codec_cached(Module, Name) of
+        {_EncodeName, DecodeName} ->
             try
-                CodecModule:DecodeName(Bin)
+                Module:DecodeName(Bin)
             catch
                 error:undef:Stack ->
-                    case erlang:function_exported(CodecModule, DecodeName, 1) of
+                    case erlang:function_exported(Module, DecodeName, 1) of
                         true ->
                             erlang:raise(error, undef, Stack);
                         false ->
                             thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
-                            decode_nested_generic(Module, Name, Bin)
+                            decode_nested({struct, {ref, Module, Name}}, Bin)
                     end
             end;
-        error ->
-            decode_nested_generic(Module, Name, Bin)
+        false ->
+            decode_nested_generic(Module, Name, Bin);
+        cold ->
+            case json_codec(Module, Name) of
+                {ok, _CodecModule, _EncodeName, _DecodeName} ->
+                    decode_nested({struct, {ref, Module, Name}}, Bin);
+                error ->
+                    decode_nested_generic(Module, Name, Bin)
+            end
+    end.
+
+%% The hot-path read of the dispatch cache this module owns the key of
+%% (`thrift_runtime_protocol:cache_mfa/3' writes it). Local on purpose:
+%% the shared `codec/4' adds a cross-module hop to every specialized
+%% call. `cold' means the cache has no verdict yet — the caller goes
+%% through the shared probe once, then re-enters the hot path.
+-spec codec_cached(module(), binary()) -> {atom(), atom()} | false | cold.
+codec_cached(Module, Name) ->
+    case persistent_term:get({?MODULE, codec_mfa, Module}, probe) of
+        #{Name := {EncodeName, DecodeName}} -> {EncodeName, DecodeName};
+        #{Name := false} -> false;
+        _ -> cold
     end.
 
 -spec decode_top_generic(module(), binary(), binary()) -> decode_result(term()).
@@ -1332,26 +1369,33 @@ resolve_struct(Module, Name) ->
 %% asymmetry, so the same pair serves top-level and nested refs.
 -spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
 encode_resolved(Module, Name, Value) ->
-    case json_codec(Module, Name) of
-        {ok, CodecModule, EncodeName, _DecodeName} ->
+    case codec_cached(Module, Name) of
+        {EncodeName, _DecodeName} ->
             try
-                CodecModule:EncodeName(Value)
+                Module:EncodeName(Value)
             catch
                 %% The types module was reloaded without this codec:
                 %% drop the stale pair and take the generic path, same
                 %% as a probe miss. An undef from a still-installed
                 %% codec (a genuine bug) is re-raised.
                 error:undef:Stack ->
-                    case erlang:function_exported(CodecModule, EncodeName, 1) of
+                    case erlang:function_exported(Module, EncodeName, 1) of
                         true ->
                             erlang:raise(error, undef, Stack);
                         false ->
                             thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
-                            encode_ref_generic(Module, Name, Value)
+                            encode_resolved(Module, Name, Value)
                     end
             end;
-        error ->
-            encode_ref_generic(Module, Name, Value)
+        false ->
+            encode_ref_generic(Module, Name, Value);
+        cold ->
+            case json_codec(Module, Name) of
+                {ok, _CodecModule, _EncodeName, _DecodeName} ->
+                    encode_resolved(Module, Name, Value);
+                error ->
+                    encode_ref_generic(Module, Name, Value)
+            end
     end.
 
 -spec encode_ref_generic(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
