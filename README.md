@@ -48,10 +48,10 @@ the in-process contract differs, it is deliberate.
   per-struct wire codec into every generated module, and named struct
   references dispatch straight into it — no descriptor interpretation
   at runtime (the generic engine remains for introspection, inline
-  descriptors and as the equivalence reference). Measured 4.2–6.5× on
-  the binary protocol, 2.5–5.4× on compact and 8.9–18.3× on JSON encode
-  against the official 0.25.0 Erlang runtime; JSON decode runs slightly
-  ahead (1.1–1.2×) (see Performance; reproducible with `./scripts/bench`).
+  descriptors and as the equivalence reference). Measured 4.6–8.3× on
+  the binary protocol, 2.6–5.9× on compact and 10.1–16.8× on JSON encode
+  against the official 0.25.0 Erlang runtime; JSON decode runs ahead
+  (1.1–1.5×) (see Performance; reproducible with `./scripts/bench`).
 - **Errors are values.** Decoding answers `{error, trailing}` /
   `{error, truncated}` instead of throwing; a declared server
   exception comes back to the client typed, as
@@ -816,12 +816,12 @@ the specialized codecs to.
 
 | case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (42 B)     | encode | 2.12 M/s | 460 K/s | 4.6x |
-| Xtruct            | decode | 1.23 M/s | 222 K/s | 5.6x |
-| Xtruct2 (51 B)    | encode | 1.36 M/s | 321 K/s | 4.2x |
-| Xtruct2           | decode | 771 K/s  | 118 K/s | 6.5x |
-| Insanity (3.2 KB) | encode | 24.1 K/s | 4.5 K/s | 5.4x |
-| Insanity          | decode | 13.5 K/s | 2.6 K/s | 5.3x |
+| Xtruct (42 B)     | encode | 2.48 M/s | 466 K/s | 5.3x |
+| Xtruct            | decode | 1.35 M/s | 227 K/s | 5.9x |
+| Xtruct2 (51 B)    | encode | 1.53 M/s | 332 K/s | 4.6x |
+| Xtruct2           | decode | 815 K/s  | 122 K/s | 6.7x |
+| Insanity (3.2 KB) | encode | 38.6 K/s | 4.6 K/s | 8.3x |
+| Insanity          | decode | 16.2 K/s | 2.6 K/s | 6.2x |
 
 The **compact protocol** runs the same payload set on both sides —
 `thrift_runtime_compact` against the vendored `thrift_compact_protocol`
@@ -829,12 +829,12 @@ The **compact protocol** runs the same payload set on both sides —
 
 | case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (28 B)      | encode | 1.34 M/s | 247 K/s | 5.4x |
-| Xtruct             | decode | 976 K/s  | 212 K/s | 4.6x |
-| Xtruct2 (24 B)     | encode | 891 K/s  | 198 K/s | 4.5x |
-| Xtruct2            | decode | 558 K/s  | 130 K/s | 4.3x |
-| Insanity (1.2 KB)  | encode | 11.2 K/s | 4.6 K/s | 2.5x |
-| Insanity           | decode | 10.5 K/s | 2.4 K/s | 4.4x |
+| Xtruct (28 B)      | encode | 1.54 M/s | 263 K/s | 5.9x |
+| Xtruct             | decode | 1.11 M/s | 218 K/s | 5.1x |
+| Xtruct2 (24 B)     | encode | 1.01 M/s | 209 K/s | 4.8x |
+| Xtruct2            | decode | 664 K/s  | 132 K/s | 5.0x |
+| Insanity (1.2 KB)  | encode | 12.6 K/s | 4.9 K/s | 2.6x |
+| Insanity           | decode | 13.2 K/s | 2.4 K/s | 5.4x |
 
 The **JSON protocol** runs the same payload set on both sides —
 `thrift_runtime_json` against the vendored `thrift_json_protocol`
@@ -843,17 +843,23 @@ level, since the official JSON reader primes on a whole message):
 
 | case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (87 B)      | encode | 945 K/s  | 106 K/s | 8.9x |
-| Xtruct             | decode | 79 K/s   | 65 K/s  | 1.2x |
-| Xtruct2 (110 B)    | encode | 1.00 M/s | 55 K/s  | 18.3x |
-| Xtruct2            | decode | 50 K/s   | 45 K/s  | 1.1x |
-| Insanity (6.7 KB)  | encode | 14.3 K/s | 1.2 K/s | 12.4x |
+| Xtruct (87 B)      | encode | 1.14 M/s | 113 K/s | 10.1x |
+| Xtruct             | decode | 103 K/s  | 67 K/s  | 1.5x |
+| Xtruct2 (110 B)    | encode | 1.01 M/s | 60 K/s  | 16.8x |
+| Xtruct2            | decode | 51 K/s   | 46 K/s  | 1.1x |
+| Insanity (6.7 KB)  | encode | 15.3 K/s | 1.2 K/s | 12.9x |
 | Insanity           | decode | 1.2 K/s  | 1.1 K/s | 1.1x |
 
 JSON encode is several times faster because the official side formats
 every token through `io_lib`; on decode both sides scan the same text,
-so the numbers sit slightly ahead of parity (1.1–1.2× on these
-payloads).
+so the numbers sit ahead of parity (1.1–1.5× on these payloads).
+
+The numbers above were measured on OTP 29; an OTP 28 run confirms the
+same ratios. The specialized codecs also hold their own against the
+generic interpreter inside this runtime — the same benchmark reports
+specialized vs generic ratios of 0.9–1.5× across the protocol/struct
+matrix (nested same-module references call sibling codecs directly,
+and the dispatch cache is read without a module hop).
 
 Only the speedup ratios on the same machine are meaningful; run
 `./scripts/bench` to get numbers for your hardware.
