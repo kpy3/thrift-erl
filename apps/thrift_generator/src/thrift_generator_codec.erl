@@ -611,18 +611,32 @@ encode_base_expr(B, V, Suffix) ->
     encode_wire_expr({base, B}, V, undefined, #{}, Suffix).
 
 -spec struct_encode_call(module(), binary(), ast(), #ectx{}) -> ast().
-struct_encode_call(TypesMod, Local, V, Ctx) when TypesMod =:= Ctx#ectx.current ->
-    {Encode, _Decode} = struct_wire_pair(Local, Ctx),
-    call_local(Encode, [V]);
-struct_encode_call(TypesMod, Local, V, _Ctx) ->
-    remote(thrift_runtime_binary, encode, [literal({struct, {ref, TypesMod, Local}}), V]).
+struct_encode_call(TypesMod, Local, V, Ctx) ->
+    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
+        true ->
+            {Encode, _Decode} = struct_wire_pair(Local, Ctx),
+            call_local(Encode, [V]);
+        false ->
+            remote(thrift_runtime_binary, encode, [literal({struct, {ref, TypesMod, Local}}), V])
+    end.
 
 -spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
-struct_decode_call(TypesMod, Local, Bin, Ctx) when TypesMod =:= Ctx#ectx.current ->
-    {_Encode, Decode} = struct_wire_pair(Local, Ctx),
-    call_local(Decode, [Bin]);
-struct_decode_call(TypesMod, Local, Bin, _Ctx) ->
-    remote(thrift_runtime_binary, decode, [literal({struct, {ref, TypesMod, Local}}), Bin]).
+struct_decode_call(TypesMod, Local, Bin, Ctx) ->
+    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
+        true ->
+            {_Encode, Decode} = struct_wire_pair(Local, Ctx),
+            call_local(Decode, [Bin]);
+        false ->
+            remote(thrift_runtime_binary, decode, [literal({struct, {ref, TypesMod, Local}}), Bin])
+    end.
+
+%% Same-module refs become direct sibling calls; the check rebuilds the
+%% module atom from `#ectx.current', which keeps the binary key (`wtype'
+%% derives the ref's module the same way). A case body, not a guard —
+%% binary_to_atom is not guard-legal.
+-spec types_module_atom(binary()) -> module().
+types_module_atom(Name) ->
+    binary_to_atom(<<(thrift_generator_emitter:sanitize(Name))/binary, "_types">>, utf8).
 
 -spec decode_wire_expr(wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}, string()) -> ast().
 decode_wire_expr({base, bool}, Bin, _Ctx, _Enums, Suffix) ->
