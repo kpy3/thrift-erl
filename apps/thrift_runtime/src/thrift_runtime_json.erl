@@ -127,18 +127,24 @@ after the struct proper (see the moduledoc).
 -spec decode(thrift_runtime_binary:type_desc(), binary()) -> decode_result(term()).
 decode({struct, {ref, Module, Name}}, Bin) ->
     case json_codec(Module, Name) of
-        {ok, _Encode, Decode} ->
-            %% The generated pair decodes the struct proper; the
-            %% envelope's closing bracket folds here, exactly like
-            %% decode_struct_top below.
-            fold_bracket(Decode(Bin));
+        {ok, CodecModule, _EncodeName, DecodeName} ->
+            try
+                %% The generated pair decodes the struct proper; the
+                %% envelope's closing bracket folds here, exactly like
+                %% decode_struct_top below.
+                fold_bracket(CodecModule:DecodeName(Bin))
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(CodecModule, DecodeName, 1) of
+                        true ->
+                            erlang:raise(error, undef, Stack);
+                        false ->
+                            thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
+                            decode_top_generic(Module, Name, Bin)
+                    end
+            end;
         error ->
-            case resolve_compiled(Module, Name) of
-                {ok, Compiled} ->
-                    decode_struct_top(Compiled, Bin);
-                {error, _} = Error ->
-                    Error
-            end
+            decode_top_generic(Module, Name, Bin)
     end;
 decode({struct, {Kind, Fields}}, Bin) when is_atom(Kind), is_list(Fields) ->
     decode_struct_top(memo_compiled(Kind, Fields), Bin);
@@ -163,15 +169,39 @@ The envelope's closing `]` is NOT consumed — only the top-level
 -spec decode_nested(thrift_runtime_binary:type_desc(), binary()) -> decode_result(term()).
 decode_nested({struct, {ref, Module, Name}}, Bin) ->
     case json_codec(Module, Name) of
-        {ok, _Encode, Decode} ->
-            Decode(Bin);
+        {ok, CodecModule, _EncodeName, DecodeName} ->
+            try
+                CodecModule:DecodeName(Bin)
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(CodecModule, DecodeName, 1) of
+                        true ->
+                            erlang:raise(error, undef, Stack);
+                        false ->
+                            thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
+                            decode_nested_generic(Module, Name, Bin)
+                    end
+            end;
         error ->
-            case resolve_compiled(Module, Name) of
-                {ok, Compiled} ->
-                    decode_struct_j(Compiled, Bin);
-                {error, _} = Error ->
-                    Error
-            end
+            decode_nested_generic(Module, Name, Bin)
+    end.
+
+-spec decode_top_generic(module(), binary(), binary()) -> decode_result(term()).
+decode_top_generic(Module, Name, Bin) ->
+    case resolve_compiled(Module, Name) of
+        {ok, Compiled} ->
+            decode_struct_top(Compiled, Bin);
+        {error, _} = Error ->
+            Error
+    end.
+
+-spec decode_nested_generic(module(), binary(), binary()) -> decode_result(term()).
+decode_nested_generic(Module, Name, Bin) ->
+    case resolve_compiled(Module, Name) of
+        {ok, Compiled} ->
+            decode_struct_j(Compiled, Bin);
+        {error, _} = Error ->
+            Error
     end.
 
 -doc """
@@ -1303,15 +1333,34 @@ resolve_struct(Module, Name) ->
 -spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
 encode_resolved(Module, Name, Value) ->
     case json_codec(Module, Name) of
-        {ok, Encode, _Decode} ->
-            Encode(Value);
+        {ok, CodecModule, EncodeName, _DecodeName} ->
+            try
+                CodecModule:EncodeName(Value)
+            catch
+                %% The types module was reloaded without this codec:
+                %% drop the stale pair and take the generic path, same
+                %% as a probe miss. An undef from a still-installed
+                %% codec (a genuine bug) is re-raised.
+                error:undef:Stack ->
+                    case erlang:function_exported(CodecModule, EncodeName, 1) of
+                        true ->
+                            erlang:raise(error, undef, Stack);
+                        false ->
+                            thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
+                            encode_ref_generic(Module, Name, Value)
+                    end
+            end;
         error ->
-            case resolve_struct(Module, Name) of
-                {ok, Compiled} ->
-                    encode_struct_j(Compiled, Value);
-                error ->
-                    {error, {encode, {unknown_struct, {Module, Name}}}}
-            end
+            encode_ref_generic(Module, Name, Value)
+    end.
+
+-spec encode_ref_generic(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
+encode_ref_generic(Module, Name, Value) ->
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            encode_struct_j(Compiled, Value);
+        error ->
+            {error, {encode, {unknown_struct, {Module, Name}}}}
     end.
 
 %% The decode counterpart; callers pick the fold or no-fold struct
@@ -1325,7 +1374,7 @@ resolve_compiled(Module, Name) ->
             {error, {decode, {unknown_struct, {Module, Name}}}}
     end.
 
--spec json_codec(module(), binary()) -> {ok, fun(), fun()} | error.
+-spec json_codec(module(), binary()) -> {ok, module(), atom(), atom()} | error.
 json_codec(Module, Name) ->
     thrift_runtime_protocol:codec(?MODULE, Module, Name, json_codec).
 

@@ -63,6 +63,7 @@ helpers work on wire shapes only they understand.
     check_present_fields/5,
     mark_present/2,
     codec/4,
+    codec_stale/3,
     struct_fields/1,
     resolve_struct/4,
     memo_compiled/5
@@ -376,48 +377,69 @@ resolve_struct(Mod, Module, Name, Compile) ->
             {ok, Compiled}
     end.
 
-%% The specialized-codec probe: a generated types module exports one
+%% The specialized-codec dispatch: a generated types module exports one
 %% index per protocol (`binary_codec`/`compact_codec`/`json_codec`)
-%% handing out its per-struct function pairs. The persistent_term cache
-%% stores only whether the module exports the index — the funs come
-%% fresh from the module on every call, so reloading a types module (as
-%% the test suite does) never leaves a fun from a purged version in the
-%% cache. The export fact is still cached once, so a module without the
-%% index pays the probe once; the key includes the protocol module
-%% because the three protocols probe different index functions of the
-%% same module. Version drift between a cached export and the current
-%% module remains the documented no-hot-swap scenario (see the protocol
-%% moduledocs).
+%% handing out its per-struct function pairs. The probe resolves a pair
+%% once per struct name and the persistent_term cache keeps the
+%% underlying `{module, name}' of both funs, so the hot path is one
+%% persistent_term read plus a direct dynamic call — which always
+%% enters the current version of the types module. A reload that drops
+%% a codec surfaces as undef on that call: `codec_stale/3` removes the
+%% pair and the caller falls back to the generic engine — the
+%% revalidation the per-call probe used to do, paid only when it fires.
+%% A module without the index pays the probe once (`no'), a name the
+%% index does not know pays it once (`false'); the key includes the
+%% protocol module because the three protocols probe different index
+%% functions of the same module. Version drift between the cache and
+%% the current module remains the documented no-hot-swap scenario (see
+%% the protocol moduledocs).
 
--spec codec(module(), module(), binary(), atom()) -> {ok, fun(), fun()} | error.
+-spec codec(module(), module(), binary(), atom()) -> {ok, module(), atom(), atom()} | error.
 codec(Mod, Module, Name, Index) ->
-    Key = {Mod, codec_export, Module},
+    Key = {Mod, codec_mfa, Module},
     case persistent_term:get(Key, probe) of
-        yes ->
+        #{Name := {EncodeName, DecodeName}} ->
+            {ok, Module, EncodeName, DecodeName};
+        #{Name := false} ->
+            error;
+        Cached when is_map(Cached); Cached =:= probe ->
             case probe(Module, Name, Index) of
-                {ok, _, _} = Found ->
-                    Found;
+                {EncodeName, DecodeName} ->
+                    cache_mfa(Key, Name, {EncodeName, DecodeName}),
+                    {ok, Module, EncodeName, DecodeName};
                 none ->
+                    cache_mfa(Key, Name, false),
                     error
             end;
         no ->
-            error;
-        probe ->
-            Found = probe(Module, Name, Index),
-            persistent_term:put(
-                Key,
-                case Found of
-                    {ok, _, _} -> yes;
-                    none -> no
-                end
-            ),
-            case Found of
-                {ok, _, _} -> Found;
-                none -> error
-            end
+            error
     end.
 
--spec probe(module(), binary(), atom()) -> {ok, fun(), fun()} | none.
+%% Merges one probed name into the per-module map; last write wins, so
+%% a racing writer can drop this entry — that only costs a re-probe of
+%% the name later.
+-spec cache_mfa({module(), codec_mfa, module()}, binary(), {atom(), atom()} | false) -> ok.
+cache_mfa(Key, Name, Entry) ->
+    case persistent_term:get(Key, probe) of
+        Cached when is_map(Cached) ->
+            persistent_term:put(Key, Cached#{Name => Entry});
+        _ ->
+            persistent_term:put(Key, #{Name => Entry})
+    end.
+
+%% Drops a cached codec pair after the types module was reloaded
+%% without it (undef on the direct call); the next dispatch re-probes.
+-spec codec_stale(module(), module(), binary()) -> ok.
+codec_stale(Mod, Module, Name) ->
+    Key = {Mod, codec_mfa, Module},
+    case persistent_term:get(Key, probe) of
+        Cached when is_map(Cached) ->
+            persistent_term:put(Key, maps:remove(Name, Cached));
+        _ ->
+            ok
+    end.
+
+-spec probe(module(), binary(), atom()) -> {atom(), atom()} | none.
 probe(Module, Name, Index) ->
     Loaded =
         case code:ensure_loaded(Module) of
@@ -427,10 +449,34 @@ probe(Module, Name, Index) ->
     case Loaded andalso erlang:function_exported(Module, Index, 1) of
         true ->
             case Module:Index(Name) of
-                {ok, {Encode, Decode}} -> {ok, Encode, Decode};
+                {ok, {Encode, Decode}} -> fun_names(Module, Encode, Decode);
                 error -> none
             end;
         false ->
+            none
+    end.
+
+-spec fun_names(module(), fun(), fun()) -> {atom(), atom()} | none.
+fun_names(Module, Encode, Decode) ->
+    case {callable_name(Module, Encode), callable_name(Module, Decode)} of
+        {{EncodeName, 1}, {DecodeName, 1}} -> {EncodeName, DecodeName};
+        _ -> none
+    end.
+
+%% A generated index hands out funs over exported per-struct functions;
+%% keeping their names makes the hot path a direct dynamic call into
+%% the current module version. `function_exported` rejects closures (a
+%% hand-written index returning anonymous funs) — those degrade to the
+%% generic engine instead of an undef on the hot path.
+-spec callable_name(module(), fun()) -> {atom(), 1} | none.
+callable_name(Module, Fun) ->
+    case {erlang:fun_info(Fun, module), erlang:fun_info(Fun, name), erlang:fun_info(Fun, arity)} of
+        {{module, Module}, {name, Name}, {arity, 1}} ->
+            case erlang:function_exported(Module, Name, 1) of
+                true -> {Name, 1};
+                false -> none
+            end;
+        _ ->
             none
     end.
 

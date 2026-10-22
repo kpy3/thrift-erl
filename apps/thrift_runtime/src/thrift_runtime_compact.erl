@@ -163,15 +163,34 @@ decode(TypeDesc, Bin) when is_binary(Bin) ->
 -spec encode_resolved(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
 encode_resolved(Module, Name, Value) ->
     case compact_codec(Module, Name) of
-        {ok, Encode, _Decode} ->
-            Encode(Value);
+        {ok, CodecModule, EncodeName, _DecodeName} ->
+            try
+                CodecModule:EncodeName(Value)
+            catch
+                %% The types module was reloaded without this codec:
+                %% drop the stale pair and take the generic path, same
+                %% as a probe miss. An undef from a still-installed
+                %% codec (a genuine bug) is re-raised.
+                error:undef:Stack ->
+                    case erlang:function_exported(CodecModule, EncodeName, 1) of
+                        true ->
+                            erlang:raise(error, undef, Stack);
+                        false ->
+                            thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
+                            encode_ref_generic(Module, Name, Value)
+                    end
+            end;
         error ->
-            case resolve_struct(Module, Name) of
-                {ok, Compiled} ->
-                    encode_struct_k(Compiled, Value);
-                error ->
-                    {error, {encode, {unknown_struct, {Module, Name}}}}
-            end
+            encode_ref_generic(Module, Name, Value)
+    end.
+
+-spec encode_ref_generic(module(), binary(), term()) -> {ok, iodata()} | {error, term()}.
+encode_ref_generic(Module, Name, Value) ->
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            encode_struct_k(Compiled, Value);
+        error ->
+            {error, {encode, {unknown_struct, {Module, Name}}}}
     end.
 
 -spec encode_k(k_type(), term()) -> {ok, iodata()} | {error, term()}.
@@ -903,18 +922,34 @@ resolve_struct(Module, Name) ->
 -spec decode_ref_struct(module(), binary(), binary()) -> decode_result(thrift_runtime_binary:struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
     case compact_codec(Module, Name) of
-        {ok, _Encode, Decode} ->
-            Decode(Bin);
+        {ok, CodecModule, _EncodeName, DecodeName} ->
+            try
+                CodecModule:DecodeName(Bin)
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(CodecModule, DecodeName, 1) of
+                        true ->
+                            erlang:raise(error, undef, Stack);
+                        false ->
+                            thrift_runtime_protocol:codec_stale(?MODULE, Module, Name),
+                            decode_ref_generic(Module, Name, Bin)
+                    end
+            end;
         error ->
-            case resolve_struct(Module, Name) of
-                {ok, Compiled} ->
-                    decode_struct_k(Compiled, Bin);
-                error ->
-                    {error, {decode, {unknown_struct, {Module, Name}}}}
-            end
+            decode_ref_generic(Module, Name, Bin)
     end.
 
--spec compact_codec(module(), binary()) -> {ok, fun(), fun()} | error.
+-spec decode_ref_generic(module(), binary(), binary()) ->
+    decode_result(thrift_runtime_binary:struct_value()).
+decode_ref_generic(Module, Name, Bin) ->
+    case resolve_struct(Module, Name) of
+        {ok, Compiled} ->
+            decode_struct_k(Compiled, Bin);
+        error ->
+            {error, {decode, {unknown_struct, {Module, Name}}}}
+    end.
+
+-spec compact_codec(module(), binary()) -> {ok, module(), atom(), atom()} | error.
 compact_codec(Module, Name) ->
     thrift_runtime_protocol:codec(?MODULE, Module, Name, compact_codec).
 
