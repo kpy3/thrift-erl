@@ -880,6 +880,33 @@ unknown_name_test() ->
     ),
     ok.
 
+codec_dispatch_engaged_test() ->
+    ok = load_fixture(),
+    %% The runtime's codec dispatch must actually reach the specialized
+    %% codecs for every fixture struct on every protocol. A probe miss
+    %% degrades to the generic engine byte-identically, so no
+    %% correctness test catches it — only this dispatch check does (the
+    %% JSON index hands out the non-folding decode body, which must
+    %% therefore be exported).
+    lists:foreach(
+        fun(Name) ->
+            ?assertMatch(
+                {ok, goldentest_types, _, _},
+                thrift_runtime_protocol:codec(thrift_runtime_binary, goldentest_types, Name, binary_codec)
+            ),
+            ?assertMatch(
+                {ok, goldentest_types, _, _},
+                thrift_runtime_protocol:codec(thrift_runtime_compact, goldentest_types, Name, compact_codec)
+            ),
+            ?assertMatch(
+                {ok, goldentest_types, _, _},
+                thrift_runtime_protocol:codec(thrift_runtime_json, goldentest_types, Name, json_codec)
+            )
+        end,
+        ?STRUCTS ++ ?DEEP_STRUCTS
+    ),
+    ok.
+
 %%--------------------------------------------------------------------
 %% Wire value generators (the wire representation: binary field names)
 %%--------------------------------------------------------------------
