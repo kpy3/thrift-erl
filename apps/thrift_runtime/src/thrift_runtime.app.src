@@ -1,6 +1,6 @@
 {application, thrift_runtime, [
     {description, "Apache Thrift-compatible runtime for Erlang clients and servers"},
-    {vsn, "0.7.0"},
+    {vsn, "0.7.1"},
     {registered, []},
     {applications, [
         kernel,
