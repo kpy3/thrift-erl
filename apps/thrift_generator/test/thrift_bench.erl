@@ -44,11 +44,11 @@ erlperf continuous mode: one discarded warmup sample followed by three
 average iterations per second with the sample stddev.
 
 The report has two blocks. The `ours` vs `reference` rows measure the
-specialized path against the official runtime. The trailing `generic
-vs specialized` rows isolate the codec-emission axis inside our own
-runtime: the same protocol engine over an inline descriptor (always
-the generic interpreter, with its per-process schema memo) against the
-ref descriptor (the specialized codec probe). Encode numbers measure
+specialized path against the official runtime. The trailing
+`specialized vs generic` rows isolate the codec-emission axis inside
+our own runtime: the ref descriptor (the specialized codec probe)
+against the same protocol engine over an inline descriptor (always the
+generic interpreter, with its per-process schema memo). Encode numbers measure
 the write cost only — the official membuffer transport keeps its bytes
 private, identically for both protocols.
 
@@ -217,8 +217,8 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
             {ok, _, _, _, Payload} = thrift_runtime_json:decode_message(JsonMessage),
             {ok, _, <<>>} = thrift_runtime_json:decode(BinDesc, Payload)
         end),
-    %% Ours: the generic interpreter over inline descriptors — what a
-    %% caller with hand-written struct_info tuples gets.
+    %% The generic interpreter over inline descriptors — what a caller
+    %% with hand-written struct_info tuples gets.
     GenBinaryEncode = erlbench(fun() -> {ok, _} = thrift_runtime_binary:encode(Desc, OurValue) end),
     GenBinaryDecode =
         erlbench(fun() -> {ok, _, <<>>} = thrift_runtime_binary:decode(Desc, BinaryWire) end),
@@ -252,12 +252,12 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
         {<<"json/decode">>, {measured, SpecJsonDecode}, {measured, ReferenceJsonDecode}}
     ],
     AxisRows = [
-        {<<"binary/encode">>, {measured, GenBinaryEncode}, {measured, SpecBinaryEncode}},
-        {<<"binary/decode">>, {measured, GenBinaryDecode}, {measured, SpecBinaryDecode}},
-        {<<"compact/encode">>, {measured, GenCompactEncode}, {measured, SpecCompactEncode}},
-        {<<"compact/decode">>, {measured, GenCompactDecode}, {measured, SpecCompactDecode}},
-        {<<"json/encode">>, {measured, GenJsonEncode}, {measured, SpecJsonEncode}},
-        {<<"json/decode">>, {measured, GenJsonDecode}, {measured, SpecJsonDecode}}
+        {<<"binary/encode">>, {measured, SpecBinaryEncode}, {measured, GenBinaryEncode}},
+        {<<"binary/decode">>, {measured, SpecBinaryDecode}, {measured, GenBinaryDecode}},
+        {<<"compact/encode">>, {measured, SpecCompactEncode}, {measured, GenCompactEncode}},
+        {<<"compact/decode">>, {measured, SpecCompactDecode}, {measured, GenCompactDecode}},
+        {<<"json/encode">>, {measured, SpecJsonEncode}, {measured, GenJsonEncode}},
+        {<<"json/decode">>, {measured, SpecJsonDecode}, {measured, GenJsonDecode}}
     ],
     io:put_chars([
         format_report(
@@ -413,7 +413,7 @@ format_report(Name, WireSizes, Rows, AxisRows) ->
         $\n,
         lists:join($\n, Lines),
         $\n,
-        "  generic vs specialized (ref descriptor vs inline):",
+        "  specialized vs generic (ref descriptor vs inline):",
         $\n,
         lists:join($\n, AxisLines)
     ]).
@@ -428,8 +428,8 @@ row_line({Label, Ours, Reference}) ->
 %% descriptor shapes.
 
 -spec axis_line(row()) -> string().
-axis_line({Label, Generic, Specialized}) ->
-    labelled_line(Label, generic, Generic, specialized, Specialized).
+axis_line({Label, Specialized, Generic}) ->
+    labelled_line(Label, specialized, Specialized, generic, Generic).
 
 -spec labelled_line(
     binary(),
@@ -466,8 +466,8 @@ pad_side({measured, #{average := Average, stddev := StdDev}}) ->
     ).
 
 -spec speedup_note({measured, throughput()}, {measured, throughput()}) -> string().
-speedup_note({measured, #{average := Ours}}, {measured, #{average := Reference}}) ->
-    io_lib:format("speedup ~5.2fx", [Ours / Reference]).
+speedup_note({measured, #{average := Left}}, {measured, #{average := Right}}) ->
+    io_lib:format("speedup ~5.2fx", [Left / Right]).
 
 -spec format_qps(float()) -> string().
 format_qps(Qps) when Qps >= 1000000 ->
