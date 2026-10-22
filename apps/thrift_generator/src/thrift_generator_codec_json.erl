@@ -148,12 +148,19 @@ syntax trees like everywhere else in the emitter.
 %% Module assembly
 %%--------------------------------------------------------------------
 
--doc "The `-export/1` entries of the JSON wire codecs: `json_codec/1` plus one pair per struct.".
+-doc """
+The `-export/1` entries of the JSON wire codecs: `json_codec/1`, one
+encode/decode pair per struct, plus the non-folding decode body. The
+index hands the body out (the `]`-fold belongs to the top-level entry
+points), and the runtime's dispatch calls it by name — an unexported
+body fails the callable-name check and silently degrades the
+specialized codecs to the generic engine.
+""".
 -spec export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
 export_entries(Mod, Ctx) ->
     [{json_codec, 1}] ++
         lists:append([
-            [{Encode, 1}, {Decode, 1}]
+            [{Encode, 1}, {Decode, 1}, {decode_body_name(Decode), 1}]
          || {Encode, Decode} <- [json_pair(S, Ctx) || S <- Mod#tg_module.structs]
         ]).
 
