@@ -742,71 +742,74 @@ put_acc(NamePut, V, Acc) ->
         clause([v("_")], none, [map_put(Acc, NamePut, V)])
     ]).
 
-%% Per-id/tag clauses: the right tag decodes and marks required
-%% presence, a wrong one is a field_type_mismatch, a uuid field matches
-%% only the empty tag and constant-errors, unknown ids skip by tag.
+%% One clause per field, the tag tested inside: the right tag decodes
+%% and marks required presence, a wrong one is a field_type_mismatch, a
+%% uuid field matches only the empty tag and constant-errors, unknown
+%% ids skip by tag.
 
 -spec dispatch_clauses([{#tg_field{}, wire_type()}], #ectx{}, #{integer() => pos_integer()}) -> [ast()].
 dispatch_clauses(FieldTypes, Ctx, Enums) ->
-    lists:append([field_value_clauses(F, T, Ctx, Enums) || {F, T} <- FieldTypes]) ++
+    [field_value_clause(F, T, Ctx, Enums) || {F, T} <- FieldTypes] ++
         [skip_clause()].
 
--spec field_value_clauses(#tg_field{}, wire_type(), #ectx{}, #{integer() => pos_integer()}) -> [ast()].
-field_value_clauses(F, {base, uuid}, _Ctx, _Enums) ->
+-spec field_value_clause(#tg_field{}, wire_type(), #ectx{}, #{integer() => pos_integer()}) -> ast().
+field_value_clause(F, {base, uuid}, _Ctx, _Enums) ->
     %% tag(j_unsupported) is the empty string: the field matches only
     %% `""` and then constant-errors, exactly the generic path. The
     %% unused tail parameters stay underscored — the constant error
     %% reads neither the input nor the required map.
-    [
-        clause(
-            [i(F#tg_field.id), bin_pat([]), v("_Bin"), v("_Req")],
-            none,
-            [uuid_decode_error()]
-        ),
-        mismatch_clause(F#tg_field.id)
-    ];
-field_value_clauses(F, T, Ctx, Enums) ->
+    clause(
+        [i(F#tg_field.id), v("Tag"), v("_Bin"), v("_Req")],
+        none,
+        [
+            'case'(v("Tag"), [
+                clause([bin_pat([])], none, [uuid_decode_error()]),
+                mismatch_body(F#tg_field.id)
+            ])
+        ]
+    );
+field_value_clause(F, T, Ctx, Enums) ->
     Id = F#tg_field.id,
-    [
-        clause(
-            [i(Id), bin_lit(json_tag(T)), v("Bin"), v("Req")],
-            none,
-            [
-                %% The value decode case is the SUBJECT of the outer
-                %% case: names its branches bind (V, Rest, the
-                %% catch-all) stay in scope after it, so the outer
-                %% destructure and catch-all carry distinct names.
-                'case'(decode_json_expr(T, v("Bin"), Ctx, Enums), [
-                    clause([tuple_t([at(ok), v("Val"), v("RestOut")])], none, [
-                        'case'(call_local(json_expect, [v("RestOut"), i(125)]), [
-                            ok_bind_clause(
-                                v("RestBrace"),
-                                tuple_t([
-                                    at(ok),
-                                    v("Val"),
+    clause(
+        [i(Id), v("Tag"), v("Bin"), v("Req")],
+        none,
+        [
+            'case'(v("Tag"), [
+                clause([bin_lit(json_tag(T))], none, [
+                    %% The value decode case is the SUBJECT of the outer
+                    %% case: names its branches bind (V, Rest, the
+                    %% catch-all) stay in scope after it, so the outer
+                    %% destructure and catch-all carry distinct names.
+                    'case'(decode_json_expr(T, v("Bin"), Ctx, Enums), [
+                        clause([tuple_t([at(ok), v("Val"), v("RestOut")])], none, [
+                            'case'(call_local(json_expect, [v("RestOut"), i(125)]), [
+                                ok_bind_clause(
                                     v("RestBrace"),
-                                    mark_present(i(Id), v("Req")),
-                                    name_lit(F#tg_field.name)
-                                ])
-                            ),
-                            %% The subject case exports `Other' (its
-                            %% catch-all branch binds it) — a different
-                            %% name here keeps this handler a fresh bind.
-                            other_clause("OtherExpect")
-                        ])
-                    ]),
-                    other_clause("OtherDispatch")
-                ])
-            ]
-        ),
-        mismatch_clause(Id)
-    ].
+                                    tuple_t([
+                                        at(ok),
+                                        v("Val"),
+                                        v("RestBrace"),
+                                        mark_present(i(Id), v("Req")),
+                                        name_lit(F#tg_field.name)
+                                    ])
+                                ),
+                                %% The subject case exports `Other' (its
+                                %% catch-all branch binds it) — a different
+                                %% name here keeps this handler a fresh bind.
+                                other_clause("OtherExpect")
+                            ])
+                        ]),
+                        other_clause("OtherDispatch")
+                    ])
+                ]),
+                mismatch_body(Id)
+            ])
+        ]
+    ).
 
--spec mismatch_clause(integer()) -> ast().
-mismatch_clause(Id) ->
-    clause([i(Id), v("_Tag"), v("_Bin"), v("_Req")], none, [
-        err_decode(tuple_t([at(field_type_mismatch), i(Id)]))
-    ]).
+-spec mismatch_body(integer()) -> ast().
+mismatch_body(Id) ->
+    clause([v("_")], none, [err_decode(tuple_t([at(field_type_mismatch), i(Id)]))]).
 
 -spec mark_present(ast(), ast()) -> ast().
 mark_present(Id, Req) ->
