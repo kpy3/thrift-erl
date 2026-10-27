@@ -155,13 +155,17 @@ subcommand):
   (`erl.set`) for sets without an explicit annotation (default: list);
 - `--typedef-type alias|nominal` — the typedef flavor (`erl.type`)
   for typedefs without an explicit annotation (default: alias);
+- `--enum-case preserve|lower` — the casing surfaced enum member atoms
+  use (`erl.enum_case`) for enums without an explicit annotation
+  (default: preserve);
 - `--check` — verify freshness instead of writing (see below);
 - `--compact-errors` — one-line error entries (see below).
 
-Each of the four option axes picks the generated flavor only where the
+Each of the five option axes picks the generated flavor only where the
 IDL carries no explicit annotation of its own: an explicit annotation
-wins, and a file-wide namespace default (`erl.set` / `erl.union_type`
-on the `namespace erl` header) overrides the flag for its file.
+wins, and a file-wide namespace default (`erl.set` / `erl.union_type` /
+`erl.enum_case` on the `namespace erl` header) overrides the flag for
+its file.
 
 Errors render as rebar3/elp-style source excerpts — the offending
 line under a gutter, a `╰──` marker naming the problem. Positions
@@ -784,6 +788,29 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
   hrl and inline records. The wire
   encoding is identical for all three; records in the generated hrl get
   `sets:set(E)` / `ordsets:ordset(E)` types;
+- `erl.record_name = "Name"` on a struct or exception — the verbatim
+  record tag: the hrl record, `record_fields/1` and `tag_index/0` key
+  the struct by `Name` as written instead of the snake-cased struct
+  name. This is the drop-in knob for codebases whose existing records
+  carry the IDL casing verbatim (the official Erlang generator spells
+  record tags exactly as the IDL does) — adopting this runtime over a
+  fork or over the official codegen then needs no value-transcoding
+  layer at the term level. Rejected on a sum union (a sum type has no
+  record to name) and on a native struct (native records mint their
+  own tag);
+- `erl.enum_case = "preserve" | "lower"` — the casing surfaced enum
+  member atoms use: the `enum_info/1` pairs, the enum's type alias, the
+  values constants and field defaults resolve to, and the generated
+  `<mod>_<enum>_to_int/from_int` helpers. `lower` lowercases the
+  declared member names (the official Erlang generator emits lowercase
+  enum atoms); `preserve` keeps them verbatim. Per-enum annotation, or
+  on the `namespace erl` (or `namespace *`) header as the file-wide
+  default; the `--enum-case` flag is the invocation default. Enum
+  members travel as `i32` on the wire regardless, so the casing never
+  moves a byte — only the atoms the code sees. Members of one enum that
+  collide under the chosen casing (`X` and `x` under `lower`) fail
+  generation with an explicit error: `to_int` could not tell them
+  apart; members of different enums may share an atom freely.
 - `erl.type = "nominal"` on a typedef — `-nominal` instead of an alias;
 - `erl.*` annotations are filtered out at parse time, all others are
   preserved.
