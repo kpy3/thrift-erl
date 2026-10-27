@@ -27,12 +27,13 @@ Argument parsing rides on the stdlib `argparse` module (usage/help
 included); `generate` stays accepted as an optional subcommand — the
 file operand selects the action. Runs the full pipeline (load with
 includes, semantic analysis, emit) and writes the generated Erlang
-sources to `out_dir` (default: the current directory). The four option
+sources to `out_dir` (default: the current directory). The five option
 flags each pick the generated flavor for definitions without an
 explicit annotation of their own: `--repr` the value representation
 (`erl.struct_type`), `--union-type` the union representation
 (`erl.union_type`), `--set` the in-process set implementation
-(`erl.set`) and `--typedef-type` the typedef flavor (`erl.type`); a
+(`erl.set`), `--typedef-type` the typedef flavor (`erl.type`) and
+`--enum-case` the member atom casing (`erl.enum_case`); a
 file-wide namespace default overrides the flag for its file. `--check`
 verifies instead of writing: every generated artifact must already
 exist in `out_dir` with the exact content this input would produce —
@@ -81,7 +82,8 @@ run_parsed(#{file := File} = Parsed, _Options) ->
         repr => maps:get(repr, Parsed, record),
         union_type => maps:get(union_type, Parsed, record),
         set => maps:get(set, Parsed, list),
-        typedef_type => maps:get(typedef_type, Parsed, alias)
+        typedef_type => maps:get(typedef_type, Parsed, alias),
+        enum_case => maps:get(enum_case, Parsed, preserve)
     },
     Resolver =
         case maps:get(compact_errors, Parsed, false) of
@@ -170,6 +172,17 @@ command() ->
                     {"[--typedef-type alias|nominal]", [
                         "typedef flavor for typedefs without an explicit"
                         " erl.type annotation (default: alias)"
+                    ]}
+            },
+            #{
+                name => enum_case,
+                long => "-enum-case",
+                type => {atom, [preserve, lower]},
+                default => preserve,
+                help =>
+                    {"[--enum-case preserve|lower]", [
+                        "member atom casing for enums without an explicit"
+                        " erl.enum_case annotation (default: preserve)"
                     ]}
             },
             #{

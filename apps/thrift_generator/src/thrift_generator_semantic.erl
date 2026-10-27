@@ -83,13 +83,20 @@ triples before failing, where `Loc` is a line number or a
     %% explicit erl.struct_type (the generator's --repr option; unions
     %% keep their own axis and never take this injection)
     repr_default = record :: record | map | native,
+    %% the enum member atom casing seeded by the invocation-wide
+    %% `enum_case' option and overridden per file by the namespace's
+    %% erl.enum_case (members surface as declared by default; `lower'
+    %% lowercases the derived atoms for interop with runtimes whose
+    %% generators lowercase IDL enum members)
+    enum_case_default = preserve :: preserve | lower,
     all_defs = #{} :: #{binary() => #{binary() => def_kind()}},
     %% include basename (the Apache qualification spelling) -> module
     %% name: `payment_resource.PaymentResource` resolves through this
     %% when no module is literally named payment_resource
     include_modules = #{} :: #{binary() => binary()},
     all_const_values = #{} :: #{binary() => #{binary() => const_value()}},
-    all_enum_members = #{} :: #{binary() => #{binary() => [binary()]}},
+    %% enum name -> [{declared member name, member name as surfaced}]
+    all_enum_members = #{} :: #{binary() => #{binary() => [{binary(), binary()}]}},
     all_typedefs = #{} :: #{binary() => #{binary() => thrift_type()}},
     analyzed = #{} :: #{binary() => #tg_module{}},
     errors = [] :: [sem_error()]
@@ -122,12 +129,13 @@ analyze([Root | _] = Loaded, Opts) ->
         all_defs = index_defs(Loaded, fun def_kind/1),
         include_modules = include_module_index(Loaded),
         all_const_values = index_defs(Loaded, fun const_value_of/1),
-        all_enum_members = index_defs(Loaded, fun enum_members_of/1),
+        all_enum_members = index_enum_members(Loaded, Opts),
         all_typedefs = index_defs(Loaded, fun typedef_type_of/1),
         repr_default = maps:get(repr, Opts, record),
         union_default = maps:get(union_type, Opts, record),
         set_default = maps:get(set, Opts, list),
         typedef_default = maps:get(typedef_type, Opts, alias),
+        enum_case_default = maps:get(enum_case, Opts, preserve),
         analyzed = #{}
     },
     {ModuleMap, Ctx} =
@@ -159,6 +167,20 @@ analyze([Root | _] = Loaded, Opts) ->
 -spec index_defs([#tg_loaded{}], fun((ast_node()) -> V | skip)) -> #{binary() => #{binary() => V}}.
 index_defs(Loaded, Extract) ->
     #{L#tg_loaded.name => local_defs(L, Extract) || L <- Loaded}.
+
+%% The enum member index carries every member as {declared, surfaced}
+%% — the declared name validates IDL references (`Direction.NEXT'),
+%% the surfaced name carries the effective erl.enum_case so resolved
+%% constants and defaults come out in the casing the generated atoms
+%% will use.
+
+-spec index_enum_members([#tg_loaded{}], term()) -> #{}.
+index_enum_members(Loaded, Opts) ->
+    #{
+        L#tg_loaded.name =>
+            local_defs(L, fun(N) -> enum_members_of(N, L, Opts) end)
+     || L <- Loaded
+    }.
 
 -spec local_defs(#tg_loaded{}, fun((ast_node()) -> V | skip)) -> #{binary() => V}.
 local_defs(Loaded, Extract) ->
@@ -197,11 +219,64 @@ def_kind(Node) ->
 const_value_of(#thrift_generator_node{payload = #thrift_generator_constant{value = V}}) -> V;
 const_value_of(_) -> skip.
 
--spec enum_members_of(ast_node()) -> [binary()] | skip.
-enum_members_of(#thrift_generator_node{payload = #thrift_generator_enum{values = Values}}) ->
-    [Name || {Name, _, _, _} <- Values];
-enum_members_of(_) ->
+-spec enum_members_of(ast_node(), #tg_loaded{}, term()) -> [{binary(), binary()}] | skip.
+enum_members_of(
+    #thrift_generator_node{payload = #thrift_generator_enum{values = Values}} = Node, Loaded, Opts
+) ->
+    Case = effective_enum_case(Node, Loaded, Opts),
+    [{Name, enum_member_case(Name, Case)} || {Name, _, _, _} <- Values];
+enum_members_of(_, _, _) ->
     skip.
+
+%% The member atom casing of one enum: the erl.enum_case annotation on
+%% the enum itself, else the defining file's namespace default, else
+%% the invocation-wide option. Unknown annotation values answer
+%% `undefined` here — analyze_enum reports the error; the index falls
+%% back to the invocation default so resolution keeps a total answer.
+
+-spec effective_enum_case(ast_node(), #tg_loaded{}, term()) -> preserve | lower.
+effective_enum_case(Node, Loaded, Opts) ->
+    Erl = Node#thrift_generator_node.annotations,
+    case maps:get(enum_case, Erl, undefined) of
+        <<"preserve">> ->
+            preserve;
+        <<"lower">> ->
+            lower;
+        undefined ->
+            case namespace_enum_case_annotation(Loaded) of
+                <<"preserve">> -> preserve;
+                <<"lower">> -> lower;
+                _ -> invocation_enum_case(Opts)
+            end;
+        _ ->
+            invocation_enum_case(Opts)
+    end.
+
+-spec invocation_enum_case(term()) -> preserve | lower.
+invocation_enum_case(Opts) ->
+    maps:get(enum_case, Opts, preserve).
+
+%% The namespace header's erl.enum_case (the erl scope wins over the
+%% wildcard one, as the loader picks for the other axes).
+
+-spec namespace_enum_case_annotation(#tg_loaded{}) -> binary() | undefined.
+namespace_enum_case_annotation(Loaded) ->
+    Headers = (Loaded#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.headers,
+    case namespace_annotation(Headers, <<"erl">>, enum_case) of
+        undefined ->
+            case namespace_annotation(Headers, <<"*">>, enum_case) of
+                {_, Value} -> Value;
+                undefined -> undefined
+            end;
+        {_, Value} ->
+            Value
+    end.
+
+-spec enum_member_case(binary(), preserve | lower) -> binary().
+enum_member_case(Name, preserve) ->
+    Name;
+enum_member_case(Name, lower) ->
+    list_to_binary(string:lowercase(binary_to_list(Name))).
 
 -spec typedef_type_of(ast_node()) -> thrift_type() | skip.
 typedef_type_of(#thrift_generator_node{payload = #thrift_generator_typedef{type = T}}) -> T;
@@ -213,7 +288,9 @@ typedef_type_of(_) -> skip.
 
 -spec analyze_module(#tg_loaded{}, #ctx{}) -> {#tg_module{}, #ctx{}}.
 analyze_module(Loaded, Ctx00) ->
-    Ctx0 = namespace_union_default(Loaded, namespace_set_default(Loaded, Ctx00)),
+    Ctx0 = namespace_enum_case_default(
+        Loaded, namespace_union_default(Loaded, namespace_set_default(Loaded, Ctx00))
+    ),
     Defs = definitions(Loaded),
     Ctx1 = check_duplicates(Defs, Ctx0),
     {Structs, Ctx2} = lists:foldl(fun analyze_struct/2, {[], Ctx1}, Defs),
@@ -440,23 +517,60 @@ check_struct_annotations(S, Ctx0) ->
                     Ctx1
                 )
         end,
-    case maps:get('struct_type.map.key_type', Erl, undefined) of
+    Ctx3 =
+        case maps:get('struct_type.map.key_type', Erl, undefined) of
+            undefined ->
+                Ctx2;
+            KeyType when KeyType =:= <<"atom">>; KeyType =:= <<"binary">> ->
+                case maps:get(struct_type, Erl, undefined) of
+                    <<"map">> ->
+                        Ctx2;
+                    _ ->
+                        err(
+                            {S#tg_struct.line, S#tg_struct.col},
+                            "erl.struct_type.map.key_type requires erl.struct_type = \"map\"",
+                            [],
+                            Ctx2
+                        )
+                end;
+            KeyType ->
+                err({S#tg_struct.line, S#tg_struct.col}, "unknown erl.struct_type.map.key_type ~ts", [KeyType], Ctx2)
+        end,
+    check_record_name(S, Ctx3).
+
+%% The erl.record_name annotation names the record tag in full (no
+%% namespace prefix is applied). It only means something where a record
+%% exists: a sum union carries field atoms and a native struct has no
+%% declaration at all, so both combinations are rejected.
+
+-spec check_record_name(#tg_struct{}, #ctx{}) -> #ctx{}.
+check_record_name(S, Ctx0) ->
+    Loc = {S#tg_struct.line, S#tg_struct.col},
+    case maps:get(record_name, S#tg_struct.erl, undefined) of
         undefined ->
-            Ctx2;
-        KeyType when KeyType =:= <<"atom">>; KeyType =:= <<"binary">> ->
-            case maps:get(struct_type, Erl, undefined) of
-                <<"map">> ->
-                    Ctx2;
-                _ ->
+            Ctx0;
+        Name when is_binary(Name), Name =/= <<>> ->
+            case
+                {
+                    S#tg_struct.kind,
+                    maps:get(struct_type, S#tg_struct.erl, undefined),
+                    maps:get(union_type, S#tg_struct.erl, undefined)
+                }
+            of
+                {union, _, <<"sum">>} ->
+                    err(Loc, "erl.record_name requires a record representation: a sum union has no record", [], Ctx0);
+                {_, <<"native">>, _} ->
                     err(
-                        {S#tg_struct.line, S#tg_struct.col},
-                        "erl.struct_type.map.key_type requires erl.struct_type = \"map\"",
+                        Loc,
+                        "erl.record_name requires a record representation: native structs mint runtime records",
                         [],
-                        Ctx2
-                    )
+                        Ctx0
+                    );
+                _ ->
+                    Ctx0
             end;
-        KeyType ->
-            err({S#tg_struct.line, S#tg_struct.col}, "unknown erl.struct_type.map.key_type ~ts", [KeyType], Ctx2)
+        Name ->
+            err(Loc, "unknown erl.record_name ~tp (expected a non-empty string)", [Name], Ctx0)
     end.
 
 %% Field conversion shared by structs/unions/exceptions and function
@@ -544,17 +658,77 @@ analyze_enum(Node, {Acc, Ctx}) ->
             #thrift_generator_enum{name = Name, values = Raw} = Node#thrift_generator_node.payload,
             Loc = loc(Node),
             {Pairs, Ctx1} = number_enum_values(Raw, Loc, -1, #{}, #{}, [], Ctx),
+            {EnumCase, Ctx2} = enum_case_annotation(Node, Ctx1),
+            Ctx3 = check_surfaced_enum_members(Name, Raw, EnumCase, Loc, Ctx2),
             Enum =
                 #tg_enum{
                     name = Name,
                     values = lists:reverse(Pairs),
+                    erl = #{enum_case => atom_to_binary(EnumCase, utf8)},
                     doc = Node#thrift_generator_node.doc,
                     line = Node#thrift_generator_node.line,
                     col = Node#thrift_generator_node.col
                 },
-            {[Enum | Acc], Ctx1};
+            {[Enum | Acc], Ctx3};
         _ ->
             {Acc, Ctx}
+    end.
+
+%% Two members of one enum may surface to the same atom under the
+%% effective casing (X and x under lower): enum_to_int could not tell
+%% them apart and the type alias would be lying, so the pair is
+%% rejected. Members of different enums may share an atom freely.
+
+-spec check_surfaced_enum_members(binary(), [enum_value()], preserve | lower, loc(), #ctx{}) -> #ctx{}.
+check_surfaced_enum_members(Name, Raw, Case, Loc, Ctx0) ->
+    Surfaced = [{Declared, enum_member_case(Declared, Case)} || {Declared, _, _, _} <- Raw],
+    Groups = lists:foldl(
+        fun({Declared, SurfacedName}, Acc) ->
+            maps:update_with(SurfacedName, fun(Names) -> Names ++ [Declared] end, [Declared], Acc)
+        end,
+        #{},
+        Surfaced
+    ),
+    Collisions = [
+        {SurfacedName, Declared}
+     || {SurfacedName, Declared} <- maps:to_list(Groups), length(Declared) > 1
+    ],
+    lists:foldl(
+        fun({SurfacedName, [First, Second | _]}, C) ->
+            err(
+                Loc,
+                "enum ~ts members ~ts and ~ts both surface to ~ts under erl.enum_case = ~ts",
+                [Name, First, Second, SurfacedName, atom_to_binary(Case, utf8)],
+                C
+            )
+        end,
+        Ctx0,
+        Collisions
+    ).
+
+%% The effective erl.enum_case of one enum: the per-enum annotation
+%% wins; an unknown value is a semantic error, mirroring erl.set.
+
+-spec enum_case_annotation(ast_node(), #ctx{}) -> {preserve | lower, #ctx{}}.
+enum_case_annotation(Node, Ctx0) ->
+    Erl = Node#thrift_generator_node.annotations,
+    case maps:get(enum_case, Erl, undefined) of
+        undefined ->
+            {Ctx0#ctx.enum_case_default, Ctx0};
+        <<"preserve">> ->
+            {preserve, Ctx0};
+        <<"lower">> ->
+            {lower, Ctx0};
+        Value ->
+            {
+                Ctx0#ctx.enum_case_default,
+                err(
+                    loc(Node),
+                    "unknown erl.enum_case ~ts (expected \"preserve\" or \"lower\")",
+                    [Value],
+                    Ctx0
+                )
+            }
     end.
 
 -spec number_enum_values(
@@ -759,7 +933,11 @@ check_value(Type, Value, _Ctx) ->
 check_named_value(Ref, Value, Ctx) when is_binary(Value) ->
     case enum_members(Ref, Ctx) of
         {ok, Members} ->
-            case lists:member(Value, Members) of
+            %% Resolved constants and defaults carry the surfaced member
+            %% name (post erl.enum_case), so membership checks the same
+            %% surfaced set.
+            Surfaced = [Surfaced || {_Declared, Surfaced} <- Members],
+            case lists:member(Value, Surfaced) of
                 true ->
                     ok;
                 false ->
@@ -1062,6 +1240,28 @@ namespace_union_default(Loaded, Ctx) ->
     Headers = (Loaded#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.headers,
     namespace_default(Headers, union_type, fun apply_namespace_union_default/2, Ctx).
 
+%% The erl.enum_case annotation on the namespace header is the file-wide
+%% enum member atom casing ("preserve", the default, or "lower");
+%% explicit per-enum annotations win, everything else mirrors erl.set.
+
+-spec namespace_enum_case_default(#tg_loaded{}, #ctx{}) -> #ctx{}.
+namespace_enum_case_default(Loaded, Ctx) ->
+    Headers = (Loaded#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.headers,
+    namespace_default(Headers, enum_case, fun apply_namespace_enum_case/2, Ctx).
+
+-spec apply_namespace_enum_case({ast_node(), binary()}, #ctx{}) -> #ctx{}.
+apply_namespace_enum_case({_Node, <<"preserve">>}, Ctx) ->
+    Ctx#ctx{enum_case_default = preserve};
+apply_namespace_enum_case({_Node, <<"lower">>}, Ctx) ->
+    Ctx#ctx{enum_case_default = lower};
+apply_namespace_enum_case({Node, Other}, Ctx) ->
+    err(
+        loc(Node),
+        "unknown erl.enum_case ~ts (expected \"preserve\" or \"lower\")",
+        [Other],
+        Ctx
+    ).
+
 %% The file-wide default of one annotation axis on the namespace
 %% headers: the erl scope wins over the wildcard one (the same pick the
 %% loader applies), the found annotation goes to the axis-specific
@@ -1355,9 +1555,11 @@ try_const_and_enum(Name, Module, Ctx) ->
             try_enum_member(Name, maps:get(Module, Ctx#ctx.all_enum_members, #{}))
     end.
 
-%% `EnumName.Member` in an included module resolves to the member atom
-%% when the enum declares it.
--spec try_enum_member(binary(), #{binary() := [binary()]}) ->
+%% `EnumName.Member` in an included module resolves to the member as
+%% surfaced (post erl.enum_case) when the enum declares the referenced
+%% name.
+
+-spec try_enum_member(binary(), #{binary() := [{binary(), binary()}]}) ->
     {ok, {enum_member, binary()}} | error.
 try_enum_member(Name, Enums) ->
     case split_ref(Name) of
@@ -1372,8 +1574,8 @@ try_enum_member(Name, Enums) ->
 
 -spec member_if_declared(binary(), [binary()]) -> {ok, {enum_member, binary()}} | error.
 member_if_declared(Member, Members) ->
-    case lists:member(Member, Members) of
-        true -> {ok, {enum_member, Member}};
+    case lists:keyfind(Member, 1, Members) of
+        {Member, Surfaced} -> {ok, {enum_member, Surfaced}};
         false -> error
     end.
 

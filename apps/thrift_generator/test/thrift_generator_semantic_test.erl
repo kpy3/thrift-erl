@@ -44,6 +44,10 @@
     const_reserved_clash_error_test/0,
     struct_annotation_error_test/0,
     set_annotation_error_test/0,
+    record_name_annotation_error_test/0,
+    enum_case_test/0,
+    enum_member_collision_test/0,
+    enum_case_resolution_test/0,
     misplaced_set_annotation_error_test/0,
     namespace_set_default_test/0,
     namespace_set_default_error_test/0,
@@ -279,6 +283,109 @@ set_annotation_error_test() ->
     {ok, _} = analyze(<<"struct S { 1: set<i32> (erl.set = \"sets\") tags }">>),
     {ok, _} = analyze(<<"typedef set<i32> (erl.set = \"ordset\") Tags">>),
     {ok, _} = analyze(<<"struct S { 1: set<set<i32>> tags }">>),
+    ok.
+
+%% erl.record_name names the record tag in full; it only applies where a
+%% record exists, so sum unions and native structs reject it.
+
+record_name_annotation_error_test() ->
+    ?assertMatch(
+        {error, [
+            {<<"t.thrift">>, _, <<"erl.record_name requires a record representation: a sum union has no record">>}
+        ]},
+        analyze(<<"union V { 1: i64 n } (erl.union_type = \"sum\", erl.record_name = \"V\")">>)
+    ),
+    ?assertMatch(
+        {error, [
+            {<<"t.thrift">>, _,
+                <<"erl.record_name requires a record representation: native structs mint runtime records">>}
+        ]},
+        analyze(<<"struct S { 1: i32 x } (erl.struct_type = \"native\", erl.record_name = \"S\")">>)
+    ),
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.record_name <<>> (expected a non-empty string)">>}]},
+        analyze(<<"struct S { 1: i32 x } (erl.record_name = \"\")">>)
+    ),
+    {ok, _} = analyze(<<"struct S { 1: i32 x } (erl.record_name = \"S\")">>),
+    {ok, _} = analyze(<<"exception E { 1: string m } (erl.record_name = \"E\")">>),
+    ok.
+
+%% erl.enum_case accepts exactly the two member atom casings, on the
+%% enum or the namespace header; anything else is rejected at the enum
+%% (or header) line. The effective casing materializes onto every enum
+%% without an explicit annotation.
+
+enum_case_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.enum_case shout (expected \"preserve\" or \"lower\")">>}]},
+        analyze(<<"enum C { A } (erl.enum_case = \"shout\")">>)
+    ),
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"unknown erl.enum_case shout (expected \"preserve\" or \"lower\")">>}]},
+        analyze(<<"namespace erl t (erl.enum_case = \"shout\")\nenum C { A }">>)
+    ),
+    PerEnum = model_module(element(2, analyze("enum C { ALPHA } (erl.enum_case = \"lower\")"))),
+    [Enum1] = PerEnum#tg_module.enums,
+    ?assertEqual(#{enum_case => <<"lower">>}, Enum1#tg_enum.erl),
+    PerNamespace = model_module(
+        element(2, analyze("namespace erl t (erl.enum_case = \"lower\")\nenum C { ALPHA }"))
+    ),
+    [Enum2] = PerNamespace#tg_module.enums,
+    ?assertEqual(#{enum_case => <<"lower">>}, Enum2#tg_enum.erl),
+    PerOption = model_module(element(2, analyze_opts(<<"enum C { ALPHA }">>, #{enum_case => lower}))),
+    [Enum3] = PerOption#tg_module.enums,
+    ?assertEqual(#{enum_case => <<"lower">>}, Enum3#tg_enum.erl),
+    Default = model_module(element(2, analyze(<<"enum C { ALPHA }">>))),
+    [Enum4] = Default#tg_module.enums,
+    ?assertEqual(#{enum_case => <<"preserve">>}, Enum4#tg_enum.erl),
+    ok.
+
+%% Two members of one enum that surface to the same atom under the
+%% effective casing would make enum_to_int ambiguous, so the pair is
+%% rejected; the same names under preserve (or in different enums)
+%% are fine.
+
+enum_member_collision_test() ->
+    ?assertMatch(
+        {error, [
+            {<<"t.thrift">>, _, <<"enum C members X and x both surface to x under erl.enum_case = lower">>}
+        ]},
+        analyze("enum C { X = 1, x = 2 } (erl.enum_case = \"lower\")")
+    ),
+    ?assertMatch(
+        {error, [
+            {<<"t.thrift">>, _, <<"enum C members ALPHA and alpha both surface to alpha under erl.enum_case = lower">>}
+        ]},
+        analyze("namespace erl t (erl.enum_case = \"lower\")\nenum C { ALPHA, alpha }")
+    ),
+    {ok, _} = analyze("enum C { X = 1, x = 2 }"),
+    {ok, _} = analyze("enum C { X = 1, x = 2 } (erl.enum_case = \"preserve\")"),
+    {ok, _} = analyze("enum C { X = 1 }\nenum D { x = 2 } (erl.enum_case = \"lower\")"),
+    ok.
+
+%% With erl.enum_case = "lower" the surfaced member name — enum_info
+%% atoms, enum descriptors, constants and field defaults carrying a
+%% member — is the lowercased spelling, while IDL references still
+%% validate against the declared name.
+
+enum_case_resolution_test() ->
+    {ok, Model} = analyze(
+        "namespace erl t (erl.enum_case = \"lower\")\n"
+        "enum Dir { NEXT = 1, PREV = 0 }\n"
+        "const Dir START = Dir.NEXT\n"
+        "struct W { 1: Dir d = Dir.NEXT }\n"
+    ),
+    Module = model_module(Model),
+    [Enum] = Module#tg_module.enums,
+    %% values keep the declared member names (the wire spelling); the
+    %% casing applies when atoms surface (emitter) and when constants
+    %% and defaults resolve.
+    ?assertEqual([{1, <<"NEXT">>}, {0, <<"PREV">>}], Enum#tg_enum.values),
+    [Const] = Module#tg_module.consts,
+    ?assertEqual(<<"next">>, Const#tg_const.value),
+    [Struct] = Module#tg_module.structs,
+    [Field] = Struct#tg_struct.fields,
+    ?assertEqual(<<"next">>, Field#tg_field.default),
     ok.
 
 %% erl.set written after the name lands on the field or typedef node,
