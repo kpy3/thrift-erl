@@ -50,7 +50,8 @@ paths the loader tracks.
     repr => record | map | native,
     union_type => record | sum,
     set => list | sets | ordset,
-    typedef_type => alias | nominal
+    typedef_type => alias | nominal,
+    enum_case => preserve | lower
 }.
 
 -doc """
@@ -68,9 +69,11 @@ definitions without an explicit annotation of its own: `repr`
 (`record`, the default, `map` or `native`) for structures and
 exceptions without `erl.struct_type`, `union_type` (`record` or `sum`)
 for unions without `erl.union_type`, `set` (`list`, the default,
-`sets` or `ordset`) for sets without `erl.set`, and `typedef_type`
-(`alias`, the default, or `nominal`) for typedefs without `erl.type`.
-A file-wide namespace default overrides the option for its file.
+`sets` or `ordset`) for sets without `erl.set`, `typedef_type`
+(`alias`, the default, or `nominal`) for typedefs without `erl.type`,
+and `enum_case` (`preserve`, the default, or `lower`) for enum members
+without `erl.enum_case`. A file-wide namespace default overrides the
+option for its file.
 
 Returns the generated modules with their paths (and the include path
 when one was written).
@@ -216,13 +219,14 @@ disk_differs(Path, Source) ->
 
 -spec semantic_opts(term()) -> generate_opts().
 semantic_opts(Opts) when is_map(Opts) ->
-    case maps:keys(Opts) -- [repr, union_type, set, typedef_type] of
+    case maps:keys(Opts) -- [repr, union_type, set, typedef_type, enum_case] of
         [] ->
             #{
                 repr => axis_opt(repr, [record, map, native], Opts, record),
                 union_type => axis_opt(union_type, [record, sum], Opts, record),
                 set => axis_opt(set, [list, sets, ordset], Opts, list),
-                typedef_type => axis_opt(typedef_type, [alias, nominal], Opts, alias)
+                typedef_type => axis_opt(typedef_type, [alias, nominal], Opts, alias),
+                enum_case => axis_opt(enum_case, [preserve, lower], Opts, preserve)
             };
         _ ->
             erlang:error({badarg, Opts})

@@ -270,7 +270,7 @@ alias_type_node(S, Ctx) ->
         sum ->
             sum_type_node(S, Ctx);
         record ->
-            Tag = record_tag(current_prefix(Ctx), S#tg_struct.name),
+            Tag = record_tag_of(S, current_prefix(Ctx)),
             {type, erl_anno:new(0), record, [{atom, erl_anno:new(0), Tag}]};
         native ->
             undefined;
@@ -395,10 +395,10 @@ sum_type_node(S, Ctx) ->
         Many -> {type, Anno, union, Many}
     end.
 
--spec enum_type_node([{integer(), binary()}]) -> erl_syntax:syntaxTree().
-enum_type_node(Values) ->
+-spec enum_type_node(#tg_enum{}) -> erl_syntax:syntaxTree().
+enum_type_node(E) ->
     Anno = erl_anno:new(0),
-    Atoms = [{atom, Anno, enum_atom(Name)} || {_Value, Name} <- Values],
+    Atoms = [{atom, Anno, enum_atom(Name, enum_case(E))} || {_Value, Name} <- E#tg_enum.values],
     case Atoms of
         [One] -> One;
         Many -> {type, Anno, union, Many}
@@ -645,7 +645,7 @@ struct_ref(S, Ctx) ->
 -spec struct_index_tag(#tg_struct{}, binary()) -> atom().
 struct_index_tag(S, Prefix) ->
     case record_mode(S) of
-        true -> record_tag(Prefix, S#tg_struct.name);
+        true -> record_tag_of(S, Prefix);
         false -> record_tag(<<>>, S#tg_struct.name)
     end.
 
@@ -775,7 +775,7 @@ enum_helper_forms(Mod) ->
     lists:append([
         [thrift_generator_emitter_syntax:section_form(section_label(E))] ++
             [
-                {attribute, erl_anno:new(0), type, {type_alias(E#tg_enum.name), enum_type_node(E#tg_enum.values), []}}
+                {attribute, erl_anno:new(0), type, {type_alias(E#tg_enum.name), enum_type_node(E), []}}
             ] ++
             enum_helper_one(E, typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(E#tg_enum.name)))
      || E <- Mod#tg_module.enums
@@ -970,7 +970,7 @@ record_form(S, Prefix, Ctx) ->
             field_type_node(F, Ctx)}
      || F <- S#tg_struct.fields
     ],
-    [{attribute, Anno, record, {record_tag(Prefix, S#tg_struct.name), TypedFields}}].
+    [{attribute, Anno, record, {record_tag_of(S, Prefix), TypedFields}}].
 
 -spec field_type_node(#tg_field{}, #ectx{}) -> erl_syntax:syntaxTree().
 field_type_node(F, Ctx) ->
@@ -1097,7 +1097,7 @@ enum_info_forms(Mod) ->
     Clauses = [
         thrift_generator_emitter_syntax:fn_clause(
             [thrift_generator_emitter_syntax:abstract(E#tg_enum.name)],
-            thrift_generator_emitter_syntax:abstract([{Value, enum_atom(Name)} || {Value, Name} <- E#tg_enum.values])
+            thrift_generator_emitter_syntax:abstract(enum_desc(E))
         )
      || E <- Mod#tg_module.enums
     ],
@@ -1281,7 +1281,7 @@ fields_decl(S, Prefix) ->
         sum ->
             {sum, [field_atom(F#tg_field.name) || F <- S#tg_struct.fields]};
         record ->
-            {record_tag(Prefix, S#tg_struct.name), [
+            {record_tag_of(S, Prefix), [
                 field_atom(F#tg_field.name)
              || F <- S#tg_struct.fields
             ]};
@@ -1455,11 +1455,24 @@ find_typedef(Module, Name) ->
 
 -spec enum_desc(#tg_enum{}) -> [{integer(), atom()}].
 enum_desc(E) ->
-    [{Value, enum_atom(Name)} || {Value, Name} <- E#tg_enum.values].
+    [{Value, enum_atom(Name, enum_case(E))} || {Value, Name} <- E#tg_enum.values].
 
--spec enum_atom(binary()) -> atom().
-enum_atom(Name) ->
-    binary_to_atom(Name, utf8).
+%% The member atom casing an enum's generated atoms use, materialized
+%% by the semantic pass (per-enum annotation, else the namespace
+%% default, else the invocation option).
+
+-spec enum_case(#tg_enum{}) -> preserve | lower.
+enum_case(E) ->
+    case maps:get(enum_case, E#tg_enum.erl, undefined) of
+        <<"lower">> -> lower;
+        _ -> preserve
+    end.
+
+-spec enum_atom(binary(), preserve | lower) -> atom().
+enum_atom(Name, preserve) ->
+    binary_to_atom(Name, utf8);
+enum_atom(Name, lower) ->
+    binary_to_atom(list_to_binary(string:lowercase(binary_to_list(Name))), utf8).
 
 -spec field_atom(binary()) -> atom().
 field_atom(Name) ->
@@ -1468,6 +1481,20 @@ field_atom(Name) ->
 -spec record_tag(binary(), binary()) -> atom().
 record_tag(Prefix, Name) ->
     binary_to_atom(typed_prefix(Prefix, thrift_generator_names:snake(Name)), utf8).
+
+%% The record tag a record-mode struct's values carry: the erl.record_name
+%% annotation verbatim when present (the annotation names the tag in
+%% full — no namespace prefix is applied), the namespace-prefixed snake
+%% case otherwise. Only the record branch consults the annotation: sum
+%% unions carry field atoms and native structs mint runtime records,
+%% and the semantic pass rejects the annotation there.
+
+-spec record_tag_of(#tg_struct{}, binary()) -> atom().
+record_tag_of(S, Prefix) ->
+    case S#tg_struct.erl of
+        #{record_name := Name} -> binary_to_atom(Name, utf8);
+        _ -> record_tag(Prefix, S#tg_struct.name)
+    end.
 
 %% The module's namespace-derived identifier prefix: prepended (with a
 %% separating underscore) to every record tag, type alias, derived

@@ -46,7 +46,9 @@
     native_representation_test/0,
     repr_option_test/0,
     option_axes_test/0,
-    doc_pipeline_test/0
+    doc_pipeline_test/0,
+    record_name_annotation_test/0,
+    enum_case_test/0
 ]).
 
 -define(SNIPPET,
@@ -924,3 +926,82 @@ doc_text(Source) ->
 -spec entry_hrl(module(), [thrift_generator_emitter:source()]) -> binary().
 entry_hrl(Module, Sources) ->
     maps:get(hrl, entry(Module, Sources)).
+
+%% erl.record_name replaces the derived record tag everywhere the tag
+%% surfaces — the hrl declaration, the type alias, record_fields/1,
+%% tag_index/0 and the codec round trip — while struct_info stays keyed
+%% by the wire name and codec function names stay derived.
+
+record_name_annotation_test() ->
+    {ok, Model} = analyze_model(
+        "struct BankAccount { 1: required string id, 2: optional i64 balance } "
+        "(erl.record_name = \"BankAccount\")\n"
+        "service Svc { BankAccount get() }\n"
+    ),
+    Results = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        Results
+    ),
+    Sources = thrift_generator_emitter:sources(Model),
+    Hrl = entry_hrl(t_types, Sources),
+    Source = entry_source(t_types, Sources),
+    ?assertMatch({match, _}, re:run(Hrl, <<"-record\\('BankAccount',\\{">>)),
+    ?assertMatch({match, _}, re:run(Source, <<"'BankAccount'\\(\\) :: #'BankAccount'\\{\\}">>)),
+    ?assertEqual({'BankAccount', [id, balance]}, t_types:record_fields(<<"BankAccount">>)),
+    ?assertEqual(#{'BankAccount' => {struct, {ref, t_types, <<"BankAccount">>}}}, t_types:tag_index()),
+    Value = {'BankAccount', <<"acc-1">>, 100},
+    {ok, Bin} = t_types:encode_bank_account(Value),
+    ?assertEqual({ok, Value}, t_types:decode_bank_account(Bin, record)),
+    ?assertEqual({struct, {ref, t_types, <<"BankAccount">>}}, t_types:function_info(<<"get">>, reply)),
+    ok.
+
+%% erl.enum_case = "lower" lowercases every surfaced member atom —
+%% enum_info, the enum descriptors embedded in function_info, enum
+%% member constants and defaults, the type alias — while per-enum
+%% annotations override the invocation default and IDL references keep
+%% validating against the declared names.
+
+enum_case_test() ->
+    {ok, Model} = analyze_model_opts(
+        "enum Color { RED, GREEN = 10 }\n"
+        "enum Keep { UPPER } (erl.enum_case = \"preserve\")\n"
+        "const Color FIRST = Color.RED\n"
+        "struct S { 1: Color c = Color.RED }\n"
+        "service Svc { Color get(1: Color c) }\n",
+        #{enum_case => lower}
+    ),
+    Results = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        Results
+    ),
+    Sources = thrift_generator_emitter:sources(Model),
+    Source = entry_source(t_types, Sources),
+    ?assertMatch({match, _}, re:run(Source, <<"'Color'\\(\\) :: red \\| green">>)),
+    ?assertMatch({match, _}, re:run(Source, <<"'Keep'\\(\\) :: 'UPPER'">>)),
+    ?assertEqual([{0, red}, {10, green}], t_types:enum_info(<<"Color">>)),
+    ?assertEqual([{0, 'UPPER'}], t_types:enum_info(<<"Keep">>)),
+    ?assertEqual(<<"red">>, t_types:first()),
+    {struct, {struct, [{1, default, {enum, [{0, red}, {10, green}]}, <<"c">>, undefined}]}} =
+        t_types:function_info(<<"get">>, params),
+    Value = #{c => green},
+    {ok, Bin} = t_types:encode_s(#{c => green}),
+    ?assertEqual({ok, Value}, t_types:decode_s(Bin, map)),
+    ok.
+
+-spec analyze_model(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.
+analyze_model(Snippet) ->
+    analyze_model_opts(Snippet, #{}).
+
+-spec analyze_model_opts(string() | binary(), map()) -> {ok, #tg_model{}} | {error, term()}.
+analyze_model_opts(Snippet, Opts) ->
+    {ok, Doc} = thrift_generator:parse_string(Snippet),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    thrift_generator_semantic:analyze(Loaded, Opts).

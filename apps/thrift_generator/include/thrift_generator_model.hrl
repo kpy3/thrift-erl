@@ -60,6 +60,7 @@
 -record(tg_enum, {
     name :: binary(),
     values :: [{integer(), binary()}],
+    erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
     line = 0 :: non_neg_integer(),
     %% 1-based column of the opening token (for diagnostics)
