@@ -1,6 +1,6 @@
 {application, thrift_generator, [
     {description, "Alternative Apache Thrift IDL parser and Erlang code generator"},
-    {vsn, "0.7.1"},
+    {vsn, "0.8.0"},
     {registered, []},
     {applications, [
         kernel,
