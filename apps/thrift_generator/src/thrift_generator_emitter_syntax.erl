@@ -45,6 +45,7 @@ everything else stays trees.
     map_field/2,
     moduledoc_form/1,
     nowarn_unused_record_form/0,
+    nowarn_missing_spec_form/0,
     exports_forms/1,
     export_type_form/1,
     ok_error_type/3,
@@ -98,6 +99,12 @@ nowarn_unused_record_form() ->
         erl_syntax:abstract([nowarn_unused_record])
     ]).
 
+-spec nowarn_missing_spec_form() -> erl_syntax:syntaxTree().
+nowarn_missing_spec_form() ->
+    erl_syntax:attribute(erl_syntax:atom(compile), [
+        erl_syntax:abstract([nowarn_missing_spec])
+    ]).
+
 -spec base_erlang_type(atom()) -> erl_syntax:syntaxTree().
 base_erlang_type(bool) ->
     raw_type(boolean);
@@ -144,7 +151,15 @@ var_fun() ->
 
 -spec header(module(), binary()) -> erl_syntax:forms().
 header(ModuleName, SourcePath) ->
-    [banner_comment(SourcePath), erl_syntax:attribute(erl_syntax:atom(module), [erl_syntax:atom(ModuleName)])].
+    [
+        banner_comment(SourcePath),
+        erl_syntax:attribute(erl_syntax:atom(module), [erl_syntax:atom(ModuleName)]),
+        %% Generated code is exempt from the consumer's spec-coverage
+        %% policy: projects compiling with warnings_as_errors (and
+        %% warn_missing_spec) must be able to drop generated modules in
+        %% as-is, and the emitter does not spec every helper.
+        nowarn_missing_spec_form()
+    ].
 
 %% The banner comment of every generated file (.erl and .hrl alike).
 
