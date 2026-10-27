@@ -43,13 +43,17 @@ jobs:
         run: rebar3 ct
       - name: Docs thrift_runtime (ex_doc)
         # Dry-run of what `rebar3 hex publish` runs per package.
-        # rebar3_thrift is absent on purpose: its standalone build
-        # resolves thrift_generator from hex, which becomes possible
-        # only after that package's first publish.
         working-directory: apps/thrift_runtime
         run: rebar3 ex_doc
       - name: Docs thrift_generator (ex_doc)
         working-directory: apps/thrift_generator
+        run: rebar3 ex_doc
+      - name: Docs rebar3_thrift (ex_doc)
+        # Standalone build resolves thrift_generator from hex, which
+        # became possible after that package's first publish. The
+        # rebar_state:t/0 spec warnings are expected (rebar3 is not
+        # a dep by design) and do not fail the build.
+        working-directory: apps/rebar3_thrift
         run: rebar3 ex_doc
       - name: Coverage report
         run: rebar3 cover
