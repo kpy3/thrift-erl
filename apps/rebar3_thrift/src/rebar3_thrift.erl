@@ -25,13 +25,15 @@ in the consumer's `rebar.config`:
 ]}
 ```
 
-Four optional axes mirror the standalone generator's flags and apply
+Five optional axes mirror the standalone generator's flags and apply
 only to definitions without an explicit annotation of their own:
 `{repr, record|map|native}` (like `--repr`, the `erl.struct_type`
 default), `{union_type, record|sum}` (like `--union-type`,
-`erl.union_type`), `{set, list|sets|ordset}` (like `--set`, `erl.set`)
-and `{typedef_type, alias|nominal}` (like `--typedef-type`, `erl.type`);
-a file-wide namespace default overrides the option for its file.
+`erl.union_type`), `{set, list|sets|ordset}` (like `--set`, `erl.set`),
+`{typedef_type, alias|nominal}` (like `--typedef-type`, `erl.type`)
+and `{enum_case, preserve|lower}` (like `--enum-case`,
+`erl.enum_case`); a file-wide namespace default overrides the option
+for its file.
 
 `rebar3 thrift` regenerates the Erlang sources for every file; files
 whose content is already up to date are left untouched, so regenerating
@@ -152,10 +154,10 @@ run_task(State, Parsed, Check, Opts, OutDir, GenOpts) ->
 %% rendered message, not crash rebar3 with a raw badarg.
 
 -doc """
-Reads the four option axes of the `{thrift, [...]}` config section into
+Reads the five option axes of the `{thrift, [...]}` config section into
 the `thrift_generator:generate_opts()` map: `{repr, _}`, `{union_type,
-_}`, `{set, _}` and `{typedef_type, _}`, each defaulting to the
-generator's built-in value. Unknown axis values (including config
+_}`, `{set, _}`, `{typedef_type, _}` and `{enum_case, _}`, each
+defaulting to the generator's built-in value. Unknown axis values (including config
 terms of the wrong type, e.g. the string `"map"`) answer `{error,
 {bad_opt, {Key, Value, Allowed}}}`.
 """.
@@ -166,7 +168,8 @@ thrift_gen_opts(Opts) ->
         {repr, [record, map, native], record},
         {union_type, [record, sum], record},
         {set, [list, sets, ordset], list},
-        {typedef_type, [alias, nominal], alias}
+        {typedef_type, [alias, nominal], alias},
+        {enum_case, [preserve, lower], preserve}
     ],
     try
         {ok, maps:from_list([{Key, axis_value(Key, Allowed, Default, Opts)} || {Key, Allowed, Default} <- Axes])}

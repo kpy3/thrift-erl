@@ -36,11 +36,11 @@ to your deps.
   too. Hook into cleanup with
   `{provider_hooks, [{post, [{clean, {thrift, clean}}]}]}`.
 
-Four optional option axes in `{thrift, [...]}` mirror the generator's
+Five optional option axes in `{thrift, [...]}` mirror the generator's
 CLI flags and apply only where the IDL carries no explicit annotation
 of its own: `{repr, record | map | native}`,
 `{union_type, record | sum}`, `{set, list | sets | ordset}`,
-`{typedef_type, alias | nominal}`.
+`{typedef_type, alias | nominal}` and `{enum_case, preserve | lower}`.
 
 See the [repository README](https://github.com/kpy3/thrift-erl) for
 the full story.

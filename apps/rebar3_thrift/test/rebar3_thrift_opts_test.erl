@@ -32,21 +32,34 @@
 
 defaults_test() ->
     ?assertEqual(
-        {ok, #{repr => record, union_type => record, set => list, typedef_type => alias}},
+        {ok, #{
+            repr => record,
+            union_type => record,
+            set => list,
+            typedef_type => alias,
+            enum_case => preserve
+        }},
         rebar3_thrift:thrift_gen_opts([])
     ),
     ok.
 
 axes_test() ->
     ?assertEqual(
-        {ok, #{repr => map, union_type => sum, set => ordset, typedef_type => nominal}},
+        {ok, #{
+            repr => map,
+            union_type => sum,
+            set => ordset,
+            typedef_type => nominal,
+            enum_case => lower
+        }},
         rebar3_thrift:thrift_gen_opts([
             {files, ["src/my_api.thrift"]},
             {out_dir, "src"},
             {repr, map},
             {union_type, sum},
             {set, ordset},
-            {typedef_type, nominal}
+            {typedef_type, nominal},
+            {enum_case, lower}
         ])
     ),
     ok.
@@ -63,6 +76,10 @@ bad_value_test() ->
     ?assertEqual(
         {error, {bad_opt, {set, gb_sets, [list, sets, ordset]}}},
         rebar3_thrift:thrift_gen_opts([{set, gb_sets}])
+    ),
+    ?assertEqual(
+        {error, {bad_opt, {enum_case, "lower", [preserve, lower]}}},
+        rebar3_thrift:thrift_gen_opts([{enum_case, "lower"}])
     ),
     ok.
 
