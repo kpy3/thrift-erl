@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-27
+
+The schema-control cycle: record tags and enum casing become explicit,
+declared-in-IDL settings, closing the last term-level gaps that forced
+per-project transcoding layers when adopting this generator over an
+existing codebase. The wire format is unchanged — enum members travel
+as i32 and the casing only decides the atoms the code sees — and both
+features default to the previous behavior, so nothing moves until a
+schema opts in.
+
+### Generator (`thrift_generator`)
+
+- New `erl.record_name` annotation on a struct or exception: the record
+  tag is the verbatim annotated name instead of the snake-cased struct
+  name — the drop-in for codebases whose records carry the IDL casing
+  (the official Erlang generator's spelling). The hrl record,
+  `record_fields/1` and `tag_index/0` all key by the annotated tag; a
+  sum union (no record to name) and a native struct (mints its own tag)
+  reject it with a source-positioned error.
+- New `erl.enum_case = "preserve" | "lower"` — per enum, or file-wide on
+  the `namespace erl` header — and the matching `--enum-case` flag: the
+  casing surfaced enum member atoms use across `enum_info/1` pairs, the
+  type alias, resolved constants and field defaults, and the generated
+  conversion helpers. `lower` reproduces the official runtime's
+  lowercase enum atoms; the declared member names stay untouched
+  everywhere else. Members of one enum that collide under the chosen
+  casing (`X` and `x` under `lower`) fail generation with an explicit
+  error — `to_int` could not tell them apart; members of different
+  enums may share an atom freely.
+- Every generated module now carries `-compile([nowarn_missing_spec])`:
+  generated code is exempt from the consumer's spec-coverage policy, so
+  projects compiling with `warnings_as_errors` (and `warn_missing_spec`)
+  can drop the sources in as-is.
+
+### Plugin (`rebar3_thrift`)
+
+- `{enum_case, preserve | lower}` joins the `{thrift, [...]}` option
+  axes, mirroring `--enum-case`; an invalid value fails the provider
+  with the rendered message like every other axis.
+
 ## [0.7.1] — 2026-10-22
 
 A codec-performance cycle. Ref-descriptor dispatch stops probing per
