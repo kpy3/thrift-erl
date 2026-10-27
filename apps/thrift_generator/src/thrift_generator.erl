@@ -211,7 +211,7 @@ disk_differs(Path, Source) ->
     file:read_file(Path) =/= {ok, Source}.
 
 %% Validates the public option axes of generate/3, sources/2 and
-%% check/3: only the four known keys, each with its exact atom values.
+%% check/3: only the five known keys, each with its exact atom values.
 %% Unknown keys are rejected — a typo like `typedef' would otherwise
 %% silently fall back to the built-in defaults. (No empty-map clause:
 %% the `#{}' pattern matches ANY map, so the key check below must see
@@ -234,7 +234,8 @@ semantic_opts(Opts) when is_map(Opts) ->
 semantic_opts(Opts) ->
     erlang:error({badarg, Opts}).
 
--spec axis_opt(repr | union_type | set | typedef_type, [atom()], generate_opts(), atom()) -> atom().
+-spec axis_opt(repr | union_type | set | typedef_type | enum_case, [atom()], generate_opts(), atom()) ->
+    atom().
 axis_opt(Key, Allowed, Opts, Default) ->
     Value = maps:get(Key, Opts, Default),
     case is_atom(Value) andalso lists:member(Value, Allowed) of

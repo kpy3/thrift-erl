@@ -56,7 +56,8 @@ triples before failing, where `Loc` is a line number or a
     repr => record | map | native,
     union_type => record | sum,
     set => list | sets | ordset,
-    typedef_type => alias | nominal
+    typedef_type => alias | nominal,
+    enum_case => preserve | lower
 }.
 
 %% Per-module analysis context. The `all_*` indexes cover every loaded
@@ -1435,7 +1436,7 @@ dotted_ref(Name, Module, Ctx) ->
             end
     end.
 
--spec enum_members(binary(), #ctx{}) -> {ok, [binary()]} | error.
+-spec enum_members(binary(), #ctx{}) -> {ok, [{binary(), binary()}]} | error.
 enum_members(Ref, Ctx) ->
     case resolve_type_ref(Ref, Ctx) of
         {ok, {Module, Name, enum}} ->
