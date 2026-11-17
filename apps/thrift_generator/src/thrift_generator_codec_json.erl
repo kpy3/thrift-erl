@@ -521,7 +521,7 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
             {_Encode, Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
-            call_local(decode_body_name(Decode), [Bin]);
+            call_local(thrift_generator_codec_common:decode_body_name(Decode), [Bin]);
         false ->
             remote(thrift_runtime_json, decode_nested, [literal({struct, {ref, TypesMod, Local}}), Bin])
     end.
@@ -546,7 +546,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     FieldName = atom_concat(Decode, <<"_field">>),
     AfterName = atom_concat(Decode, <<"_after">>),
     DoneName = atom_concat(Decode, <<"_done">>),
-    BodyName = decode_body_name(Decode),
+    BodyName = thrift_generator_codec_common:decode_body_name(Decode),
     Required = required_map_lit([
         {F#tg_field.id, F#tg_field.name}
      || {F, _T} <- lists:zip(Fields, FieldTypes),
@@ -612,10 +612,6 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
 -spec required_map_lit([{integer(), binary()}]) -> ast().
 required_map_lit(Required) ->
     {map, ?ANNO, [{map_field_assoc, ?ANNO, i(Id), name_lit(Name)} || {Id, Name} <- Required]}.
-
--spec decode_body_name(atom()) -> atom().
-decode_body_name(Decode) ->
-    atom_concat(Decode, <<"_body">>).
 
 %% The loop: whitespace, then either the closing brace (required scan),
 %% the end of input (more), or one field and its separator.
