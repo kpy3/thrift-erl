@@ -310,6 +310,15 @@ cross_module_include_qualifier(Config) ->
         {struct, {ref, 'qualified_includee_types', <<"Payload">>}},
         element(3, PayloadField)
     ),
+    EnumField = lists:keyfind(2, 1, Fields),
+    ?assertEqual({enum, [{1, 'RED'}, {2, 'BLUE'}]}, element(3, EnumField)),
+    TypedefField = lists:keyfind(3, 1, Fields),
+    ?assertEqual({base, i64}, element(3, TypedefField)),
+    ByModuleField = lists:keyfind(4, 1, Fields),
+    ?assertEqual(
+        {struct, {ref, 'qualified_includee_types', <<"Payload">>}},
+        element(3, ByModuleField)
+    ),
     ok.
 
 loader_duplicate_module(Config) ->
