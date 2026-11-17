@@ -692,74 +692,49 @@ done_clauses() ->
 -spec field_clauses(atom()) -> [ast()].
 field_clauses(Decode) ->
     Dispatch = atom_concat(Decode, <<"_field_value">>),
+    %% The template's NamePut/V/Acc bindings must match the names put_acc/3
+    %% wraps; merl env keys correspond to quoted '@Name'/'_@Name' holes.
+    PutAcc = put_acc(v("NamePut"), v("V"), v("Acc")),
+    Clause = merl:qquote(0, field_clause_template(), [
+        {'Dispatch', erl_syntax:atom(Dispatch)},
+        {'PutAcc', PutAcc}
+    ]),
+    [erl_syntax:revert(Clause)].
+
+-spec field_clause_template() -> [string()].
+field_clause_template() ->
     [
-        clause([v("Bin"), v("Req"), v("Acc")], none, [
-            'case'(call_local(json_scan_string, [v("Bin")]), [
-                clause([tuple_t([at(ok), v("IdText"), v("Rest0")])], none, [
-                    'case'(call_local(json_field_id, [v("IdText")]), [
-                        ok_bind_clause(
-                            v("Id"),
-                            'case'(call_local(json_expect, [v("Rest0"), i(58)]), [
-                                ok_bind_clause(
-                                    v("Rest1"),
-                                    'case'(call_local(json_expect, [v("Rest1"), i(123)]), [
-                                        ok_bind_clause(
-                                            v("Rest2"),
-                                            'case'(call_local(json_scan_string, [v("Rest2")]), [
-                                                clause([tuple_t([at(ok), v("Tag"), v("Rest3")])], none, [
-                                                    'case'(call_local(json_expect, [v("Rest3"), i(58)]), [
-                                                        ok_bind_clause(
-                                                            v("Rest4"),
-                                                            'case'(
-                                                                call_local(Dispatch, [
-                                                                    v("Id"),
-                                                                    v("Tag"),
-                                                                    v("Rest4"),
-                                                                    v("Req")
-                                                                ]),
-                                                                [
-                                                                    clause(
-                                                                        [
-                                                                            tuple_t([
-                                                                                at(ok),
-                                                                                v("V"),
-                                                                                v("Rest5"),
-                                                                                v("Req1"),
-                                                                                v("NamePut")
-                                                                            ])
-                                                                        ],
-                                                                        none,
-                                                                        [
-                                                                            tuple_t([
-                                                                                at(ok),
-                                                                                put_acc(v("NamePut"), v("V"), v("Acc")),
-                                                                                v("Req1"),
-                                                                                v("Rest5")
-                                                                            ])
-                                                                        ]
-                                                                    ),
-                                                                    other_tail()
-                                                                ]
-                                                            )
-                                                        ),
-                                                        other_tail()
-                                                    ])
-                                                ]),
-                                                other_tail()
-                                            ])
-                                        ),
-                                        other_tail()
-                                    ])
-                                ),
-                                other_tail()
-                            ])
-                        ),
-                        other_tail()
-                    ])
-                ]),
-                other_tail()
-            ])
-        ])
+        "(Bin, Req, Acc) ->",
+        "    case json_scan_string(Bin) of",
+        "        {ok, IdText, Rest0} ->",
+        "            case json_field_id(IdText) of",
+        "                {ok, Id} ->",
+        "                    case json_expect(Rest0, 58) of",
+        "                        {ok, Rest1} ->",
+        "                            case json_expect(Rest1, 123) of",
+        "                                {ok, Rest2} ->",
+        "                                    case json_scan_string(Rest2) of",
+        "                                        {ok, Tag, Rest3} ->",
+        "                                            case json_expect(Rest3, 58) of",
+        "                                                {ok, Rest4} ->",
+        "                                                    case '@Dispatch'(Id, Tag, Rest4, Req) of",
+        "                                                        {ok, V, Rest5, Req1, NamePut} ->",
+        "                                                            {ok, _@PutAcc, Req1, Rest5};",
+        "                                                        OtherDispatch ->",
+        "                                                            OtherDispatch",
+        "                                                    end;",
+        "                                                OtherColon2 -> OtherColon2",
+        "                                            end;",
+        "                                        OtherTag -> OtherTag",
+        "                                    end;",
+        "                                OtherOpen -> OtherOpen",
+        "                            end;",
+        "                        OtherColon1 -> OtherColon1",
+        "                    end;",
+        "                OtherId -> OtherId",
+        "            end;",
+        "        OtherScan -> OtherScan",
+        "    end"
     ].
 
 %% The accumulator update: unknown ids leave the map untouched.
