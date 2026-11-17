@@ -24,12 +24,32 @@
     codec_pair/3,
     containers/1,
     elem_type/1,
-    used_helpers/2
+    used_helpers/2,
+    export_entries/3,
+    codec_index_forms/3
 ]).
 
 -export_type([wire_type/0, enum_desc/0, registry/0]).
 
 -include("thrift_generator_model.hrl").
+
+-import(thrift_generator_codec_ast, [
+    v/1,
+    at/1,
+    tuple_t/1,
+    tuple_t_type/1,
+    clause/3,
+    name_lit/1,
+    t_atom/1,
+    t_atom_lit/1,
+    t_ok/1,
+    t_union/1,
+    t_fun/2,
+    spec_form/3,
+    atom_concat/2
+]).
+
+-define(ANNO, erl_anno:new(0)).
 
 -type enum_desc() :: [{integer(), atom()}].
 -type registry() :: #{enum_desc() => pos_integer()}.
@@ -152,3 +172,108 @@ closure([Name | Rest], Dependencies, Seen) ->
             Next = maps:get(Name, Dependencies, []),
             closure(Next ++ Rest, Dependencies, Seen#{Name => true})
     end.
+
+-doc "Returns the export entries of one protocol's specialized codecs.".
+-spec export_entries(wire | compact | json, #tg_module{}, #ectx{}) -> [{atom(), arity()}].
+export_entries(Protocol, Mod, Ctx) ->
+    [{protocol_index(Protocol), 1}] ++
+        lists:append([
+            [{Encode, 1}, {Decode, 1}] ++
+                case Protocol of
+                    json -> [{atom_concat(Decode, <<"_body">>), 1}];
+                    _ -> []
+                end
+         || {Encode, Decode} <- [codec_pair(Protocol, S, Ctx) || S <- Mod#tg_module.structs]
+        ]).
+
+-doc "Builds the public codec index of one protocol.".
+-spec codec_index_forms(wire | compact | json, #tg_module{}, #ectx{}) -> erl_syntax:forms().
+codec_index_forms(Protocol, Mod, Ctx) ->
+    Clauses =
+        [
+            clause([name_lit(S#tg_struct.name)], none, [
+                tuple_t([
+                    at(ok),
+                    tuple_t([
+                        {'fun', ?ANNO, {function, Encode, 1}},
+                        {'fun', ?ANNO, {function, index_decode_name(Protocol, Decode), 1}}
+                    ])
+                ])
+            ])
+         || {S, {Encode, Decode}} <- [{S, codec_pair(Protocol, S, Ctx)} || S <- Mod#tg_module.structs]
+        ] ++ [clause([v(index_unknown_name(Protocol))], none, [at(error)])],
+    Index = protocol_index(Protocol),
+    thrift_generator_emitter_syntax:doc_form(undefined, codec_index_doc(Protocol)) ++
+        [codec_index_spec(Protocol, Index), {function, ?ANNO, Index, 1, Clauses}].
+
+-spec protocol_index(wire | compact | json) -> atom().
+protocol_index(wire) -> binary_codec;
+protocol_index(compact) -> compact_codec;
+protocol_index(json) -> json_codec.
+
+-spec index_decode_name(wire | compact | json, atom()) -> atom().
+index_decode_name(json, Decode) -> atom_concat(Decode, <<"_body">>);
+index_decode_name(_, Decode) -> Decode.
+
+-spec index_unknown_name(wire | compact | json) -> string().
+index_unknown_name(json) -> "_Name";
+index_unknown_name(_) -> "_".
+
+-spec codec_index_spec(wire | compact | json, atom()) -> tuple().
+codec_index_spec(json, Index) ->
+    spec_form(Index, 1, [
+        t_fun(
+            [t_atom(binary)],
+            t_union([
+                t_ok(
+                    tuple_t_type([
+                        t_fun([t_atom(term)], t_atom(term)),
+                        t_fun([t_atom(term)], t_atom(term))
+                    ])
+                ),
+                t_atom_lit(error)
+            ])
+        )
+    ]);
+codec_index_spec(_, Index) ->
+    spec_form(Index, 1, [
+        t_fun(
+            [t_atom(binary)],
+            t_union([
+                t_ok(tuple_t_type([t_atom('fun'), t_atom('fun')])),
+                t_atom_lit(error)
+            ])
+        )
+    ]).
+
+-spec codec_index_doc(wire | compact | json) -> binary().
+codec_index_doc(wire) ->
+    <<
+        "The binary-protocol wire codecs of this module's structs, by wire"
+        " struct name: `{ok, {Encode, Decode}}` where `Encode/1` takes the"
+        " wire map to `{ok, iodata()} | {error, _}` and `Decode/1` takes a"
+        " binary to `{ok, WireMap, Rest} | more | {error, _}` -- the same"
+        " contracts as `thrift_runtime_binary:encode/2` and `decode/2`."
+        " Unknown names answer `error`; `thrift_runtime_binary` probes this"
+        " export to dispatch named-struct references to the specialized"
+        " code."
+    >>;
+codec_index_doc(compact) ->
+    <<
+        "The compact-protocol wire codecs of this module's structs, by wire"
+        " struct name: `{ok, {Encode, Decode}}` where `Encode/1` takes the"
+        " wire map to `{ok, iodata()} | {error, _}` and `Decode/1` takes a"
+        " binary to `{ok, WireMap, Rest} | more | {error, _}` -- the same"
+        " contracts as `thrift_runtime_compact:encode/2` and `decode/2`."
+        " Unknown names answer `error`; `thrift_runtime_compact` probes this"
+        " export to dispatch named-struct references to the specialized"
+        " code."
+    >>;
+codec_index_doc(json) ->
+    <<
+        "The specialized JSON codec pair by wire struct name:"
+        " `error` for names this module does not define. The decode"
+        " side is the non-folding struct body: folding the envelope's"
+        " closing `]` is the caller's (the runtime's top-level entry"
+        " points') job."
+    >>.

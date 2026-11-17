@@ -53,7 +53,7 @@ constructors — so `erl_pp` renders them; doc and spec attributes stay
 syntax trees like everywhere else in the emitter.
 """.
 
--export([export_entries/2, module_forms/2]).
+-export([module_forms/2]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -151,22 +151,6 @@ syntax trees like everywhere else in the emitter.
 %%--------------------------------------------------------------------
 
 -doc """
-The `-export/1` entries of the JSON wire codecs: `json_codec/1`, one
-encode/decode pair per struct, plus the non-folding decode body. The
-index hands the body out (the `]`-fold belongs to the top-level entry
-points), and the runtime's dispatch calls it by name — an unexported
-body fails the callable-name check and silently degrades the
-specialized codecs to the generic engine.
-""".
--spec export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
-export_entries(Mod, Ctx) ->
-    [{json_codec, 1}] ++
-        lists:append([
-            [{Encode, 1}, {Decode, 1}, {decode_body_name(Decode), 1}]
-         || {Encode, Decode} <- [thrift_generator_codec_common:codec_pair(json, S, Ctx) || S <- Mod#tg_module.structs]
-        ]).
-
--doc """
 Every JSON wire-codec form of the module: per-struct encode/decode
 functions, container and scanner helpers, `json_codec/1`.
 """.
@@ -187,7 +171,7 @@ module_forms(Mod, Ctx) ->
         lists:append([containers_json(T) || T <- WireTypes])
     ),
     ContainerForms = lists:append([container_forms(C, Ctx, Enums) || C <- Containers]),
-    Codec = json_codec_forms(Mod, Ctx),
+    Codec = thrift_generator_codec_common:codec_index_forms(json, Mod, Ctx),
     Blocks ++
         ContainerForms ++
         %% The scanner and conversion helper set is derived from the
@@ -1626,61 +1610,6 @@ dec_pair_form(V, KeyFromText, DecPair, Ctx, Enums) ->
             ])
         ]}
     ].
-
-%%--------------------------------------------------------------------
-%% json_codec/1
-%%--------------------------------------------------------------------
-
--spec json_codec_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-json_codec_forms(Mod, Ctx) ->
-    Clauses =
-        [
-            clause([name_lit(S#tg_struct.name)], none, [
-                tuple_t([
-                    at(ok),
-                    {tuple, ?ANNO, [
-                        {'fun', ?ANNO,
-                            {function, element(1, thrift_generator_codec_common:codec_pair(json, S, Ctx)), 1}},
-                        %% The pair's decode is the non-folding body: the
-                        %% envelope's closing `]` belongs to the top-level
-                        %% entry points, which wrap it themselves.
-                        {'fun', ?ANNO,
-                            {function,
-                                decode_body_name(element(2, thrift_generator_codec_common:codec_pair(json, S, Ctx))),
-                                1}}
-                    ]}
-                ])
-            ])
-         || S <- Mod#tg_module.structs
-        ] ++
-            [clause([v("_Name")], none, [at(error)])],
-    thrift_generator_emitter_syntax:doc_form(
-        undefined,
-        <<
-            "The specialized JSON codec pair by wire struct name:"
-            " `error` for names this module does not define. The decode"
-            " side is the non-folding struct body: folding the envelope's"
-            " closing `]` is the caller's (the runtime's top-level entry"
-            " points') job."
-        >>
-    ) ++
-        [
-            spec_form(json_codec, 1, [
-                t_fun(
-                    [t_atom(binary)],
-                    t_union([
-                        t_ok(
-                            tuple_t_type([
-                                t_fun([t_atom(term)], t_atom(term)),
-                                t_fun([t_atom(term)], t_atom(term))
-                            ])
-                        ),
-                        t_atom_lit(error)
-                    ])
-                )
-            ]),
-            {function, ?ANNO, json_codec, 1, Clauses}
-        ].
 
 %%--------------------------------------------------------------------
 %% Shared helper emission (mirrors of the generic JSON engine)
