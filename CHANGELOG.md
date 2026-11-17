@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Runtime (`thrift_runtime`)
+
+- `thrift_runtime_compact` exports the varint primitives its protocol
+  is built on — `varint/1`, `decode_varint/1`, `zigzag_varint/1`,
+  `decode_zigzag/1` — so the generator's specialized compact codecs
+  call the runtime's own ULEB128/zigzag routines through a generated
+  `-import` instead of emitting private per-module copies. Wire format,
+  codec APIs, and generated-module exports are unchanged.
+
 ## [0.8.0] — 2026-10-27
 
 The schema-control cycle: record tags and enum casing become explicit,
