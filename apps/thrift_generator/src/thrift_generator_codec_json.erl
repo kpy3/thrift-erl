@@ -53,7 +53,7 @@ constructors — so `erl_pp` renders them; doc and spec attributes stay
 syntax trees like everywhere else in the emitter.
 """.
 
--export([export_entries/2, module_forms/2]).
+-export([module_forms/2]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -143,28 +143,12 @@ syntax trees like everywhere else in the emitter.
 
 -define(ANNO, erl_anno:new(0)).
 
--type wire_type() :: thrift_generator_codec:wire_type().
+-type wire_type() :: thrift_generator_codec_common:wire_type().
 -type ast() :: thrift_generator_codec_ast:ast().
 
 %%--------------------------------------------------------------------
 %% Module assembly
 %%--------------------------------------------------------------------
-
--doc """
-The `-export/1` entries of the JSON wire codecs: `json_codec/1`, one
-encode/decode pair per struct, plus the non-folding decode body. The
-index hands the body out (the `]`-fold belongs to the top-level entry
-points), and the runtime's dispatch calls it by name — an unexported
-body fails the callable-name check and silently degrades the
-specialized codecs to the generic engine.
-""".
--spec export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
-export_entries(Mod, Ctx) ->
-    [{json_codec, 1}] ++
-        lists:append([
-            [{Encode, 1}, {Decode, 1}, {decode_body_name(Decode), 1}]
-         || {Encode, Decode} <- [json_pair(S, Ctx) || S <- Mod#tg_module.structs]
-        ]).
 
 -doc """
 Every JSON wire-codec form of the module: per-struct encode/decode
@@ -173,7 +157,7 @@ functions, container and scanner helpers, `json_codec/1`.
 -spec module_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 module_forms(Mod, Ctx) ->
     WireTypes = [wtype(F#tg_field.type, Ctx) || S <- Mod#tg_module.structs, F <- S#tg_struct.fields],
-    Enums = thrift_generator_codec:enum_registry(WireTypes, #{}),
+    Enums = thrift_generator_codec_common:enum_registry(WireTypes),
     Blocks = lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
@@ -187,7 +171,7 @@ module_forms(Mod, Ctx) ->
         lists:append([containers_json(T) || T <- WireTypes])
     ),
     ContainerForms = lists:append([container_forms(C, Ctx, Enums) || C <- Containers]),
-    Codec = json_codec_forms(Mod, Ctx),
+    Codec = thrift_generator_codec_common:codec_index_forms(json, Mod, Ctx),
     Blocks ++
         ContainerForms ++
         %% The scanner and conversion helper set is derived from the
@@ -198,12 +182,14 @@ module_forms(Mod, Ctx) ->
         lists:append([
             helper_forms(Name)
          || Name <- ?HELPERS,
-            lists:member(Name, used_helpers(Blocks ++ ContainerForms ++ Codec))
+            lists:member(
+                Name, thrift_generator_codec_common:used_helpers(Blocks ++ ContainerForms ++ Codec, ?HELPER_DEPS)
+            )
         ]) ++
         Codec.
 
 %% The JSON container set of one field type: like
-%% thrift_generator_codec:containers/1, but a map whose key no JSON
+%% thrift_generator_codec_common:containers/1, but a map whose key no JSON
 %% object can carry cuts off its key/value subtrees — the map itself
 %% compiles to constant-error functions and nothing nested under it is
 %% ever called, so emitting those helpers would leave them unused.
@@ -221,70 +207,22 @@ containers_json({map, K, V}) ->
 containers_json(_) ->
     [].
 
--spec used_helpers(erl_syntax:forms()) -> [atom()].
-used_helpers(Forms) ->
-    closure(collect_calls(Forms)).
-
--spec collect_calls(erl_syntax:forms()) -> [atom()].
-collect_calls(Tree) when is_list(Tree) ->
-    lists:append([collect_calls(T) || T <- Tree]);
-collect_calls({call, _ANNO, {atom, _ANNO2, Name}, Args}) ->
-    %% The arguments are walked too: a helper call may sit inside
-    %% another call's arguments — the chain passes its payload straight
-    %% into the continuation call.
-    [Name | collect_calls(Args)];
-collect_calls(Tuple) when is_tuple(Tuple) ->
-    collect_calls(tuple_to_list(Tuple));
-collect_calls(_Other) ->
-    [].
-
--spec closure([atom()]) -> [atom()].
-closure(Calls) ->
-    closure(lists:usort(Calls), []).
-
-closure([], Acc) ->
-    Acc;
-closure([Name | Rest], Acc) ->
-    Deps = [D || D <- maps:get(Name, ?HELPER_DEPS, []), not lists:member(D, Rest ++ Acc)],
-    closure(Rest ++ Deps, [Name | Acc]).
-
-%%--------------------------------------------------------------------
-%% Names
-%%--------------------------------------------------------------------
-
--spec json_pair(#tg_struct{} | binary(), #ectx{}) -> {atom(), atom()}.
-json_pair(S, Ctx) when is_record(S, tg_struct) ->
-    Name = S#tg_struct.name,
-    json_pair(Name, Ctx);
-json_pair(Name, Ctx) when is_binary(Name) ->
-    Prefix = thrift_generator_codec:typed_prefix(
-        thrift_generator_codec:current_prefix(Ctx), thrift_generator_names:snake(Name)
-    ),
-    {
-        binary_to_atom(<<"encode_", Prefix/binary, "_json">>, utf8),
-        binary_to_atom(<<"decode_", Prefix/binary, "_json">>, utf8)
-    }.
-
--spec struct_json_pair(binary(), #ectx{}) -> {atom(), atom()}.
-struct_json_pair(Name, Ctx) ->
-    json_pair(Name, Ctx).
-
--spec enc_name(wire_type(), #{integer() => pos_integer()}) -> atom().
+-spec enc_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
 enc_name(T, Enums) ->
-    binary_to_atom(<<"enc_", (thrift_generator_codec:type_name(T, Enums))/binary, "_j">>, utf8).
+    binary_to_atom(<<"enc_", (thrift_generator_codec_common:type_name(T, Enums))/binary, "_j">>, utf8).
 
--spec dec_name(wire_type(), #{integer() => pos_integer()}) -> atom().
+-spec dec_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
 dec_name(T, Enums) ->
-    binary_to_atom(<<"dec_", (thrift_generator_codec:type_name(T, Enums))/binary, "_j">>, utf8).
+    binary_to_atom(<<"dec_", (thrift_generator_codec_common:type_name(T, Enums))/binary, "_j">>, utf8).
 
 %%--------------------------------------------------------------------
 %% Per-struct blocks
 %%--------------------------------------------------------------------
 
--spec struct_forms(#tg_struct{}, #ectx{}, #{integer() => pos_integer()}) ->
+-spec struct_forms(#tg_struct{}, #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 struct_forms(S, Ctx, Enums) ->
-    {Encode, Decode} = json_pair(S, Ctx),
+    {Encode, Decode} = thrift_generator_codec_common:codec_pair(json, S, Ctx),
     FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
     encode_forms(S, Encode, FieldTypes, Ctx, Enums) ++
         decode_forms(S, Decode, FieldTypes, Ctx, Enums).
@@ -299,7 +237,7 @@ struct_forms(S, Ctx, Enums) ->
 %% field), so the entry only reverses — measured ~20% over the
 %% join-at-the-top shape on the bench structs.
 
--spec encode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, #{integer() => pos_integer()}) ->
+-spec encode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
     Chain = atom_concat(Encode, <<"_fields">>),
@@ -342,7 +280,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         ] ++ chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1).
 
 -spec chain_forms(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, #{integer() => pos_integer()}, pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
 chain_forms(Chain, [], _Ctx, _Enums, _N) ->
@@ -359,7 +297,7 @@ chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
 %% the top.
 
 -spec chain_fns(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, #{integer() => pos_integer()}, pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
 chain_fns(_Chain, [], _Ctx, _Enums, _N) ->
@@ -498,7 +436,7 @@ chain_fn_name(Chain, N) ->
 %% the generic engine's encode_j clauses. Encodes bind nothing — the
 %% case variables are the outer value.
 
--spec encode_json_expr(wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}) -> ast().
+-spec encode_json_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry()) -> ast().
 encode_json_expr({base, bool}, V, _Ctx, _Enums) ->
     'case'(V, [
         clause([at(true)], none, [ok_t(bin_lit(<<"true">>))]),
@@ -569,7 +507,7 @@ int_bounds(i64) ->
 struct_encode_call(TypesMod, Local, V, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {Encode, _Decode} = struct_json_pair(Local, Ctx),
+            {Encode, _Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
             call_local(Encode, [V]);
         false ->
             remote(thrift_runtime_json, encode, [literal({struct, {ref, TypesMod, Local}}), V])
@@ -582,8 +520,8 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
 struct_decode_call(TypesMod, Local, Bin, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {_Encode, Decode} = struct_json_pair(Local, Ctx),
-            call_local(decode_body_name(Decode), [Bin]);
+            {_Encode, Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
+            call_local(thrift_generator_codec_common:decode_body_name(Decode), [Bin]);
         false ->
             remote(thrift_runtime_json, decode_nested, [literal({struct, {ref, TypesMod, Local}}), Bin])
     end.
@@ -600,7 +538,7 @@ types_module_atom(Name) ->
 %% Decode side
 %%--------------------------------------------------------------------
 
--spec decode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, #{integer() => pos_integer()}) ->
+-spec decode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     Fields = S#tg_struct.fields,
@@ -608,7 +546,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     FieldName = atom_concat(Decode, <<"_field">>),
     AfterName = atom_concat(Decode, <<"_after">>),
     DoneName = atom_concat(Decode, <<"_done">>),
-    BodyName = decode_body_name(Decode),
+    BodyName = thrift_generator_codec_common:decode_body_name(Decode),
     Required = required_map_lit([
         {F#tg_field.id, F#tg_field.name}
      || {F, _T} <- lists:zip(Fields, FieldTypes),
@@ -674,10 +612,6 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
 -spec required_map_lit([{integer(), binary()}]) -> ast().
 required_map_lit(Required) ->
     {map, ?ANNO, [{map_field_assoc, ?ANNO, i(Id), name_lit(Name)} || {Id, Name} <- Required]}.
-
--spec decode_body_name(atom()) -> atom().
-decode_body_name(Decode) ->
-    atom_concat(Decode, <<"_body">>).
 
 %% The loop: whitespace, then either the closing brace (required scan),
 %% the end of input (more), or one field and its separator.
@@ -754,74 +688,49 @@ done_clauses() ->
 -spec field_clauses(atom()) -> [ast()].
 field_clauses(Decode) ->
     Dispatch = atom_concat(Decode, <<"_field_value">>),
+    %% The template's NamePut/V/Acc bindings must match the names put_acc/3
+    %% wraps; merl env keys correspond to quoted '@Name'/'_@Name' holes.
+    PutAcc = put_acc(v("NamePut"), v("V"), v("Acc")),
+    Clause = merl:qquote(0, field_clause_template(), [
+        {'Dispatch', erl_syntax:atom(Dispatch)},
+        {'PutAcc', PutAcc}
+    ]),
+    [erl_syntax:revert(Clause)].
+
+-spec field_clause_template() -> [string()].
+field_clause_template() ->
     [
-        clause([v("Bin"), v("Req"), v("Acc")], none, [
-            'case'(call_local(json_scan_string, [v("Bin")]), [
-                clause([tuple_t([at(ok), v("IdText"), v("Rest0")])], none, [
-                    'case'(call_local(json_field_id, [v("IdText")]), [
-                        ok_bind_clause(
-                            v("Id"),
-                            'case'(call_local(json_expect, [v("Rest0"), i(58)]), [
-                                ok_bind_clause(
-                                    v("Rest1"),
-                                    'case'(call_local(json_expect, [v("Rest1"), i(123)]), [
-                                        ok_bind_clause(
-                                            v("Rest2"),
-                                            'case'(call_local(json_scan_string, [v("Rest2")]), [
-                                                clause([tuple_t([at(ok), v("Tag"), v("Rest3")])], none, [
-                                                    'case'(call_local(json_expect, [v("Rest3"), i(58)]), [
-                                                        ok_bind_clause(
-                                                            v("Rest4"),
-                                                            'case'(
-                                                                call_local(Dispatch, [
-                                                                    v("Id"),
-                                                                    v("Tag"),
-                                                                    v("Rest4"),
-                                                                    v("Req")
-                                                                ]),
-                                                                [
-                                                                    clause(
-                                                                        [
-                                                                            tuple_t([
-                                                                                at(ok),
-                                                                                v("V"),
-                                                                                v("Rest5"),
-                                                                                v("Req1"),
-                                                                                v("NamePut")
-                                                                            ])
-                                                                        ],
-                                                                        none,
-                                                                        [
-                                                                            tuple_t([
-                                                                                at(ok),
-                                                                                put_acc(v("NamePut"), v("V"), v("Acc")),
-                                                                                v("Req1"),
-                                                                                v("Rest5")
-                                                                            ])
-                                                                        ]
-                                                                    ),
-                                                                    other_tail()
-                                                                ]
-                                                            )
-                                                        ),
-                                                        other_tail()
-                                                    ])
-                                                ]),
-                                                other_tail()
-                                            ])
-                                        ),
-                                        other_tail()
-                                    ])
-                                ),
-                                other_tail()
-                            ])
-                        ),
-                        other_tail()
-                    ])
-                ]),
-                other_tail()
-            ])
-        ])
+        "(Bin, Req, Acc) ->",
+        "    case json_scan_string(Bin) of",
+        "        {ok, IdText, Rest0} ->",
+        "            case json_field_id(IdText) of",
+        "                {ok, Id} ->",
+        "                    case json_expect(Rest0, 58) of",
+        "                        {ok, Rest1} ->",
+        "                            case json_expect(Rest1, 123) of",
+        "                                {ok, Rest2} ->",
+        "                                    case json_scan_string(Rest2) of",
+        "                                        {ok, Tag, Rest3} ->",
+        "                                            case json_expect(Rest3, 58) of",
+        "                                                {ok, Rest4} ->",
+        "                                                    case '@Dispatch'(Id, Tag, Rest4, Req) of",
+        "                                                        {ok, V, Rest5, Req1, NamePut} ->",
+        "                                                            {ok, _@PutAcc, Req1, Rest5};",
+        "                                                        OtherDispatch ->",
+        "                                                            OtherDispatch",
+        "                                                    end;",
+        "                                                OtherColon2 -> OtherColon2",
+        "                                            end;",
+        "                                        OtherTag -> OtherTag",
+        "                                    end;",
+        "                                OtherOpen -> OtherOpen",
+        "                            end;",
+        "                        OtherColon1 -> OtherColon1",
+        "                    end;",
+        "                OtherId -> OtherId",
+        "            end;",
+        "        OtherScan -> OtherScan",
+        "    end"
     ].
 
 %% The accumulator update: unknown ids leave the map untouched.
@@ -838,12 +747,12 @@ put_acc(NamePut, V, Acc) ->
 %% uuid field matches only the empty tag and constant-errors, unknown
 %% ids skip by tag.
 
--spec dispatch_clauses([{#tg_field{}, wire_type()}], #ectx{}, #{integer() => pos_integer()}) -> [ast()].
+-spec dispatch_clauses([{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry()) -> [ast()].
 dispatch_clauses(FieldTypes, Ctx, Enums) ->
     [field_value_clause(F, T, Ctx, Enums) || {F, T} <- FieldTypes] ++
         [skip_clause()].
 
--spec field_value_clause(#tg_field{}, wire_type(), #ectx{}, #{integer() => pos_integer()}) -> ast().
+-spec field_value_clause(#tg_field{}, wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> ast().
 field_value_clause(F, {base, uuid}, _Ctx, _Enums) ->
     %% tag(j_unsupported) is the empty string: the field matches only
     %% `""` and then constant-errors, exactly the generic path. The
@@ -933,7 +842,7 @@ skip_clause() ->
         ])
     ]).
 
--spec decode_json_expr(wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}) -> ast().
+-spec decode_json_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry()) -> ast().
 decode_json_expr({base, bool}, Bin, _Ctx, _Enums) ->
     'case'(call_local(json_skip_ws, [Bin]), [
         clause([bin_pat([{pat_str(<<"true">>), default, default}, {v("Rest"), default, [binary]}])], none, [
@@ -993,9 +902,9 @@ decode_json_expr({map, _, _} = T, Bin, _Ctx, Enums) ->
 %% Container helpers
 %%--------------------------------------------------------------------
 
--spec container_forms(wire_type(), #ectx{}, #{integer() => pos_integer()}) -> erl_syntax:forms().
+-spec container_forms(wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
 container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
-    Elem = thrift_generator_codec:elem_type(T),
+    Elem = thrift_generator_codec_common:elem_type(T),
     Tag = bin_lit(json_tag(Elem)),
     Enc = enc_name(T, Enums),
     Dec = dec_name(T, Enums),
@@ -1098,7 +1007,7 @@ map_key_supported({enum, _Desc}) ->
 map_key_supported(_T) ->
     unsupported.
 
--spec container_map_forms(wire_type(), wire_type(), wire_type(), #ectx{}, #{integer() => pos_integer()}) ->
+-spec container_map_forms(wire_type(), wire_type(), wire_type(), #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 container_map_forms(T, K, V, Ctx, Enums) ->
     Enc = enc_name(T, Enums),
@@ -1426,7 +1335,7 @@ tag_clauses(Tag, DecElems) ->
         ])
     ].
 
--spec dec_elems_forms(wire_type(), atom(), #ectx{}, #{integer() => pos_integer()}) -> [erl_syntax:forms()].
+-spec dec_elems_forms(wire_type(), atom(), #ectx{}, thrift_generator_codec_common:registry()) -> [erl_syntax:forms()].
 dec_elems_forms({base, uuid}, DecElems, _Ctx, _Enums) ->
     [
         {function, ?ANNO, DecElems, 3, [
@@ -1641,7 +1550,7 @@ dec_pairs_clauses(DecPairs, DecPair) ->
 %% {ok, Key, {Value, Rest}}. A function (not an inlined tree) keeps the
 %% loop's destructure free of the body's exported names.
 
--spec dec_pair_form(wire_type(), atom(), atom(), #ectx{}, #{integer() => pos_integer()}) ->
+-spec dec_pair_form(wire_type(), atom(), atom(), #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 dec_pair_form(V, KeyFromText, DecPair, Ctx, Enums) ->
     [
@@ -1672,57 +1581,6 @@ dec_pair_form(V, KeyFromText, DecPair, Ctx, Enums) ->
             ])
         ]}
     ].
-
-%%--------------------------------------------------------------------
-%% json_codec/1
-%%--------------------------------------------------------------------
-
--spec json_codec_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-json_codec_forms(Mod, Ctx) ->
-    Clauses =
-        [
-            clause([name_lit(S#tg_struct.name)], none, [
-                tuple_t([
-                    at(ok),
-                    {tuple, ?ANNO, [
-                        {'fun', ?ANNO, {function, element(1, json_pair(S, Ctx)), 1}},
-                        %% The pair's decode is the non-folding body: the
-                        %% envelope's closing `]` belongs to the top-level
-                        %% entry points, which wrap it themselves.
-                        {'fun', ?ANNO, {function, decode_body_name(element(2, json_pair(S, Ctx))), 1}}
-                    ]}
-                ])
-            ])
-         || S <- Mod#tg_module.structs
-        ] ++
-            [clause([v("_Name")], none, [at(error)])],
-    thrift_generator_emitter_syntax:doc_form(
-        undefined,
-        <<
-            "The specialized JSON codec pair by wire struct name:"
-            " `error` for names this module does not define. The decode"
-            " side is the non-folding struct body: folding the envelope's"
-            " closing `]` is the caller's (the runtime's top-level entry"
-            " points') job."
-        >>
-    ) ++
-        [
-            spec_form(json_codec, 1, [
-                t_fun(
-                    [t_atom(binary)],
-                    t_union([
-                        t_ok(
-                            tuple_t_type([
-                                t_fun([t_atom(term)], t_atom(term)),
-                                t_fun([t_atom(term)], t_atom(term))
-                            ])
-                        ),
-                        t_atom_lit(error)
-                    ])
-                )
-            ]),
-            {function, ?ANNO, json_codec, 1, Clauses}
-        ].
 
 %%--------------------------------------------------------------------
 %% Shared helper emission (mirrors of the generic JSON engine)

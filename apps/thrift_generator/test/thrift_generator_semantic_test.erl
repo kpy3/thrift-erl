@@ -33,6 +33,7 @@
     const_enum_ref_test/0,
     const_chain_and_cycle_test/0,
     const_type_mismatch_error_test/0,
+    nested_constant_validation_test/0,
     typedef_cycle_error_test/0,
     service_extends_merge_test/0,
     override_inherited_error_test/0,
@@ -155,6 +156,29 @@ const_type_mismatch_error_test() ->
     ),
     {ok, _} = analyze(<<"const double D = 5">>),
     {ok, _} = analyze(<<"const set<i32> S = [1, 2, 3]">>),
+    ok.
+
+nested_constant_validation_test() ->
+    {ok, Model} =
+        analyze(
+            <<
+                "const map<i32, list<string>> M = {1: [\"a\", \"b\"], 2: []}\n"
+                "const list<map<string, i32>> N = [{\"x\": 1}, {}]"
+            >>
+        ),
+    Consts = (model_module(Model))#tg_module.consts,
+    ?assertEqual(
+        {map, [{1, {list, [<<"a">>, <<"b">>]}}, {2, {list, []}}]},
+        hd([C#tg_const.value || C <- Consts, C#tg_const.name =:= <<"M">>])
+    ),
+    ?assertEqual(
+        {list, [{map, [{<<"x">>, 1}]}, {map, []}]},
+        hd([C#tg_const.value || C <- Consts, C#tg_const.name =:= <<"N">>])
+    ),
+    %% The checker stops at the first bad element instead of continuing.
+    {error, [FirstOnly]} = analyze(<<"const list<i32> Bad = [1, \"x\", true]">>),
+    ?assertMatch({<<"t.thrift">>, _, _}, FirstOnly),
+    ?assertMatch({error, [{<<"t.thrift">>, _, _}]}, analyze(<<"const map<i32, string> Bad = {1: 2}">>)),
     ok.
 
 typedef_cycle_error_test() ->

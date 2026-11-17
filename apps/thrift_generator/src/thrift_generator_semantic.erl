@@ -125,7 +125,7 @@ namespace header) overrides the option for its file.
 """.
 -spec analyze([#tg_loaded{}], generate_semantic_opts()) ->
     {ok, #tg_model{}} | {error, [sem_error()]}.
-analyze([Root | _] = Loaded, Opts) ->
+analyze(Loaded, Opts) ->
     Ctx0 = #ctx{
         all_defs = index_defs(Loaded, fun def_kind/1),
         include_modules = include_module_index(Loaded),
@@ -139,24 +139,23 @@ analyze([Root | _] = Loaded, Opts) ->
         enum_case_default = maps:get(enum_case, Opts, preserve),
         analyzed = #{}
     },
-    {ModuleMap, Ctx} =
+    Ctx =
         lists:foldl(
-            fun(L, {Acc, C}) ->
+            fun(L, C) ->
                 C1 = C#ctx{module = L#tg_loaded.name, file = L#tg_loaded.path},
                 {Module, C2} = analyze_module(L, C1),
                 %% Publish the finished module for cross-module references
                 %% (extends into an include, shared constants) made while
                 %% analyzing later modules.
-                Acc1 = Acc#{L#tg_loaded.name => Module},
-                {Acc1, C2#ctx{analyzed = Acc1}}
+                C2#ctx{analyzed = (C2#ctx.analyzed)#{L#tg_loaded.name => Module}}
             end,
-            {#{}, Ctx0},
+            Ctx0,
             lists:reverse(Loaded)
         ),
     case Ctx#ctx.errors of
         [] ->
-            Modules = [maps:get(L#tg_loaded.name, ModuleMap) || L <- Loaded],
-            {ok, #tg_model{root = Root#tg_loaded.name, modules = Modules}};
+            Modules = [maps:get(L#tg_loaded.name, Ctx#ctx.analyzed) || L <- Loaded],
+            {ok, #tg_model{modules = Modules}};
         Errors ->
             {error, lists:reverse(Errors)}
     end.
@@ -305,7 +304,6 @@ analyze_module(Loaded, Ctx00) ->
             name = Loaded#tg_loaded.name,
             prefix = Loaded#tg_loaded.prefix,
             path = Loaded#tg_loaded.path,
-            includes = Loaded#tg_loaded.includes,
             structs = lists:reverse(Structs),
             enums = lists:reverse(Enums),
             typedefs = lists:reverse(Typedefs),
@@ -912,15 +910,13 @@ check_value({base, S, _}, Value, _Ctx) when is_binary(Value), S =:= string; S =:
 check_value({base, uuid, _}, Value, _Ctx) when is_binary(Value), byte_size(Value) =:= 16 ->
     ok;
 check_value({list, Elem, _}, {list, Items}, Ctx) ->
-    check_each(lists:duplicate(length(Items), Elem), Items, Ctx);
+    check_each(Elem, Items, Ctx);
 check_value({set, Elem, _}, {list, Items}, Ctx) ->
-    check_each(lists:duplicate(length(Items), Elem), Items, Ctx);
+    check_each(Elem, Items, Ctx);
 check_value({map, KeyType, ValType, _}, {map, Pairs}, Ctx) ->
-    Keys = lists:duplicate(length(Pairs), KeyType),
-    Vals = lists:duplicate(length(Pairs), ValType),
-    case check_each(Keys, [K || {K, _} <- Pairs], Ctx) of
+    case check_each(KeyType, [K || {K, _} <- Pairs], Ctx) of
         ok ->
-            check_each(Vals, [V || {_, V} <- Pairs], Ctx);
+            check_each(ValType, [V || {_, V} <- Pairs], Ctx);
         KeyError ->
             KeyError
     end;
@@ -959,16 +955,16 @@ check_named_value(Ref, {map, _Pairs}, Ctx) ->
 check_named_value(Ref, Value, _Ctx) ->
     {error, format("value ~tp does not match type ~ts", [Value, Ref])}.
 
--spec check_each([thrift_type()], [const_value()], #ctx{}) -> ok | {error, binary()}.
-check_each(Types, Values, Ctx) ->
-    lists:foldl(
-        fun
-            ({T, V}, ok) -> check_value(T, V, Ctx);
-            (_, Error) -> Error
-        end,
-        ok,
-        lists:zip(Types, Values)
-    ).
+-spec check_each(thrift_type(), [const_value()], #ctx{}) -> ok | {error, binary()}.
+check_each(_Type, [], _Ctx) ->
+    ok;
+check_each(Type, [Value | Rest], Ctx) ->
+    case check_value(Type, Value, Ctx) of
+        ok ->
+            check_each(Type, Rest, Ctx);
+        Error ->
+            Error
+    end.
 
 -spec local_typedef_target(binary(), #ctx{}) -> {ok, thrift_type()} | error.
 local_typedef_target(Ref, Ctx) ->
@@ -1010,7 +1006,6 @@ analyze_service(Node, ByName, InProgress, Ctx0) ->
             Service =
                 #tg_service{
                     name = Name,
-                    extends = Extends,
                     functions = Merged,
                     doc = Node#thrift_generator_node.doc,
                     line = Node#thrift_generator_node.line,
@@ -1021,7 +1016,7 @@ analyze_service(Node, ByName, InProgress, Ctx0) ->
 
 -spec empty_service(binary()) -> #tg_service{}.
 empty_service(Name) ->
-    #tg_service{name = Name, extends = undefined, functions = []}.
+    #tg_service{name = Name, functions = []}.
 
 -spec parent_functions(
     binary() | undefined,

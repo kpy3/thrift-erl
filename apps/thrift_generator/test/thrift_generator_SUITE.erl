@@ -204,11 +204,16 @@ semantic_pipeline(Config) ->
     ?assertEqual([], SharedEntry#tg_loaded.includes),
 
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    ?assertEqual(<<"main">>, Model#tg_model.root),
+    %% Loaded order is the contract: the root stays first in the model.
     [MainMod, SharedMod] = Model#tg_model.modules,
-
     ?assertEqual(<<"main">>, MainMod#tg_module.name),
-    ?assertEqual([SharedPath], MainMod#tg_module.includes),
+
+    MainDefinitions = (MainEntry#tg_loaded.doc#thrift_generator_node.payload)#thrift_generator_document.definitions,
+    MainServiceNode = find_definition(MainDefinitions, thrift_generator_service, <<"MainService">>),
+    ?assertEqual(
+        <<"shared.BaseService">>,
+        (MainServiceNode#thrift_generator_node.payload)#thrift_generator_service.extends
+    ),
 
     Consts = MainMod#tg_module.consts,
     ?assertEqual([<<"KIND">>, <<"BASE">>], [C#tg_const.name || C <- Consts]),
@@ -232,7 +237,6 @@ semantic_pipeline(Config) ->
     ?assertEqual(exception, Failed#tg_struct.kind),
 
     [MainService] = MainMod#tg_module.services,
-    ?assertEqual(<<"shared.BaseService">>, MainService#tg_service.extends),
     ?assertEqual(
         [<<"ping">>, <<"area">>, <<"fetch">>, <<"fire">>],
         [F#tg_function.name || F <- MainService#tg_service.functions]
@@ -309,6 +313,15 @@ cross_module_include_qualifier(Config) ->
     ?assertEqual(
         {struct, {ref, 'qualified_includee_types', <<"Payload">>}},
         element(3, PayloadField)
+    ),
+    EnumField = lists:keyfind(2, 1, Fields),
+    ?assertEqual({enum, [{1, 'RED'}, {2, 'BLUE'}]}, element(3, EnumField)),
+    TypedefField = lists:keyfind(3, 1, Fields),
+    ?assertEqual({base, i64}, element(3, TypedefField)),
+    ByModuleField = lists:keyfind(4, 1, Fields),
+    ?assertEqual(
+        {struct, {ref, 'qualified_includee_types', <<"Payload">>}},
+        element(3, ByModuleField)
     ),
     ok.
 
