@@ -98,11 +98,10 @@
     doc = undefined :: doc()
 }).
 
-%% Service with inherited functions merged in (parent functions first).
-%% `extends` keeps the parent name as written for qualified resolution.
+%% Service with inherited functions merged in (parent functions first);
+%% the source `extends` spelling remains available on the parsed AST.
 -record(tg_service, {
     name :: binary(),
-    extends :: binary() | undefined,
     functions :: [#tg_function{}],
     doc = undefined :: doc(),
     line = 0 :: non_neg_integer(),
@@ -122,7 +121,6 @@
     name :: binary(),
     prefix = <<>> :: binary(),
     path :: binary(),
-    includes = [] :: [binary()],
     structs = [] :: [#tg_struct{}],
     enums = [] :: [#tg_enum{}],
     typedefs = [] :: [#tg_typedef{}],
@@ -133,7 +131,6 @@
 %% The whole compilation unit: the root module plus every transitively
 %% included module, in load order (root first).
 -record(tg_model, {
-    root :: binary(),
     modules :: [#tg_module{}]
 }).
 

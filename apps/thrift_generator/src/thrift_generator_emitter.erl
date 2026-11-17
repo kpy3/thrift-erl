@@ -1227,32 +1227,23 @@ service_info_forms(Mod, Ctx) ->
 -spec service_entry([#tg_function{}], #ectx{}, map()) -> map().
 service_entry([], _Ctx, Acc) ->
     Acc;
-service_entry([F | Rest], Ctx, Acc0) ->
-    Acc1 = Acc0#{
-        F#tg_function.name => #{
-            name => F#tg_function.name,
-            oneway => F#tg_function.oneway,
-            params => params_desc(F, Ctx)
-        }
+service_entry([F | Rest], Ctx, Acc) ->
+    Info0 = #{
+        name => F#tg_function.name,
+        oneway => F#tg_function.oneway,
+        params => params_desc(F, Ctx)
     },
-    Acc2 =
+    Info1 =
         case reply_desc(F, Ctx) of
-            undefined ->
-                Acc1;
-            Reply ->
-                maps:update_with(
-                    F#tg_function.name, fun(Info) -> Info#{reply => Reply} end, Acc1
-                )
+            undefined -> Info0;
+            Reply -> Info0#{reply => Reply}
         end,
-    case exceptions_desc(F, Ctx) of
-        [] ->
-            service_entry(Rest, Ctx, Acc2);
-        Exceptions ->
-            Acc3 = maps:update_with(
-                F#tg_function.name, fun(Info) -> Info#{exceptions => Exceptions} end, Acc2
-            ),
-            service_entry(Rest, Ctx, Acc3)
-    end.
+    Info =
+        case exceptions_desc(F, Ctx) of
+            [] -> Info1;
+            Exceptions -> Info1#{exceptions => Exceptions}
+        end,
+    service_entry(Rest, Ctx, Acc#{F#tg_function.name => Info}).
 
 -spec record_fields_forms(#tg_module{}) -> erl_syntax:forms().
 record_fields_forms(Mod) ->
