@@ -163,7 +163,7 @@ export_entries(Mod, Ctx) ->
     [{json_codec, 1}] ++
         lists:append([
             [{Encode, 1}, {Decode, 1}, {decode_body_name(Decode), 1}]
-         || {Encode, Decode} <- [json_pair(S, Ctx) || S <- Mod#tg_module.structs]
+         || {Encode, Decode} <- [thrift_generator_codec_common:codec_pair(json, S, Ctx) || S <- Mod#tg_module.structs]
         ]).
 
 -doc """
@@ -198,12 +198,14 @@ module_forms(Mod, Ctx) ->
         lists:append([
             helper_forms(Name)
          || Name <- ?HELPERS,
-            lists:member(Name, used_helpers(Blocks ++ ContainerForms ++ Codec))
+            lists:member(
+                Name, thrift_generator_codec_common:used_helpers(Blocks ++ ContainerForms ++ Codec, ?HELPER_DEPS)
+            )
         ]) ++
         Codec.
 
 %% The JSON container set of one field type: like
-%% thrift_generator_codec:containers/1, but a map whose key no JSON
+%% thrift_generator_codec_common:containers/1, but a map whose key no JSON
 %% object can carry cuts off its key/value subtrees — the map itself
 %% compiles to constant-error functions and nothing nested under it is
 %% ever called, so emitting those helpers would leave them unused.
@@ -221,54 +223,6 @@ containers_json({map, K, V}) ->
 containers_json(_) ->
     [].
 
--spec used_helpers(erl_syntax:forms()) -> [atom()].
-used_helpers(Forms) ->
-    closure(collect_calls(Forms)).
-
--spec collect_calls(erl_syntax:forms()) -> [atom()].
-collect_calls(Tree) when is_list(Tree) ->
-    lists:append([collect_calls(T) || T <- Tree]);
-collect_calls({call, _ANNO, {atom, _ANNO2, Name}, Args}) ->
-    %% The arguments are walked too: a helper call may sit inside
-    %% another call's arguments — the chain passes its payload straight
-    %% into the continuation call.
-    [Name | collect_calls(Args)];
-collect_calls(Tuple) when is_tuple(Tuple) ->
-    collect_calls(tuple_to_list(Tuple));
-collect_calls(_Other) ->
-    [].
-
--spec closure([atom()]) -> [atom()].
-closure(Calls) ->
-    closure(lists:usort(Calls), []).
-
-closure([], Acc) ->
-    Acc;
-closure([Name | Rest], Acc) ->
-    Deps = [D || D <- maps:get(Name, ?HELPER_DEPS, []), not lists:member(D, Rest ++ Acc)],
-    closure(Rest ++ Deps, [Name | Acc]).
-
-%%--------------------------------------------------------------------
-%% Names
-%%--------------------------------------------------------------------
-
--spec json_pair(#tg_struct{} | binary(), #ectx{}) -> {atom(), atom()}.
-json_pair(S, Ctx) when is_record(S, tg_struct) ->
-    Name = S#tg_struct.name,
-    json_pair(Name, Ctx);
-json_pair(Name, Ctx) when is_binary(Name) ->
-    Prefix = thrift_generator_codec:typed_prefix(
-        thrift_generator_codec:current_prefix(Ctx), thrift_generator_names:snake(Name)
-    ),
-    {
-        binary_to_atom(<<"encode_", Prefix/binary, "_json">>, utf8),
-        binary_to_atom(<<"decode_", Prefix/binary, "_json">>, utf8)
-    }.
-
--spec struct_json_pair(binary(), #ectx{}) -> {atom(), atom()}.
-struct_json_pair(Name, Ctx) ->
-    json_pair(Name, Ctx).
-
 -spec enc_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
 enc_name(T, Enums) ->
     binary_to_atom(<<"enc_", (thrift_generator_codec_common:type_name(T, Enums))/binary, "_j">>, utf8).
@@ -284,7 +238,7 @@ dec_name(T, Enums) ->
 -spec struct_forms(#tg_struct{}, #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 struct_forms(S, Ctx, Enums) ->
-    {Encode, Decode} = json_pair(S, Ctx),
+    {Encode, Decode} = thrift_generator_codec_common:codec_pair(json, S, Ctx),
     FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
     encode_forms(S, Encode, FieldTypes, Ctx, Enums) ++
         decode_forms(S, Decode, FieldTypes, Ctx, Enums).
@@ -569,7 +523,7 @@ int_bounds(i64) ->
 struct_encode_call(TypesMod, Local, V, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {Encode, _Decode} = struct_json_pair(Local, Ctx),
+            {Encode, _Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
             call_local(Encode, [V]);
         false ->
             remote(thrift_runtime_json, encode, [literal({struct, {ref, TypesMod, Local}}), V])
@@ -582,7 +536,7 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
 struct_decode_call(TypesMod, Local, Bin, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {_Encode, Decode} = struct_json_pair(Local, Ctx),
+            {_Encode, Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
             call_local(decode_body_name(Decode), [Bin]);
         false ->
             remote(thrift_runtime_json, decode_nested, [literal({struct, {ref, TypesMod, Local}}), Bin])
@@ -995,7 +949,7 @@ decode_json_expr({map, _, _} = T, Bin, _Ctx, Enums) ->
 
 -spec container_forms(wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
 container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
-    Elem = thrift_generator_codec:elem_type(T),
+    Elem = thrift_generator_codec_common:elem_type(T),
     Tag = bin_lit(json_tag(Elem)),
     Enc = enc_name(T, Enums),
     Dec = dec_name(T, Enums),
@@ -1685,11 +1639,15 @@ json_codec_forms(Mod, Ctx) ->
                 tuple_t([
                     at(ok),
                     {tuple, ?ANNO, [
-                        {'fun', ?ANNO, {function, element(1, json_pair(S, Ctx)), 1}},
+                        {'fun', ?ANNO,
+                            {function, element(1, thrift_generator_codec_common:codec_pair(json, S, Ctx)), 1}},
                         %% The pair's decode is the non-folding body: the
                         %% envelope's closing `]` belongs to the top-level
                         %% entry points, which wrap it themselves.
-                        {'fun', ?ANNO, {function, decode_body_name(element(2, json_pair(S, Ctx))), 1}}
+                        {'fun', ?ANNO,
+                            {function,
+                                decode_body_name(element(2, thrift_generator_codec_common:codec_pair(json, S, Ctx))),
+                                1}}
                     ]}
                 ])
             ])

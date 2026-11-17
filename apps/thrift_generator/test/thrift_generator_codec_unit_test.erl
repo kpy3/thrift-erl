@@ -17,10 +17,15 @@
 -moduledoc "Unit tests for protocol-independent codec emitter helpers.".
 
 -include_lib("stdlib/include/assert.hrl").
+-include_lib("thrift_generator/include/thrift_generator_model.hrl").
 
 -export([
     colliding_enum_descriptors_test/0,
-    equal_enum_descriptors_share_name_test/0
+    equal_enum_descriptors_share_name_test/0,
+    used_helpers_empty_test/0,
+    used_helpers_nested_transitive_and_duplicate_test/0,
+    used_helpers_cycle_test/0,
+    codec_pair_names_test/0
 ]).
 
 colliding_enum_descriptors_test() ->
@@ -51,3 +56,50 @@ find_enum_collision(N, Seen) ->
         _ ->
             find_enum_collision(N + 1, Seen#{Hash => Desc})
     end.
+
+used_helpers_empty_test() ->
+    ?assertEqual([], thrift_generator_codec_common:used_helpers([], #{})),
+    ok.
+
+used_helpers_nested_transitive_and_duplicate_test() ->
+    Nested = thrift_generator_codec_ast:call_local(first, [
+        thrift_generator_codec_ast:call_local(second, [])
+    ]),
+    Forms = [Nested, Nested],
+    Deps = #{first => [third], second => [third], third => []},
+    ?assertEqual(
+        [first, second, third],
+        lists:sort(thrift_generator_codec_common:used_helpers(Forms, Deps))
+    ),
+    ok.
+
+used_helpers_cycle_test() ->
+    Forms = [thrift_generator_codec_ast:call_local(first, [])],
+    Deps = #{first => [second], second => [first]},
+    ?assertEqual(
+        [first, second],
+        lists:sort(thrift_generator_codec_common:used_helpers(Forms, Deps))
+    ),
+    ok.
+
+codec_pair_names_test() ->
+    Empty = #ectx{
+        modules = #{<<"demo">> => #tg_module{prefix = <<>>}},
+        current = <<"demo">>
+    },
+    ?assertEqual(
+        {encode_ping_request_wire, decode_ping_request_wire},
+        thrift_generator_codec_common:codec_pair(wire, <<"PingRequest">>, Empty)
+    ),
+    Namespaced = Empty#ectx{
+        modules = #{<<"demo">> => #tg_module{prefix = <<"my_api">>}}
+    },
+    ?assertEqual(
+        {encode_my_api_ping_request_compact, decode_my_api_ping_request_compact},
+        thrift_generator_codec_common:codec_pair(compact, <<"PingRequest">>, Namespaced)
+    ),
+    ?assertEqual(
+        {encode_my_api_ping_request_json, decode_my_api_ping_request_json},
+        thrift_generator_codec_common:codec_pair(json, <<"PingRequest">>, Namespaced)
+    ),
+    ok.

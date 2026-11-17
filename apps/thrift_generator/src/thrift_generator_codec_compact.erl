@@ -162,7 +162,10 @@ export_entries(Mod, Ctx) ->
     [{compact_codec, 1}] ++
         lists:append([
             [{Encode, 1}, {Decode, 1}]
-         || {Encode, Decode} <- [compact_pair(S, Ctx) || S <- Mod#tg_module.structs]
+         || {Encode, Decode} <- [
+                thrift_generator_codec_common:codec_pair(compact, S, Ctx)
+             || S <- Mod#tg_module.structs
+            ]
         ]).
 
 -doc """
@@ -183,7 +186,7 @@ module_forms(Mod, Ctx) ->
      || S <- Mod#tg_module.structs
     ]),
     Containers = lists:usort(
-        lists:append([thrift_generator_codec:containers(T) || T <- WireTypes])
+        lists:append([thrift_generator_codec_common:containers(T) || T <- WireTypes])
     ),
     ContainerForms = lists:append([container_forms(C, Ctx, Enums) || C <- Containers]),
     Codec = compact_codec_forms(Mod, Ctx),
@@ -195,59 +198,12 @@ module_forms(Mod, Ctx) ->
         %% binary emitter's dec_string.
         lists:append([
             helper_forms(Name)
-         || Name <- ?HELPERS, lists:member(Name, used_helpers(Blocks ++ ContainerForms ++ Codec))
+         || Name <- ?HELPERS,
+            lists:member(
+                Name, thrift_generator_codec_common:used_helpers(Blocks ++ ContainerForms ++ Codec, ?HELPER_DEPS)
+            )
         ]) ++
         Codec.
-
--spec used_helpers(erl_syntax:forms()) -> [atom()].
-used_helpers(Forms) ->
-    closure(collect_calls(Forms)).
-
--spec collect_calls(erl_syntax:forms()) -> [atom()].
-collect_calls(Forms) ->
-    lists:append([walk(Form) || Form <- Forms]).
-
--spec walk(term()) -> [atom()].
-walk({call, _, {atom, _, Name}, Args}) ->
-    %% The arguments are walked too: a helper call may sit inside
-    %% another call's arguments.
-    [Name | walk(Args)];
-walk(Term) when is_tuple(Term) ->
-    walk(tuple_to_list(Term));
-walk(Term) when is_list(Term) ->
-    lists:append([walk(Element) || Element <- Term]);
-walk(_) ->
-    [].
-
--spec closure([atom()]) -> [atom()].
-closure(Used) ->
-    New = lists:usort(lists:append([maps:get(Name, ?HELPER_DEPS, []) || Name <- Used])) -- Used,
-    case New of
-        [] ->
-            Used;
-        _ ->
-            closure(Used ++ New)
-    end.
-
-%%--------------------------------------------------------------------
-%% Names
-%%--------------------------------------------------------------------
-
--spec compact_pair(#tg_struct{} | binary(), #ectx{}) -> {atom(), atom()}.
-compact_pair(#tg_struct{name = Name}, Ctx) ->
-    compact_pair(Name, Ctx);
-compact_pair(Name, Ctx) when is_binary(Name) ->
-    Prefix = thrift_generator_codec:typed_prefix(
-        thrift_generator_codec:current_prefix(Ctx), thrift_generator_names:snake(Name)
-    ),
-    {
-        binary_to_atom(<<"encode_", Prefix/binary, "_compact">>, utf8),
-        binary_to_atom(<<"decode_", Prefix/binary, "_compact">>, utf8)
-    }.
-
--spec struct_compact_pair(binary(), #ectx{}) -> {atom(), atom()}.
-struct_compact_pair(Name, Ctx) ->
-    compact_pair(Name, Ctx).
 
 -spec enc_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
 enc_name(T, Enums) ->
@@ -264,7 +220,7 @@ dec_name(T, Enums) ->
 -spec struct_forms(#tg_struct{}, #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 struct_forms(S, Ctx, Enums) ->
-    {Encode, Decode} = compact_pair(S, Ctx),
+    {Encode, Decode} = thrift_generator_codec_common:codec_pair(compact, S, Ctx),
     FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
     encode_forms(S, Encode, FieldTypes, Ctx, Enums) ++
         decode_forms(S, Decode, FieldTypes, Ctx, Enums).
@@ -773,7 +729,7 @@ encode_base_expr(B, V) ->
 struct_encode_call(TypesMod, Local, V, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {Encode, _Decode} = struct_compact_pair(Local, Ctx),
+            {Encode, _Decode} = thrift_generator_codec_common:codec_pair(compact, Local, Ctx),
             call_local(Encode, [V]);
         false ->
             remote(thrift_runtime_compact, encode, [literal({struct, {ref, TypesMod, Local}}), V])
@@ -783,7 +739,7 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
 struct_decode_call(TypesMod, Local, Bin, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {_Encode, Decode} = struct_compact_pair(Local, Ctx),
+            {_Encode, Decode} = thrift_generator_codec_common:codec_pair(compact, Local, Ctx),
             call_local(Decode, [Bin]);
         false ->
             remote(thrift_runtime_compact, decode, [literal({struct, {ref, TypesMod, Local}}), Bin])
@@ -877,8 +833,8 @@ container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
     %% The container header carries the ELEMENT type nibble; the
     %% container's own nibble only appears in the field header. List
     %% and set share the wire format.
-    Nib = nibble(thrift_generator_codec:elem_type(T)),
-    Elem = thrift_generator_codec:elem_type(T),
+    Nib = nibble(thrift_generator_codec_common:elem_type(T)),
+    Elem = thrift_generator_codec_common:elem_type(T),
     Enc = enc_name(T, Enums),
     Dec = dec_name(T, Enums),
     EncElems = atom_concat(Enc, <<"_elems">>),
@@ -1441,7 +1397,10 @@ compact_codec_forms(Mod, Ctx) ->
                     ])
                 ])
             ])
-         || {S, {Encode, Decode}} <- [{S, compact_pair(S, Ctx)} || S <- Mod#tg_module.structs]
+         || {S, {Encode, Decode}} <- [
+                {S, thrift_generator_codec_common:codec_pair(compact, S, Ctx)}
+             || S <- Mod#tg_module.structs
+            ]
         ] ++ [clause([v("_")], none, [at(error)])],
     Doc =
         <<

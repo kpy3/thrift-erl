@@ -51,14 +51,7 @@ options and guards have no convenient `erl_syntax` constructors — so
 everywhere else in the emitter.
 """.
 
--export([
-    export_entries/2,
-    module_forms/2,
-    typed_prefix/2,
-    current_prefix/1,
-    containers/1,
-    elem_type/1
-]).
+-export([export_entries/2, module_forms/2]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -125,7 +118,6 @@ everywhere else in the emitter.
 %% — the same shape the runtime codecs consume.
 
 -type wire_type() :: thrift_generator_codec_common:wire_type().
--export_type([wire_type/0]).
 
 %% A raw `erl_parse' tree (stdlib exports no type for them); the doc and
 %% spec attributes and the returned form list stay syntax trees.
@@ -142,7 +134,7 @@ export_entries(Mod, Ctx) ->
     [{binary_codec, 1}] ++
         lists:append([
             [{Encode, 1}, {Decode, 1}]
-         || {Encode, Decode} <- [wire_pair(S, Ctx) || S <- Mod#tg_module.structs]
+         || {Encode, Decode} <- [thrift_generator_codec_common:codec_pair(wire, S, Ctx) || S <- Mod#tg_module.structs]
         ]).
 
 -doc "Every wire-codec form of the module: per-struct encode/decode functions, container helpers, `binary_codec/1`.".
@@ -166,32 +158,6 @@ module_forms(Mod, Ctx) ->
 %% Names
 %%--------------------------------------------------------------------
 
--spec wire_pair(#tg_struct{} | binary(), #ectx{}) -> {atom(), atom()}.
-wire_pair(#tg_struct{name = Name}, Ctx) ->
-    wire_pair(Name, Ctx);
-wire_pair(Name, Ctx) when is_binary(Name) ->
-    Prefix = typed_prefix(current_prefix(Ctx), thrift_generator_names:snake(Name)),
-    {
-        binary_to_atom(<<"encode_", Prefix/binary, "_wire">>, utf8),
-        binary_to_atom(<<"decode_", Prefix/binary, "_wire">>, utf8)
-    }.
-
--spec struct_wire_pair(binary(), #ectx{}) -> {atom(), atom()}.
-struct_wire_pair(Name, Ctx) ->
-    wire_pair(Name, Ctx).
-
--doc "Shared with the compact/JSON codec emitters: joins the namespace prefix with a snake-case name.".
--spec typed_prefix(binary(), binary()) -> binary().
-typed_prefix(<<>>, Name) ->
-    Name;
-typed_prefix(Prefix, Name) ->
-    <<Prefix/binary, "_", Name/binary>>.
-
--doc "Shared with the compact/JSON codec emitters: the namespace prefix of the module being generated.".
--spec current_prefix(#ectx{}) -> binary().
-current_prefix(Ctx) ->
-    (maps:get(Ctx#ectx.current, Ctx#ectx.modules))#tg_module.prefix.
-
 -spec enc_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
 enc_name(T, Enums) ->
     binary_to_atom(<<"enc_", (thrift_generator_codec_common:type_name(T, Enums))/binary>>, utf8).
@@ -207,7 +173,7 @@ dec_name(T, Enums) ->
 -spec struct_forms(#tg_struct{}, #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 struct_forms(S, Ctx, Enums) ->
-    {Encode, Decode} = wire_pair(S, Ctx),
+    {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
     FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
     encode_forms(S, Encode, FieldTypes, Ctx, Enums) ++
         decode_forms(S, Decode, FieldTypes, Ctx, Enums).
@@ -556,7 +522,7 @@ encode_base_expr(B, V, Suffix) ->
 struct_encode_call(TypesMod, Local, V, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {Encode, _Decode} = struct_wire_pair(Local, Ctx),
+            {Encode, _Decode} = thrift_generator_codec_common:codec_pair(wire, Local, Ctx),
             call_local(Encode, [V]);
         false ->
             remote(thrift_runtime_binary, encode, [literal({struct, {ref, TypesMod, Local}}), V])
@@ -566,7 +532,7 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
 struct_decode_call(TypesMod, Local, Bin, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
-            {_Encode, Decode} = struct_wire_pair(Local, Ctx),
+            {_Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, Local, Ctx),
             call_local(Decode, [Bin]);
         false ->
             remote(thrift_runtime_binary, decode, [literal({struct, {ref, TypesMod, Local}}), Bin])
@@ -647,7 +613,7 @@ enum_from_clauses(Desc, Int, R) ->
 
 -spec helper_forms([wire_type()], #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
 helper_forms(WireTypes, Ctx, Enums) ->
-    Containers = lists:usort(lists:append([containers(T) || T <- WireTypes])),
+    Containers = lists:usort(lists:append([thrift_generator_codec_common:containers(T) || T <- WireTypes])),
     %% dec_string exists only when some field type (at any depth)
     %% actually decodes a string, so string-free modules stay
     %% warning-free.
@@ -670,26 +636,14 @@ children({set, T, _Impl}) -> [T];
 children({map, K, V}) -> [K, V];
 children(_) -> [].
 
--doc "Shared with the compact/JSON codec emitters: every container node of a wire type, outermost first.".
--spec containers(wire_type()) -> [wire_type()].
-containers({list, T}) -> [{list, T} | containers(T)];
-containers({set, T, _Impl}) -> [{set, T} | containers(T)];
-containers({map, K, V}) -> [{map, K, V} | containers(K) ++ containers(V)];
-containers(_) -> [].
-
--doc "Shared with the compact/JSON codec emitters: the element type of a list or set container.".
--spec elem_type({list, wire_type()} | {set, wire_type()}) -> wire_type().
-elem_type({list, T}) -> T;
-elem_type({set, T}) -> T.
-
 -spec container_forms(wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
 container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
     %% The container header carries the ELEMENT's wire byte; the
     %% container's own byte only appears in the field header.
-    Wire = wire_byte(elem_type(T)),
+    Wire = wire_byte(thrift_generator_codec_common:elem_type(T)),
     Enc = enc_name(T, Enums),
     Dec = dec_name(T, Enums),
-    Elem = elem_type(T),
+    Elem = thrift_generator_codec_common:elem_type(T),
     EncElems = atom_concat(Enc, <<"_elems">>),
     DecElems = atom_concat(Dec, <<"_elems">>),
     [
@@ -969,7 +923,10 @@ binary_codec_forms(Mod, Ctx) ->
                     ])
                 ])
             ])
-         || {S, {Encode, Decode}} <- [{S, wire_pair(S, Ctx)} || S <- Mod#tg_module.structs]
+         || {S, {Encode, Decode}} <- [
+                {S, thrift_generator_codec_common:codec_pair(wire, S, Ctx)}
+             || S <- Mod#tg_module.structs
+            ]
         ] ++ [clause([v("_")], none, [at(error)])],
     Doc =
         <<
