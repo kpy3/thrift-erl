@@ -188,9 +188,15 @@ types_forms(Mod, Ctx) ->
         ]) ++
             [thrift_generator_emitter_syntax:export_type_form(type_alias_entries(Mod))] ++
             thrift_generator_emitter_syntax:exports_forms(struct_codec_entries(Mod)) ++
-            thrift_generator_emitter_syntax:exports_forms(thrift_generator_codec:export_entries(Mod, Ctx)) ++
-            thrift_generator_emitter_syntax:exports_forms(thrift_generator_codec_compact:export_entries(Mod, Ctx)) ++
-            thrift_generator_emitter_syntax:exports_forms(thrift_generator_codec_json:export_entries(Mod, Ctx)) ++
+            thrift_generator_emitter_syntax:exports_forms(
+                thrift_generator_codec_common:export_entries(wire, Mod, Ctx)
+            ) ++
+            thrift_generator_emitter_syntax:exports_forms(
+                thrift_generator_codec_common:export_entries(compact, Mod, Ctx)
+            ) ++
+            thrift_generator_emitter_syntax:exports_forms(
+                thrift_generator_codec_common:export_entries(json, Mod, Ctx)
+            ) ++
             thrift_generator_emitter_syntax:exports_forms(enum_helper_entries(Mod)) ++
             thrift_generator_emitter_syntax:exports_forms(const_entries(Mod)),
     thrift_generator_emitter_syntax:header(TypesMod, Mod#tg_module.path) ++

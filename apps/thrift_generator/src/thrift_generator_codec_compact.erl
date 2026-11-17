@@ -60,7 +60,7 @@ options and guards have no convenient `erl_syntax` constructors — so
 everywhere else in the emitter.
 """.
 
--export([export_entries/2, module_forms/2]).
+-export([module_forms/2]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -156,18 +156,6 @@ everywhere else in the emitter.
 %% Module assembly
 %%--------------------------------------------------------------------
 
--doc "The `-export/1` entries of the compact wire codecs: `compact_codec/1` plus one pair per struct.".
--spec export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
-export_entries(Mod, Ctx) ->
-    [{compact_codec, 1}] ++
-        lists:append([
-            [{Encode, 1}, {Decode, 1}]
-         || {Encode, Decode} <- [
-                thrift_generator_codec_common:codec_pair(compact, S, Ctx)
-             || S <- Mod#tg_module.structs
-            ]
-        ]).
-
 -doc """
 Every compact wire-codec form of the module: per-struct encode/decode
 functions, container and varint helpers, `compact_codec/1`.
@@ -189,7 +177,7 @@ module_forms(Mod, Ctx) ->
         lists:append([thrift_generator_codec_common:containers(T) || T <- WireTypes])
     ),
     ContainerForms = lists:append([container_forms(C, Ctx, Enums) || C <- Containers]),
-    Codec = compact_codec_forms(Mod, Ctx),
+    Codec = thrift_generator_codec_common:codec_index_forms(compact, Mod, Ctx),
     Blocks ++
         ContainerForms ++
         %% The varint/header/string helper set is derived from the calls
@@ -1379,53 +1367,6 @@ helper_forms(dec_string_c) ->
             ])
         ]}
     ].
-
-%%--------------------------------------------------------------------
-%% compact_codec/1
-%%--------------------------------------------------------------------
-
--spec compact_codec_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-compact_codec_forms(Mod, Ctx) ->
-    Clauses =
-        [
-            clause([name_lit(S#tg_struct.name)], none, [
-                tuple_t([
-                    at(ok),
-                    tuple_t([
-                        {'fun', ?ANNO, {function, Encode, 1}},
-                        {'fun', ?ANNO, {function, Decode, 1}}
-                    ])
-                ])
-            ])
-         || {S, {Encode, Decode}} <- [
-                {S, thrift_generator_codec_common:codec_pair(compact, S, Ctx)}
-             || S <- Mod#tg_module.structs
-            ]
-        ] ++ [clause([v("_")], none, [at(error)])],
-    Doc =
-        <<
-            "The compact-protocol wire codecs of this module's structs, by wire"
-            " struct name: `{ok, {Encode, Decode}}` where `Encode/1` takes the"
-            " wire map to `{ok, iodata()} | {error, _}` and `Decode/1` takes a"
-            " binary to `{ok, WireMap, Rest} | more | {error, _}` -- the same"
-            " contracts as `thrift_runtime_compact:encode/2` and `decode/2`."
-            " Unknown names answer `error`; `thrift_runtime_compact` probes this"
-            " export to dispatch named-struct references to the specialized"
-            " code."
-        >>,
-    thrift_generator_emitter_syntax:doc_form(undefined, Doc) ++
-        [
-            spec_form(compact_codec, 1, [
-                t_fun(
-                    [t_atom(binary)],
-                    t_union([
-                        t_ok(tuple_t_type([t_atom('fun'), t_atom('fun')])),
-                        t_atom_lit(error)
-                    ])
-                )
-            ]),
-            {function, ?ANNO, compact_codec, 1, Clauses}
-        ].
 
 %%--------------------------------------------------------------------
 %% Wire vocabulary

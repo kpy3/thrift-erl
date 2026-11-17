@@ -25,7 +25,9 @@
     used_helpers_empty_test/0,
     used_helpers_nested_transitive_and_duplicate_test/0,
     used_helpers_cycle_test/0,
-    codec_pair_names_test/0
+    codec_pair_names_test/0,
+    export_entries_include_protocol_pairs_test/0,
+    export_entries_empty_module_test/0
 ]).
 
 colliding_enum_descriptors_test() ->
@@ -102,4 +104,37 @@ codec_pair_names_test() ->
         {encode_my_api_ping_request_json, decode_my_api_ping_request_json},
         thrift_generator_codec_common:codec_pair(json, <<"PingRequest">>, Namespaced)
     ),
+    ok.
+
+export_entries_include_protocol_pairs_test() ->
+    Mod = #tg_module{
+        name = <<"demo">>,
+        structs = [#tg_struct{kind = struct, name = <<"PingRequest">>}]
+    },
+    Ctx = #ectx{modules = #{<<"demo">> => Mod}, current = <<"demo">>},
+    ?assertEqual(
+        [{binary_codec, 1}, {encode_ping_request_wire, 1}, {decode_ping_request_wire, 1}],
+        thrift_generator_codec_common:export_entries(wire, Mod, Ctx)
+    ),
+    ?assertEqual(
+        [{compact_codec, 1}, {encode_ping_request_compact, 1}, {decode_ping_request_compact, 1}],
+        thrift_generator_codec_common:export_entries(compact, Mod, Ctx)
+    ),
+    ?assertEqual(
+        [
+            {json_codec, 1},
+            {encode_ping_request_json, 1},
+            {decode_ping_request_json, 1},
+            {decode_ping_request_json_body, 1}
+        ],
+        thrift_generator_codec_common:export_entries(json, Mod, Ctx)
+    ),
+    ok.
+
+export_entries_empty_module_test() ->
+    Mod = #tg_module{name = <<"demo">>},
+    Ctx = #ectx{modules = #{<<"demo">> => Mod}, current = <<"demo">>},
+    ?assertEqual([{binary_codec, 1}], thrift_generator_codec_common:export_entries(wire, Mod, Ctx)),
+    ?assertEqual([{compact_codec, 1}], thrift_generator_codec_common:export_entries(compact, Mod, Ctx)),
+    ?assertEqual([{json_codec, 1}], thrift_generator_codec_common:export_entries(json, Mod, Ctx)),
     ok.
