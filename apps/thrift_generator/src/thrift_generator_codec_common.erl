@@ -22,6 +22,7 @@
     typed_prefix/2,
     current_prefix/1,
     codec_pair/3,
+    decode_body_name/1,
     containers/1,
     elem_type/1,
     used_helpers/2,
@@ -173,6 +174,14 @@ closure([Name | Rest], Dependencies, Seen) ->
             closure(Next ++ Rest, Dependencies, Seen#{Name => true})
     end.
 
+-doc """
+The JSON decode-body companion of a struct decode name. The codec index
+and the emitter must agree on the spelling, so it lives here.
+""".
+-spec decode_body_name(atom()) -> atom().
+decode_body_name(Decode) ->
+    atom_concat(Decode, <<"_body">>).
+
 -doc "Returns the export entries of one protocol's specialized codecs.".
 -spec export_entries(wire | compact | json, #tg_module{}, #ectx{}) -> [{atom(), arity()}].
 export_entries(Protocol, Mod, Ctx) ->
@@ -180,7 +189,7 @@ export_entries(Protocol, Mod, Ctx) ->
         lists:append([
             [{Encode, 1}, {Decode, 1}] ++
                 case Protocol of
-                    json -> [{atom_concat(Decode, <<"_body">>), 1}];
+                    json -> [{decode_body_name(Decode), 1}];
                     _ -> []
                 end
          || {Encode, Decode} <- [codec_pair(Protocol, S, Ctx) || S <- Mod#tg_module.structs]
@@ -212,7 +221,7 @@ protocol_index(compact) -> compact_codec;
 protocol_index(json) -> json_codec.
 
 -spec index_decode_name(wire | compact | json, atom()) -> atom().
-index_decode_name(json, Decode) -> atom_concat(Decode, <<"_body">>);
+index_decode_name(json, Decode) -> decode_body_name(Decode);
 index_decode_name(_, Decode) -> Decode.
 
 -spec index_unknown_name(wire | compact | json) -> string().
