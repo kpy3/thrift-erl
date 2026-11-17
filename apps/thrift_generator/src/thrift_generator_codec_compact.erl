@@ -51,8 +51,10 @@ references go through `thrift_runtime_compact:encode/2` and `decode/2`;
 containers get private `*_c` helpers named after the rendered element
 type (the suffix keeps them clear of the binary codec's helpers emitted
 into the same module); enum members are inlined as case clauses at
-every use site. The varint/zigzag/header machinery is shared per module
-and emitted only when something actually calls it.
+every use site. The varint/zigzag primitives are reused from
+`thrift_runtime_compact` through a generated `-import`; only the
+field/collection header and string-length machinery stays per-module,
+emitted only when something actually calls it.
 
 Forms are built as raw `erl_parse` trees — patterns, binary segment
 options and guards have no convenient `erl_syntax` constructors — so
@@ -66,8 +68,8 @@ everywhere else in the emitter.
 -include("thrift_generator_model.hrl").
 
 %% The raw `erl_parse' vocabulary is shared with the binary codec
-%% emitter; the compact-specific shapes (varints, nibble headers,
-%% delta fields) stay local to this module.
+%% emitter; the compact-specific shapes (nibble headers, delta fields)
+%% stay local to this module.
 
 -import(thrift_generator_codec_ast, [
     v/1,
@@ -136,20 +138,20 @@ everywhere else in the emitter.
 %% usage-based emission closes over these edges so scalar-only modules
 %% stay warning-free.
 
+%% The varint/zigzag primitives live in `thrift_runtime_compact' and
+%% reach the generated code through the module's `-import'; the
+%% remaining helpers call no other local helper.
 -define(HELPER_DEPS, #{
-    enc_header => [enc_varint_z],
-    enc_varint_z => [enc_varint],
-    dec_varint_z => [dec_varint],
-    coll_header => [enc_varint],
-    dec_coll_header => [dec_varint],
-    dec_string_c => [dec_varint]
+    enc_header => [],
+    coll_header => [],
+    dec_coll_header => [],
+    dec_string_c => []
 }).
 
-%% Emission order of the module helpers (dec_varint renders two forms,
-%% one per arity).
+%% Emission order of the module helpers.
 
 -define(HELPERS, [
-    enc_header, enc_varint, enc_varint_z, dec_varint, dec_varint_z, coll_header, dec_coll_header, dec_string_c
+    enc_header, coll_header, dec_coll_header, dec_string_c
 ]).
 
 %%--------------------------------------------------------------------
@@ -180,10 +182,10 @@ module_forms(Mod, Ctx) ->
     Codec = thrift_generator_codec_common:codec_index_forms(compact, Mod, Ctx),
     Blocks ++
         ContainerForms ++
-        %% The varint/header/string helper set is derived from the calls
-        %% the struct, container and codec forms actually make, closed
-        %% over ?HELPER_DEPS — the same usage-based discipline as the
-        %% binary emitter's dec_string.
+        %% The header/string helper set is derived from the calls the
+        %% struct, container and codec forms actually make, closed over
+        %% ?HELPER_DEPS — the same usage-based discipline as the binary
+        %% emitter's dec_string.
         lists:append([
             helper_forms(Name)
          || Name <- ?HELPERS,
@@ -495,7 +497,7 @@ loop_clauses(Required, FieldDispatch) ->
                 'case'({op, ?ANNO, 'bsr', v("Header"), i(4)}, [
                     %% High nibble zero: the id travels as a zigzag varint.
                     clause([i(0)], none, [
-                        'case'(call_local(dec_varint_z, [v("Rest")]), [
+                        'case'(call_local(decode_zigzag, [v("Rest")]), [
                             ok3_bind_clause(
                                 v("Id"),
                                 v("Rest1"),
@@ -664,7 +666,7 @@ encode_compact_expr({base, B}, V, _Ctx, _Enums) when B =:= i16; B =:= i32; B =:=
                 {op, ?ANNO, '>=', V, i(-(1 bsl (bits(B) - 1)))},
                 {op, ?ANNO, '=<', V, i((1 bsl (bits(B) - 1)) - 1)}
             ],
-            [ok_t(call_local(enc_varint_z, [V]))]
+            [ok_t(call_local(zigzag_varint, [V]))]
         ),
         clause([v("_")], none, [err_encode(mismatch(V))])
     ]);
@@ -678,7 +680,7 @@ encode_compact_expr({base, double}, V, _Ctx, _Enums) ->
 encode_compact_expr({base, S}, V, _Ctx, _Enums) when S =:= string; S =:= binary ->
     'case'(V, [
         clause([v("_")], [remote(erlang, is_binary, [V])], [
-            ok_t(list_lit([call_local(enc_varint, [call_local(byte_size, [V])]), V]))
+            ok_t(list_lit([call_local(varint, [call_local(byte_size, [V])]), V]))
         ]),
         mismatch_tail(V)
     ]);
@@ -688,12 +690,12 @@ encode_compact_expr({enum, Desc}, V, _Ctx, _Enums) ->
     'case'(
         V,
         [
-            clause([at(Atom)], none, [ok_t(call_local(enc_varint_z, [i(Value)]))])
+            clause([at(Atom)], none, [ok_t(call_local(zigzag_varint, [i(Value)]))])
          || {Value, Atom} <- Desc
         ] ++
             [
                 clause([v("_")], [remote(erlang, is_integer, [V])], [
-                    ok_t(call_local(enc_varint_z, [V]))
+                    ok_t(call_local(zigzag_varint, [V]))
                 ]),
                 clause([v("_")], [remote(erlang, is_atom, [V])], [
                     err_encode(tuple_t([at(unknown_enum_value), V]))
@@ -761,9 +763,9 @@ decode_compact_expr({base, bool}, Bin, _Ctx, _Enums, Suffix) ->
 decode_compact_expr({base, i8}, Bin, _Ctx, _Enums, Suffix) ->
     fixed_case(Bin, 8, [big, signed], Suffix);
 decode_compact_expr({base, B}, Bin, _Ctx, _Enums, _Suffix) when B =:= i16; B =:= i32; B =:= i64 ->
-    %% dec_varint_z already speaks the {ok, V, Rest} | more | {error, _}
+    %% decode_zigzag already speaks the {ok, V, Rest} | more | {error, _}
     %% language — no binding case to wrap it in.
-    call_local(dec_varint_z, [Bin]);
+    call_local(decode_zigzag, [Bin]);
 decode_compact_expr({base, double}, Bin, _Ctx, _Enums, Suffix) ->
     fixed_case(Bin, 64, [little, float], Suffix);
 decode_compact_expr({base, S}, Bin, _Ctx, _Enums, _Suffix) when S =:= string; S =:= binary ->
@@ -773,7 +775,7 @@ decode_compact_expr({base, uuid}, _Bin, _Ctx, _Enums, _Suffix) ->
 decode_compact_expr({enum, Desc}, Bin, _Ctx, _Enums, Suffix) ->
     Int = v("Int" ++ Suffix),
     R = v("R" ++ Suffix),
-    'case'(call_local(dec_varint_z, [Bin]), [
+    'case'(call_local(decode_zigzag, [Bin]), [
         ok3_bind_clause(Int, R, 'case'(Int, enum_from_clauses(Desc, Int, R))),
         %% The catch-all participates in the suffix discipline: the case
         %% is inlined inside a consuming loop or pair case whose own
@@ -955,7 +957,7 @@ container_forms({map, K, V} = T, Ctx, Enums) ->
                                 ok_t(
                                     list_lit([
                                         list_lit([
-                                            call_local(enc_varint, [call_local(map_size, [v("Value")])]),
+                                            call_local(varint, [call_local(map_size, [v("Value")])]),
                                             bin_seg(i((KeyNib bsl 4) bor ValNib), i(8), [big, unsigned])
                                         ]),
                                         pairs_lc()
@@ -1005,7 +1007,7 @@ container_forms({map, K, V} = T, Ctx, Enums) ->
             end},
         {function, ?ANNO, Dec, 1, [
             clause([v("Bin")], none, [
-                'case'(call_local(dec_varint, [v("Bin")]), [
+                'case'(call_local(decode_varint, [v("Bin")]), [
                     clause([tuple_t([at(ok), i(0), v("Rest")])], none, [ok3(map_empty(), v("Rest"))]),
                     clause(
                         [tuple_t([at(ok), v("_Size"), v("Rest")])],
@@ -1172,9 +1174,10 @@ decode_elem_expr(T, Bin, _Ctx, Enums, _Suffix) ->
 %% Module helpers
 %%--------------------------------------------------------------------
 
-%% One emitted function per helper name (dec_varint renders two forms,
-%% one per arity). Each mirrors the generic engine's function of the
-%% same shape clause for clause.
+%% One emitted function per helper name. Each mirrors the generic
+%% engine's function of the same shape clause for clause; the
+%% varint/zigzag primitives they call come from
+%% `thrift_runtime_compact' via the generated module's `-import'.
 
 -spec helper_forms(atom()) -> erl_syntax:forms().
 helper_forms(enc_header) ->
@@ -1195,112 +1198,11 @@ helper_forms(enc_header) ->
                         clause([at(false)], none, [
                             list_lit([
                                 bin_seg(v("Nibble"), i(8), [big, unsigned]),
-                                call_local(enc_varint_z, [v("Id")])
+                                call_local(zigzag_varint, [v("Id")])
                             ])
                         ])
                     ]
                 )
-            ])
-        ]}
-    ];
-helper_forms(enc_varint) ->
-    [
-        {function, ?ANNO, enc_varint, 1, [
-            clause([v("V")], [{op, ?ANNO, '<', v("V"), i(16#80)}], [
-                list_lit([bin_seg(v("V"), i(8), [big, unsigned])])
-            ]),
-            clause([v("V")], none, [
-                %% The cons itself is the result — the generic engine's
-                %% `[Byte | varint(Rest)]' shape. An extra list wrapper would
-                %% change the TERM, and map pairs sort by the encoded-key
-                %% term, so the wire order would diverge.
-                cons(
-                    bin_seg(
-                        {op, ?ANNO, 'bor', {op, ?ANNO, 'band', v("V"), i(16#7F)}, i(16#80)},
-                        i(8),
-                        [big, unsigned]
-                    ),
-                    call_local(enc_varint, [{op, ?ANNO, 'bsr', v("V"), i(7)}])
-                )
-            ])
-        ]}
-    ];
-helper_forms(enc_varint_z) ->
-    [
-        {function, ?ANNO, enc_varint_z, 1, [
-            clause([v("V")], none, [
-                call_local(enc_varint, [
-                    {op, ?ANNO, 'band', i(16#FFFFFFFFFFFFFFFF),
-                        {op, ?ANNO, 'bxor', {op, ?ANNO, 'bsl', v("V"), i(1)}, {op, ?ANNO, 'bsr', v("V"), i(63)}}}
-                ])
-            ])
-        ]}
-    ];
-helper_forms(dec_varint) ->
-    [
-        {function, ?ANNO, dec_varint, 1, [
-            clause([v("Bin")], none, [call_local(dec_varint, [v("Bin"), i(0), i(0)])])
-        ]},
-        {function, ?ANNO, dec_varint, 3, [
-            clause(
-                [
-                    bin_pat([{v("B"), default, default}, {v("Rest"), default, [binary]}]),
-                    v("Shift"),
-                    v("Acc")
-                ],
-                [{op, ?ANNO, '>=', v("B"), i(16#80)}, {op, ?ANNO, '<', v("Shift"), i(63)}],
-                [
-                    call_local(dec_varint, [
-                        v("Rest"),
-                        {op, ?ANNO, '+', v("Shift"), i(7)},
-                        {op, ?ANNO, 'bor', v("Acc"),
-                            {op, ?ANNO, 'bsl', {op, ?ANNO, 'band', v("B"), i(16#7F)}, v("Shift")}}
-                    ])
-                ]
-            ),
-            clause(
-                [
-                    bin_pat([{v("B"), default, default}, {v("Rest"), default, [binary]}]),
-                    v("Shift"),
-                    v("Acc")
-                ],
-                [{op, ?ANNO, '<', v("B"), i(16#80)}],
-                [
-                    tuple_t([
-                        at(ok),
-                        {op, ?ANNO, 'bor', v("Acc"), {op, ?ANNO, 'bsl', v("B"), v("Shift")}},
-                        v("Rest")
-                    ])
-                ]
-            ),
-            clause(
-                [
-                    bin_pat([{v("_"), default, default}, {v("_"), default, [binary]}]),
-                    v("Shift"),
-                    v("_Acc")
-                ],
-                [{op, ?ANNO, '>=', v("Shift"), i(63)}],
-                [err_decode(at(bad_varint))]
-            ),
-            clause([v("_Bin"), v("_Shift"), v("_Acc")], none, [at(more)])
-        ]}
-    ];
-helper_forms(dec_varint_z) ->
-    [
-        {function, ?ANNO, dec_varint_z, 1, [
-            clause([v("Bin")], none, [
-                'case'(call_local(dec_varint, [v("Bin")]), [
-                    ok3_bind_clause(
-                        v("V"),
-                        v("Rest"),
-                        ok3(
-                            {op, ?ANNO, 'bxor', {op, ?ANNO, 'bsr', v("V"), i(1)},
-                                {op, ?ANNO, '-', {op, ?ANNO, 'band', v("V"), i(1)}}},
-                            v("Rest")
-                        )
-                    ),
-                    other_tail()
-                ])
             ])
         ]}
     ];
@@ -1317,7 +1219,7 @@ helper_forms(coll_header) ->
             clause([v("Nib"), v("Size")], none, [
                 list_lit([
                     bin_seg({op, ?ANNO, 'bor', i(16#F0), v("Nib")}, i(8), [big, unsigned]),
-                    call_local(enc_varint, [v("Size")])
+                    call_local(varint, [v("Size")])
                 ])
             ])
         ]}
@@ -1329,7 +1231,7 @@ helper_forms(dec_coll_header) ->
                 {match, ?ANNO, v("Nibble"), {op, ?ANNO, 'band', v("Header"), i(16#0F)}},
                 'case'({op, ?ANNO, 'bsr', v("Header"), i(4)}, [
                     clause([i(15)], none, [
-                        'case'(call_local(dec_varint, [v("Rest")]), [
+                        'case'(call_local(decode_varint, [v("Rest")]), [
                             ok3_bind_clause(
                                 v("Size"), v("Rest1"), ok3(tuple_t([v("Nibble"), v("Size")]), v("Rest1"))
                             ),
@@ -1348,7 +1250,7 @@ helper_forms(dec_string_c) ->
             %% Takes the raw bytes and decodes the length varint itself —
             %% the generic engine's decode_binary_k shape.
             clause([v("Bin")], none, [
-                'case'(call_local(dec_varint, [v("Bin")]), [
+                'case'(call_local(decode_varint, [v("Bin")]), [
                     clause(
                         [tuple_t([at(ok), v("Len"), v("Rest")])],
                         [{op, ?ANNO, '>=', call_local(byte_size, [v("Rest")]), v("Len")}],

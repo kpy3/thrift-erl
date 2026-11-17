@@ -200,6 +200,19 @@ types_forms(Mod, Ctx) ->
             thrift_generator_emitter_syntax:exports_forms(enum_helper_entries(Mod)) ++
             thrift_generator_emitter_syntax:exports_forms(const_entries(Mod)),
     thrift_generator_emitter_syntax:header(TypesMod, Mod#tg_module.path) ++
+        %% The compact codec's varint/zigzag primitives are reused from
+        %% the runtime: the generated module imports them, and the codec
+        %% emits unqualified calls the compiler resolves as remote. A
+        %% future local helper must not reuse these name/arity pairs.
+        [
+            {attribute, erl_anno:new(0), import,
+                {thrift_runtime_compact, [
+                    {varint, 1},
+                    {decode_varint, 1},
+                    {zigzag_varint, 1},
+                    {decode_zigzag, 1}
+                ]}}
+        ] ++
         Exports ++
         struct_type_forms(Mod, Ctx) ++
         struct_info_forms(Mod, Ctx) ++

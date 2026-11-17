@@ -34,7 +34,8 @@
     application_exception_test/0,
     more_semantics_test/0,
     uuid_unsupported_test/0,
-    enum_test/0
+    enum_test/0,
+    varint_primitives_test/0
 ]).
 
 %%--------------------------------------------------------------------
@@ -347,6 +348,64 @@ enum_test() ->
     {ok, 'TWO', <<>>} = dec(Desc, <<4>>),
     %% an unknown int comes back as itself (zigzag 99 -> 198 -> varint)
     {ok, 99, <<>>} = dec(Desc, <<198, 1>>),
+    ok.
+
+%%--------------------------------------------------------------------
+%% Varint primitives: ULEB128 and zigzag shapes the generated
+%% specialized codecs reuse from the runtime
+
+varint_primitives_test() ->
+    %% ULEB128 byte shapes: a one-byte value is a single-element list,
+    %% longer ones flatten to the same bytes
+    ?assertEqual([<<0>>], thrift_runtime_compact:varint(0)),
+    ?assertEqual([<<127>>], thrift_runtime_compact:varint(127)),
+    ?assertEqual(<<128, 1>>, iolist_to_binary(thrift_runtime_compact:varint(128))),
+    ?assertEqual(iolist_to_binary(thrift_runtime_compact:varint(300)), <<172, 2>>),
+    %% the maximum unsigned 64-bit value is the longest varint: ten
+    %% bytes, the tenth terminal
+    Max64 = 16#FFFFFFFFFFFFFFFF,
+    ?assertEqual(
+        <<255, 255, 255, 255, 255, 255, 255, 255, 255, 1>>,
+        iolist_to_binary(thrift_runtime_compact:varint(Max64))
+    ),
+    %% decode: value with or without trailing bytes, more on truncation
+    ?assertEqual({ok, 0, <<>>}, thrift_runtime_compact:decode_varint(<<0>>)),
+    ?assertEqual({ok, 128, <<>>}, thrift_runtime_compact:decode_varint(<<128, 1>>)),
+    ?assertEqual({ok, 600, <<"tail">>}, thrift_runtime_compact:decode_varint(<<216, 4, "tail">>)),
+    ?assertEqual(
+        {ok, Max64, <<>>},
+        thrift_runtime_compact:decode_varint(<<255, 255, 255, 255, 255, 255, 255, 255, 255, 1>>)
+    ),
+    ?assertEqual(more, thrift_runtime_compact:decode_varint(<<216>>)),
+    ?assertEqual(more, thrift_runtime_compact:decode_varint(<<>>)),
+    %% the tenth byte must be terminal: a continuation bit there is a
+    %% bad_varint error, not more
+    ?assertEqual(
+        {error, {decode, bad_varint}},
+        thrift_runtime_compact:decode_varint(<<128, 128, 128, 128, 128, 128, 128, 128, 128, 128>>)
+    ),
+    %% zigzag byte shapes
+    ?assertEqual([<<0>>], thrift_runtime_compact:zigzag_varint(0)),
+    ?assertEqual([<<1>>], thrift_runtime_compact:zigzag_varint(-1)),
+    ?assertEqual(<<216, 4>>, iolist_to_binary(thrift_runtime_compact:zigzag_varint(300))),
+    ?assertEqual(
+        <<255, 255, 255, 255, 255, 255, 255, 255, 255, 1>>,
+        iolist_to_binary(thrift_runtime_compact:zigzag_varint(-1 bsl 63))
+    ),
+    ?assertEqual(
+        <<254, 255, 255, 255, 255, 255, 255, 255, 255, 1>>,
+        iolist_to_binary(thrift_runtime_compact:zigzag_varint(16#7FFFFFFFFFFFFFFF))
+    ),
+    %% decode_zigzag round-trips the i64 extremes
+    lists:foreach(
+        fun(V) ->
+            {ok, V, <<>>} = thrift_runtime_compact:decode_zigzag(
+                iolist_to_binary(thrift_runtime_compact:zigzag_varint(V))
+            )
+        end,
+        [0, 1, -1, 300, -300, 16#7FFFFFFFFFFFFFFF, -1 bsl 63]
+    ),
+    ?assertEqual(more, thrift_runtime_compact:decode_zigzag(<<216>>)),
     ok.
 
 %%--------------------------------------------------------------------
