@@ -125,15 +125,7 @@ everywhere else in the emitter.
 %% The wire descriptor vocabulary of `thrift_generator_emitter:type_desc/2'
 %% — the same shape the runtime codecs consume.
 
--type wire_type() ::
-    {base, atom()}
-    | {enum, [{integer(), atom()}]}
-    | {list, wire_type()}
-    | {set, wire_type(), list | sets | ordset}
-    %% `containers/1' normalizes sets to the two-tuple shape.
-    | {set, wire_type()}
-    | {map, wire_type(), wire_type()}
-    | {struct, {ref, module(), binary()}}.
+-type wire_type() :: thrift_generator_codec_common:wire_type().
 
 %% A raw `erl_parse' tree (stdlib exports no type for them); the doc and
 %% spec attributes and the returned form list stay syntax trees.
@@ -180,7 +172,7 @@ functions, container and varint helpers, `compact_codec/1`.
 -spec module_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 module_forms(Mod, Ctx) ->
     WireTypes = [wtype(F#tg_field.type, Ctx) || S <- Mod#tg_module.structs, F <- S#tg_struct.fields],
-    Enums = thrift_generator_codec:enum_registry(WireTypes, #{}),
+    Enums = thrift_generator_codec_common:enum_registry(WireTypes),
     Blocks = lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
@@ -257,19 +249,19 @@ compact_pair(Name, Ctx) when is_binary(Name) ->
 struct_compact_pair(Name, Ctx) ->
     compact_pair(Name, Ctx).
 
--spec enc_name(wire_type(), #{integer() => pos_integer()}) -> atom().
+-spec enc_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
 enc_name(T, Enums) ->
-    binary_to_atom(<<"enc_", (thrift_generator_codec:type_name(T, Enums))/binary, "_c">>, utf8).
+    binary_to_atom(<<"enc_", (thrift_generator_codec_common:type_name(T, Enums))/binary, "_c">>, utf8).
 
--spec dec_name(wire_type(), #{integer() => pos_integer()}) -> atom().
+-spec dec_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
 dec_name(T, Enums) ->
-    binary_to_atom(<<"dec_", (thrift_generator_codec:type_name(T, Enums))/binary, "_c">>, utf8).
+    binary_to_atom(<<"dec_", (thrift_generator_codec_common:type_name(T, Enums))/binary, "_c">>, utf8).
 
 %%--------------------------------------------------------------------
 %% Per-struct blocks
 %%--------------------------------------------------------------------
 
--spec struct_forms(#tg_struct{}, #ectx{}, #{integer() => pos_integer()}) ->
+-spec struct_forms(#tg_struct{}, #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 struct_forms(S, Ctx, Enums) ->
     {Encode, Decode} = compact_pair(S, Ctx),
@@ -283,7 +275,7 @@ struct_forms(S, Ctx, Enums) ->
 %% the delta base untouched — the same walk as the generic engine's
 %% encode_fields_k.
 
--spec encode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, #{integer() => pos_integer()}) ->
+-spec encode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
     Chain = atom_concat(Encode, <<"_fields">>),
@@ -313,7 +305,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         ] ++ chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1).
 
 -spec chain_forms(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, #{integer() => pos_integer()}, pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
 chain_forms(Chain, [], _Ctx, _Enums, _N) ->
@@ -333,7 +325,7 @@ chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
 %% LastId untouched.
 
 -spec chain_fns(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, #{integer() => pos_integer()}, pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
 chain_fns(_Chain, [], _Ctx, _Enums, _N) ->
@@ -359,7 +351,7 @@ next_calls({next, Name}, Id) ->
     wire_type(),
     {next, atom()} | stop,
     #ectx{} | undefined,
-    #{integer() => pos_integer()}
+    thrift_generator_codec_common:registry()
 ) ->
     erl_syntax:forms().
 chain_fn(Chain, N, F, {base, bool}, NextStep, _Ctx, _Enums) ->
@@ -457,7 +449,7 @@ chain_fn_name(Chain, N) ->
 %% Decode side
 %%--------------------------------------------------------------------
 
--spec decode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, #{integer() => pos_integer()}) ->
+-spec decode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
 decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     Fields = S#tg_struct.fields,
@@ -593,7 +585,7 @@ loop_clauses(Required, FieldDispatch) ->
 %% own id as the new delta base — the generic engine's LastId = Id at
 %% every decode_field_k call.
 
--spec dispatch_clauses([{#tg_field{}, wire_type()}], atom(), #ectx{}, #{integer() => pos_integer()}) ->
+-spec dispatch_clauses([{#tg_field{}, wire_type()}], atom(), #ectx{}, thrift_generator_codec_common:registry()) ->
     [ast()].
 dispatch_clauses(FieldPairs, FieldsLoop, Ctx, Enums) ->
     lists:append([field_clauses_one(F, T, FieldsLoop, Ctx, Enums) || {F, T} <- FieldPairs]) ++
@@ -604,7 +596,7 @@ dispatch_clauses(FieldPairs, FieldsLoop, Ctx, Enums) ->
 %% all — the generic engine's three-way by_id match split by
 %% construction.
 
--spec field_clauses_one(#tg_field{}, wire_type(), atom(), #ectx{}, #{integer() => pos_integer()}) ->
+-spec field_clauses_one(#tg_field{}, wire_type(), atom(), #ectx{}, thrift_generator_codec_common:registry()) ->
     [ast()].
 field_clauses_one(F, {base, uuid}, _FieldsLoop, _Ctx, _Enums) ->
     [mismatch_clause(F#tg_field.id)];
@@ -699,7 +691,7 @@ skip_clause(FieldsLoop) ->
 %% variables. The consuming loop and pair cases answer with their own
 %% fresh names ("OtherLoop", "OtherPairK", "OtherPairV").
 
--spec encode_compact_expr(wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}) -> ast().
+-spec encode_compact_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry()) -> ast().
 encode_compact_expr({base, bool}, V, _Ctx, _Enums) ->
     'case'(V, [
         clause([at(true)], none, [ok_t(bin_seg(i(16#01), i(8), [big, unsigned]))]),
@@ -805,8 +797,9 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
 types_module_atom(Name) ->
     binary_to_atom(<<(thrift_generator_emitter:sanitize(Name))/binary, "_types">>, utf8).
 
--spec decode_compact_expr(wire_type(), ast(), #ectx{} | undefined, #{integer() => pos_integer()}, string()) ->
-    ast().
+-spec decode_compact_expr(
+    wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry(), string()
+) -> ast().
 decode_compact_expr({base, bool}, Bin, _Ctx, _Enums, Suffix) ->
     R = v("R" ++ Suffix),
     'case'(Bin, [
@@ -879,7 +872,7 @@ enum_from_clauses(Desc, Int, R) ->
 %% Container helpers
 %%--------------------------------------------------------------------
 
--spec container_forms(wire_type(), #ectx{}, #{integer() => pos_integer()}) -> erl_syntax:forms().
+-spec container_forms(wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
 container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
     %% The container header carries the ELEMENT type nibble; the
     %% container's own nibble only appears in the field header. List
@@ -1211,7 +1204,7 @@ uuid_decode_error_clause(Arity) ->
 %% site, struct references as struct calls, nested containers as helper
 %% calls — the same dispatch the struct fields go through.
 
--spec encode_elem_expr(wire_type(), ast(), #ectx{}, #{integer() => pos_integer()}) -> ast().
+-spec encode_elem_expr(wire_type(), ast(), #ectx{}, thrift_generator_codec_common:registry()) -> ast().
 encode_elem_expr({base, B}, V, _Ctx, _Enums) ->
     encode_base_expr(B, V);
 encode_elem_expr({enum, _} = T, V, _Ctx, _Enums) ->
@@ -1221,7 +1214,7 @@ encode_elem_expr({struct, {ref, TypesMod, Local}}, V, Ctx, _Enums) ->
 encode_elem_expr(T, V, _Ctx, Enums) ->
     call_local(enc_name(T, Enums), [V]).
 
--spec decode_elem_expr(wire_type(), ast(), #ectx{}, #{integer() => pos_integer()}, string()) -> ast().
+-spec decode_elem_expr(wire_type(), ast(), #ectx{}, thrift_generator_codec_common:registry(), string()) -> ast().
 decode_elem_expr({base, B}, Bin, _Ctx, _Enums, Suffix) ->
     decode_base_expr(B, Bin, Suffix);
 decode_elem_expr({enum, _} = T, Bin, _Ctx, _Enums, Suffix) ->
