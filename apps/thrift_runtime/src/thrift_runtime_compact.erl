@@ -58,7 +58,11 @@ to the interpreter here when the export is missing.
     decode_message/1,
     encode_application_exception/2,
     decode_application_exception/1,
-    skip_nibble/2
+    skip_nibble/2,
+    varint/1,
+    decode_varint/1,
+    zigzag_varint/1,
+    decode_zigzag/1
 ]).
 
 -behaviour(thrift_runtime_protocol).
@@ -997,12 +1001,14 @@ memo_compiled(Desc, Kind, Fields) ->
 %% Varint and zigzag
 %%--------------------------------------------------------------------
 
+-doc "ULEB128-encodes a non-negative integer as iodata.".
 -spec varint(non_neg_integer()) -> iodata().
 varint(V) when V < 16#80 ->
     [<<V>>];
 varint(V) ->
     [<<((V band 16#7F) bor 16#80)>> | varint(V bsr 7)].
 
+-doc "Decodes a ULEB128 varint: `{ok, Value, Rest}`, `more`, or `{error, {decode, bad_varint}}`.".
 -spec decode_varint(binary()) -> decode_result(non_neg_integer()).
 decode_varint(Bin) ->
     decode_varint(Bin, 0, 0).
@@ -1028,10 +1034,12 @@ to_zigzag(V) ->
 from_zigzag(V) ->
     (V bsr 1) bxor -(V band 1).
 
+-doc "Zigzag-encodes a signed integer as a ULEB128 varint of its mapped unsigned value.".
 -spec zigzag_varint(integer()) -> iodata().
 zigzag_varint(V) ->
     varint(to_zigzag(V)).
 
+-doc "Decodes a zigzag varint back to the signed integer.".
 -spec decode_zigzag(binary()) -> decode_result(integer()).
 decode_zigzag(Bin) ->
     case decode_varint(Bin) of

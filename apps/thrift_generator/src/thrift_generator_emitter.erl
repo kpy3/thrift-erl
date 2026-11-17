@@ -188,12 +188,31 @@ types_forms(Mod, Ctx) ->
         ]) ++
             [thrift_generator_emitter_syntax:export_type_form(type_alias_entries(Mod))] ++
             thrift_generator_emitter_syntax:exports_forms(struct_codec_entries(Mod)) ++
-            thrift_generator_emitter_syntax:exports_forms(thrift_generator_codec:export_entries(Mod, Ctx)) ++
-            thrift_generator_emitter_syntax:exports_forms(thrift_generator_codec_compact:export_entries(Mod, Ctx)) ++
-            thrift_generator_emitter_syntax:exports_forms(thrift_generator_codec_json:export_entries(Mod, Ctx)) ++
+            thrift_generator_emitter_syntax:exports_forms(
+                thrift_generator_codec_common:export_entries(wire, Mod, Ctx)
+            ) ++
+            thrift_generator_emitter_syntax:exports_forms(
+                thrift_generator_codec_common:export_entries(compact, Mod, Ctx)
+            ) ++
+            thrift_generator_emitter_syntax:exports_forms(
+                thrift_generator_codec_common:export_entries(json, Mod, Ctx)
+            ) ++
             thrift_generator_emitter_syntax:exports_forms(enum_helper_entries(Mod)) ++
             thrift_generator_emitter_syntax:exports_forms(const_entries(Mod)),
     thrift_generator_emitter_syntax:header(TypesMod, Mod#tg_module.path) ++
+        %% The compact codec's varint/zigzag primitives are reused from
+        %% the runtime: the generated module imports them, and the codec
+        %% emits unqualified calls the compiler resolves as remote. A
+        %% future local helper must not reuse these name/arity pairs.
+        [
+            {attribute, erl_anno:new(0), import,
+                {thrift_runtime_compact, [
+                    {varint, 1},
+                    {decode_varint, 1},
+                    {zigzag_varint, 1},
+                    {decode_zigzag, 1}
+                ]}}
+        ] ++
         Exports ++
         struct_type_forms(Mod, Ctx) ++
         struct_info_forms(Mod, Ctx) ++
@@ -1221,32 +1240,23 @@ service_info_forms(Mod, Ctx) ->
 -spec service_entry([#tg_function{}], #ectx{}, map()) -> map().
 service_entry([], _Ctx, Acc) ->
     Acc;
-service_entry([F | Rest], Ctx, Acc0) ->
-    Acc1 = Acc0#{
-        F#tg_function.name => #{
-            name => F#tg_function.name,
-            oneway => F#tg_function.oneway,
-            params => params_desc(F, Ctx)
-        }
+service_entry([F | Rest], Ctx, Acc) ->
+    Info0 = #{
+        name => F#tg_function.name,
+        oneway => F#tg_function.oneway,
+        params => params_desc(F, Ctx)
     },
-    Acc2 =
+    Info1 =
         case reply_desc(F, Ctx) of
-            undefined ->
-                Acc1;
-            Reply ->
-                maps:update_with(
-                    F#tg_function.name, fun(Info) -> Info#{reply => Reply} end, Acc1
-                )
+            undefined -> Info0;
+            Reply -> Info0#{reply => Reply}
         end,
-    case exceptions_desc(F, Ctx) of
-        [] ->
-            service_entry(Rest, Ctx, Acc2);
-        Exceptions ->
-            Acc3 = maps:update_with(
-                F#tg_function.name, fun(Info) -> Info#{exceptions => Exceptions} end, Acc2
-            ),
-            service_entry(Rest, Ctx, Acc3)
-    end.
+    Info =
+        case exceptions_desc(F, Ctx) of
+            [] -> Info1;
+            Exceptions -> Info1#{exceptions => Exceptions}
+        end,
+    service_entry(Rest, Ctx, Acc#{F#tg_function.name => Info}).
 
 -spec record_fields_forms(#tg_module{}) -> erl_syntax:forms().
 record_fields_forms(Mod) ->
@@ -1350,47 +1360,34 @@ qualified_desc(ModKey0, Local, Ctx) ->
     ModKey = module_key_of(ModKey0, Ctx),
     Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
     TypesMod = maps:get(ModKey, Ctx#ectx.type_modules, undefined),
-    case find_struct(Module, Local) of
-        {ok, _S} ->
+    case find_def(Module, Local) of
+        {struct, _S} ->
             {struct, {ref, TypesMod, Local}};
+        {enum, E} ->
+            {enum, enum_desc(E)};
+        {typedef, Type} ->
+            %% A typedef from another module (base.Timestamp and
+            %% friends) resolves in its own module's context, so
+            %% refs inside its body stay home.
+            type_desc(Type, Ctx#ectx{current = ModKey});
         error ->
-            case find_enum(Module, Local) of
-                {ok, E} ->
-                    {enum, enum_desc(E)};
-                error ->
-                    %% A typedef from another module (base.Timestamp and
-                    %% friends) resolves in its own module's context, so
-                    %% refs inside its body stay home.
-                    case find_typedef(Module, Local) of
-                        {ok, Type} ->
-                            type_desc(Type, Ctx#ectx{current = ModKey});
-                        error ->
-                            error({unresolved_type, ModKey, Local})
-                    end
-            end
+            error({unresolved_type, ModKey, Local})
     end.
 
 -spec local_desc(binary(), #ectx{}) -> desc().
 local_desc(Name, Ctx) ->
     Module = maps:get(Ctx#ectx.current, Ctx#ectx.modules),
-    case find_struct(Module, Name) of
-        {ok, _S} ->
+    case find_def(Module, Name) of
+        {struct, _S} ->
             {struct, {ref, types_module_atom(Ctx#ectx.current), Name}};
+        {enum, E} ->
+            {enum, enum_desc(E)};
+        {typedef, Type} ->
+            type_desc(Type, Ctx);
         error ->
-            case find_enum(Module, Name) of
-                {ok, E} ->
-                    {enum, enum_desc(E)};
-                error ->
-                    case find_typedef(Module, Name) of
-                        {ok, Type} ->
-                            type_desc(Type, Ctx);
-                        error ->
-                            %% Inherited service functions reference the
-                            %% parent module's types; resolve across
-                            %% every loaded module.
-                            cross_module_desc(Name, Ctx)
-                    end
-            end
+            %% Inherited service functions reference the parent module's
+            %% types; resolve across every loaded module.
+            cross_module_desc(Name, Ctx)
     end.
 
 -spec cross_module_desc(binary(), #ectx{}) -> desc().
@@ -1399,14 +1396,10 @@ cross_module_desc(Name, Ctx) ->
         {ModKey, Kind}
      || {ModKey, Module} <- maps:to_list(Ctx#ectx.modules),
         Kind <- [
-            case find_struct(Module, Name) of
-                {ok, _} ->
-                    struct;
-                error ->
-                    case find_enum(Module, Name) of
-                        {ok, _} -> enum;
-                        error -> none
-                    end
+            case find_def(Module, Name) of
+                {struct, _} -> struct;
+                {enum, _} -> enum;
+                _ -> none
             end
         ],
         Kind =/= none
@@ -1416,41 +1409,30 @@ cross_module_desc(Name, Ctx) ->
             {struct, {ref, types_module_atom(ModKey), Name}};
         [{ModKey, enum}] ->
             Module = maps:get(ModKey, Ctx#ectx.modules),
-            {ok, E} = find_enum(Module, Name),
+            {enum, E} = find_def(Module, Name),
             {enum, enum_desc(E)};
         _ ->
             error({unresolved_type, Name})
     end.
 
--spec find_struct(#tg_module{} | undefined, binary()) -> {ok, #tg_struct{}} | error.
-find_struct(undefined, _) ->
+-spec find_def(#tg_module{} | undefined, binary()) ->
+    {struct, #tg_struct{}} | {enum, #tg_enum{}} | {typedef, thrift_type()} | error.
+find_def(undefined, _Name) ->
     error;
-find_struct(Module, Name) ->
+find_def(Module, Name) ->
     case [S || S <- Module#tg_module.structs, S#tg_struct.name =:= Name] of
         [S | _] ->
-            {ok, S};
+            {struct, S};
         [] ->
-            error
-    end.
-
--spec find_enum(#tg_module{} | undefined, binary()) -> {ok, #tg_enum{}} | error.
-find_enum(undefined, _) ->
-    error;
-find_enum(Module, Name) ->
-    case [E || E <- Module#tg_module.enums, E#tg_enum.name =:= Name] of
-        [E | _] ->
-            {ok, E};
-        [] ->
-            error
-    end.
-
--spec find_typedef(#tg_module{}, binary()) -> {ok, thrift_type()} | error.
-find_typedef(Module, Name) ->
-    case [T || T <- Module#tg_module.typedefs, T#tg_typedef.name =:= Name] of
-        [#tg_typedef{type = Type} | _] ->
-            {ok, Type};
-        [] ->
-            error
+            case [E || E <- Module#tg_module.enums, E#tg_enum.name =:= Name] of
+                [E | _] ->
+                    {enum, E};
+                [] ->
+                    case [T || T <- Module#tg_module.typedefs, T#tg_typedef.name =:= Name] of
+                        [#tg_typedef{type = Type} | _] -> {typedef, Type};
+                        [] -> error
+                    end
+            end
     end.
 
 -spec enum_desc(#tg_enum{}) -> [{integer(), atom()}].
@@ -1594,22 +1576,18 @@ qualified_ref_type(ModKey0, Local, Ctx) ->
 def_alias(undefined, _Local) ->
     error;
 def_alias(Module, Local) ->
-    case find_struct(Module, Local) of
-        {ok, S} ->
+    case find_def(Module, Local) of
+        {struct, S} ->
             case native_mode(S) of
                 true -> error;
                 false -> {ok, type_alias(Local)}
             end;
+        {enum, _E} ->
+            {ok, type_alias(Local)};
+        {typedef, _Type} ->
+            {ok, type_alias(Local)};
         error ->
-            case find_enum(Module, Local) of
-                {ok, _} ->
-                    {ok, type_alias(Local)};
-                error ->
-                    case find_typedef(Module, Local) of
-                        {ok, _} -> {ok, type_alias(Local)};
-                        error -> error
-                    end
-            end
+            error
     end.
 %%--------------------------------------------------------------------
 %% In-memory compilation
