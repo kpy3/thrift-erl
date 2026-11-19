@@ -41,6 +41,7 @@
     cross_module_typedef/1,
     cross_module_include_qualifier/1,
     cross_module_direct_dispatch/1,
+    base_fields_guarded_encode/1,
     rpc_specialized_codecs/1,
     rpc_loopback_hooks/1,
     rpc_loopback_fallback/1,
@@ -69,6 +70,7 @@ all() ->
         cross_module_typedef,
         cross_module_include_qualifier,
         cross_module_direct_dispatch,
+        base_fields_guarded_encode,
         rpc_specialized_codecs,
         rpc_loopback_hooks,
         rpc_loopback_fallback,
@@ -394,6 +396,52 @@ assert_without_runtime_dispatch(Runtime, Fun) ->
     _ = persistent_term:erase(Key),
     Fun(),
     ?assertEqual(missing, persistent_term:get(Key, missing)).
+
+%% Base-type fields in the binary and compact encode chains fold the
+%% type/range check into the map-match clause guard and place the payload
+%% straight into the chunk — no {ok, E} wrapper and no destructure case
+%% per field (the JSON emitter already emits this shape). The assertions
+%% pin the payload right next to the field header; the {ok, E} form has
+%% a bound variable there instead.
+
+base_fields_guarded_encode(Config) ->
+    Path = write_snippet(
+        Config,
+        "guarded.thrift",
+        <<
+            "namespace erl guarded\n"
+            "struct S {\n"
+            "  1: optional i32 n,\n"
+            "  2: optional string s,\n"
+            "  3: optional bool b,\n"
+            "  4: optional double d\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    Patterns = [
+        %% binary: i32 payload segment right after the header literal
+        <<"1:16\\/big-signed>>,\\s*<<V:32\\/big-signed>>">>,
+        %% binary: string length segment right after the header literal
+        <<"2:16\\/big-signed>>,\\s*\\[<<\\(byte_size\\(V\\)\\):32\\/big-signed>>">>,
+        %% binary: bool literal payload right after the header literal
+        <<"3:16\\/big-signed>>,\\s*<<\"\\\\001\">>">>,
+        %% binary: double payload right after the header literal
+        <<"4:16\\/big-signed>>,\\s*<<\\(erlang:float\\(V\\)\\):64\\/big-float>>">>,
+        %% compact: varint payload call right after the header call
+        <<"enc_header\\(1, LastId, 5\\),\\s*enc_varint_z\\(V\\)">>,
+        %% compact: double payload right after the header call
+        <<"enc_header\\(4, LastId, 7\\),\\s*<<\\(erlang:float\\(V\\)\\):64\\/little-float>>">>
+    ],
+    lists:foreach(
+        fun(P) ->
+            ?assertMatch({match, _}, re:run(Src, P, [dotall]), #{pattern => P})
+        end,
+        Patterns
+    ),
+    ok.
 
 %% RPC params/result hooks: the generated service info carries
 %% specialized per-protocol codec pairs for the synthetic params and

@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codecs` hooks keyed by protocol module. Oneway functions carry no result
   hook. The synthetic names embed `$`, so they can never collide with a
   declared struct.
+- Binary and compact encode chains for base-type struct fields fold the
+  type/range check into the map-match clause guard and place the payload
+  straight into the chunk, instead of building and destructuring an
+  `{ok, Payload}` tuple per field — the shape the JSON emitter already
+  used. Paired benchmark against `v0.8.0`: all binary/compact encode
+  cells pass the 0.99 gate with direct-encode gains up to +3% on
+  base-heavy structs; wire bytes and error terms are unchanged.
 - `scripts/bench-rpc` runs a paired loopback RPC benchmark (client and server
   on 127.0.0.1, framed/binary) of a historical git ref against the current
   checkout, with the same per-cell 0.99 gate as `scripts/bench-regression`.

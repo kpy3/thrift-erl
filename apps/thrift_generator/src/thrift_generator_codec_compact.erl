@@ -319,6 +319,8 @@ chain_fn(Chain, N, F, {base, bool}, NextStep, _Ctx, _Enums) ->
     bool_chain_fn(Chain, N, F, NextStep);
 chain_fn(Chain, N, F, {base, uuid}, NextStep, _Ctx, _Enums) ->
     chain_fn_uuid(Chain, N, F, NextStep);
+chain_fn(Chain, N, F, {base, _} = T, NextStep, _Ctx, _Enums) ->
+    base_chain_fn(Chain, N, F, T, NextStep);
 chain_fn(Chain, N, F, T, NextStep, Ctx, Enums) ->
     Header = enc_header_call(F#tg_field.id, nibble(T)),
     {Present, Absent} = next_calls(NextStep, F#tg_field.id),
@@ -396,6 +398,95 @@ nibble_next(Next, Id, Nibble) ->
     'case'(Next, [
         ok_bind_clause(v("Rest"), ok_t(cons(enc_header_call(Id, Nibble), v("Rest")))),
         error_clause()
+    ]).
+
+%% Non-boolean base fields fold the type/range check into the map-match
+%% clause guard and place the payload straight into the chunk next to the
+%% header call — no {ok, E} wrapper and no destructure case per field. A
+%% present-but-wrong-type value hits the unguarded present clause and
+%% reports the same type_mismatch error the generic engine raises, before
+%% the rest of the struct is encoded.
+
+-spec base_chain_fn(atom(), pos_integer(), #tg_field{}, wire_type(), {next, atom()} | stop) ->
+    erl_syntax:forms().
+base_chain_fn(Chain, N, F, {base, B} = T, NextStep) ->
+    Header = enc_header_call(F#tg_field.id, nibble(T)),
+    {Present, Absent} = next_calls(NextStep, F#tg_field.id),
+    Name = name_lit(F#tg_field.name),
+    Body =
+        'case'(
+            v("Value"),
+            base_field_clauses(B, Name, Header, Present) ++
+                [
+                    clause([v("_")], none, [Absent])
+                ]
+        ),
+    {function, ?ANNO, chain_fn_name(Chain, N), 2, [clause([v("Value"), v("LastId")], none, [Body])]}.
+
+-spec base_field_clauses(atom(), ast(), ast(), ast()) -> [ast()].
+base_field_clauses(B, Name, Header, Present) ->
+    V = v("V"),
+    Clauses =
+        case B of
+            i8 ->
+                [
+                    base_present_clause(
+                        map_exact(Name, V),
+                        [
+                            remote(erlang, is_integer, [V]),
+                            {op, ?ANNO, '>=', V, i(-128)},
+                            {op, ?ANNO, '=<', V, i(127)}
+                        ],
+                        Header,
+                        bin_seg(V, i(8), [big, signed]),
+                        Present
+                    )
+                ];
+            double ->
+                [
+                    base_present_clause(
+                        map_exact(Name, V),
+                        [remote(erlang, is_number, [V])],
+                        Header,
+                        bin_seg(remote(erlang, float, [V]), i(64), [little, float]),
+                        Present
+                    )
+                ];
+            S when S =:= string; S =:= binary ->
+                [
+                    base_present_clause(
+                        map_exact(Name, V),
+                        [remote(erlang, is_binary, [V])],
+                        Header,
+                        list_lit([call_local(enc_varint, [call_local(byte_size, [V])]), V]),
+                        Present
+                    )
+                ];
+            _ ->
+                Bits = bits(B),
+                [
+                    base_present_clause(
+                        map_exact(Name, V),
+                        [
+                            remote(erlang, is_integer, [V]),
+                            {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
+                            {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
+                        ],
+                        Header,
+                        call_local(enc_varint_z, [V]),
+                        Present
+                    )
+                ]
+        end,
+    Clauses ++ [clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])].
+
+-spec base_present_clause(ast(), [ast()], ast(), ast(), ast()) -> ast().
+base_present_clause(MapPat, Guard, Header, Payload, Present) ->
+    clause([MapPat], Guard, [
+        'case'(Present, [
+            ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, Payload]), v("Rest")))),
+            error_clause()
+        ])
     ]).
 
 -spec enc_header_call(integer(), non_neg_integer()) -> ast().
@@ -643,9 +734,11 @@ skip_clause(FieldsLoop) ->
 %% Encode expressions: {ok, iodata()} | {error, _}, byte-identical to
 %% the generic engine's encode_k/2 clauses. Decode expressions:
 %% {ok, Value, Rest} | more | {error, _}, byte-identical to decode_k/2.
-%% Both work on wire descriptors — struct fields and container elements
-%% share them. Encodes bind nothing (the case variables are the outer
-%% value); decodes suffix their inline variables ("Vd", "Rd", "Int",
+%% Both work on wire descriptors — container elements and non-base
+%% struct fields share them (base-type struct fields are folded into
+%% guarded map-match clauses by base_chain_fn/5 instead). Encodes bind
+%% nothing (the case variables are the outer value); decodes suffix
+%% their inline variables ("Vd", "Rd", "Int",
 %% "R", catch-all "Other") so nested cases — a map pair's key and value
 %% decodes, an element case inside the loop case that consumes it —
 %% never rebind each other's names, which erl_lint reports as unsafe
