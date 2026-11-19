@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used. Paired benchmark against `v0.8.0`: all binary/compact encode
   cells pass the 0.99 gate with direct-encode gains up to +3% on
   base-heavy structs; wire bytes and error terms are unchanged.
+- Required and union checks no longer allocate on the valid path. Encode
+  matches the required keys in one map pattern and counts union members
+  arithmetically; decode tracks required presence in a bitmask instead
+  of a `lists:keydelete` list (binary) or a `maps:remove` map (compact,
+  JSON), rebuilding the missing-names list only on the error branch.
+  Paired benchmark against `v0.8.0`: all 60 cells (including the new
+  SomeUnion cells) pass the 0.99 gate; direct gains on required-heavy
+  CrossModule reach +90%/+67% (binary encode/decode), +36%/+63%
+  (compact), +40%/+9% (json), and union encode gains +14%/+11%/+6%
+  (binary/compact/json). Wire bytes, error terms, and the missing-names
+  order are unchanged.
 - `scripts/bench-rpc` runs a paired loopback RPC benchmark (client and server
   on 127.0.0.1, framed/binary) of a historical git ref against the current
   checkout, with the same per-cell 0.99 gate as `scripts/bench-regression`.
