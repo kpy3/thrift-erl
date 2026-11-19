@@ -49,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/bench-rpc` runs a paired loopback RPC benchmark (client and server
   on 127.0.0.1, framed/binary) of a historical git ref against the current
   checkout, with the same per-cell 0.99 gate as `scripts/bench-regression`.
+- JSON string/number helpers scan in one pass without per-byte list
+  accumulation: plain string runs decode to a zero-copy slice and escape-free
+  strings encode untouched, and number tokens are sliced with the float marker
+  tracked in arguments instead of `lists:last`/`lists:any` over a reversed
+  accumulator. Paired benchmark against `v0.8.0`: all 72 cells (including the
+  new XtructLong 2 KB-string cell) pass the 0.99 gate; direct JSON gains reach
+  +438%/+148% (long-string encode/decode), +52%/+19% (number-heavy
+  CrossModule), +43%/+8% (SomeUnion). Wire bytes and error terms are
+  unchanged.
 
 ### Runtime (`thrift_runtime`)
 

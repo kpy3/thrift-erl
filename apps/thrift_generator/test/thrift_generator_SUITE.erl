@@ -643,8 +643,10 @@ json_fast_path_helpers(Config) ->
     %% plain-run string scanner with zero-copy slices
     ?assertMatch({match, _}, re:run(Src, <<"json_scan_string_plain">>, [])),
     ?assertMatch({match, _}, re:run(Src, <<"binary:part">>, [])),
-    %% escape detection scan on the encode side
-    ?assertMatch({match, _}, re:run(Src, <<"json_escape_needed">>, [])),
+    %% escape detection folded into a two-argument json_escape (no
+    %% forwarder call, plain prefixes returned as-is)
+    ?assertMatch({match, _}, re:run(Src, <<"json_escape\\(Rest, Orig\\)">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"json_escape_needed">>, [])),
     %% the list-based number classification is gone
     ?assertEqual(nomatch, re:run(Src, <<"lists:last">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"lists:any">>, [])),

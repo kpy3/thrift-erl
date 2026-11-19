@@ -124,21 +124,20 @@ syntax trees like everywhere else in the emitter.
     json_scan_string => [json_scan_string_plain, json_scan_string_body],
     json_scan_string_body => [json_hex_value],
     json_scan_number => [json_take_number, json_classify_number],
-    json_escape => [json_escape_needed, json_escape_byte]
+    json_escape => [json_escape_byte]
 }).
 
 -define(HELPERS, [
     json_skip_ws,
     json_expect,
     json_scan_string,
-    json_scan_string_plain,
     json_scan_string_body,
+    json_scan_string_plain,
     json_hex_value,
     json_scan_number,
     json_take_number,
     json_classify_number,
     json_escape,
-    json_escape_needed,
     json_escape_byte,
     json_format_double,
     json_dup_keys,
@@ -415,7 +414,7 @@ chain_fn(Chain, N, F, {base, B} = T, NextStep, _Ctx, _Enums) when
             S when S =:= string; S =:= binary ->
                 [
                     clause([map_exact(Name, v("V"))], [remote(erlang, is_binary, [v("V")])], [
-                        present_call(NextStep, Prefix, list_lit([i(34), call_local(json_escape, [v("V")]), i(34)]))
+                        present_call(NextStep, Prefix, list_lit([i(34), call_local(json_escape, [v("V"), v("V")]), i(34)]))
                     ]),
                     clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])
                 ];
@@ -490,7 +489,7 @@ encode_json_expr({base, double}, V, _Ctx, _Enums) ->
 encode_json_expr({base, S}, V, _Ctx, _Enums) when S =:= string; S =:= binary ->
     'case'(V, [
         clause([v("_")], [remote(erlang, is_binary, [V])], [
-            ok_t(list_lit([i(34), call_local(json_escape, [V]), i(34)]))
+            ok_t(list_lit([i(34), call_local(json_escape, [V, V]), i(34)]))
         ]),
         mismatch_tail(V)
     ]);
@@ -1115,7 +1114,7 @@ container_map_forms(T, K, V, Ctx, Enums) ->
                                                     v("KeyText"),
                                                     list_lit([
                                                         i(34),
-                                                        call_local(json_escape, [v("KeyText")]),
+                                                        call_local(json_escape, [v("KeyText"), v("KeyText")]),
                                                         i(34),
                                                         i(58),
                                                         v("ValIo")
@@ -1939,38 +1938,31 @@ helper_forms(json_classify_number) ->
         ]}
     ];
 helper_forms(json_escape) ->
-    %% Scan first: plain binaries (the common case) are returned
-    %% untouched, and the per-byte escaping runs only past the first byte
-    %% that needs it.
+    %% The escape scan IS the function: plain binaries (the common case)
+    %% are returned untouched after one pass, and the per-byte escaping
+    %% runs only past the first byte that needs it. `Orig' keeps the
+    %% whole binary while the first argument is consumed.
     [
-        {function, ?ANNO, json_escape, 1, [
-            clause([v("Bin")], none, [
-                'case'(call_local(json_escape_needed, [v("Bin")]), [
-                    clause([at(false)], none, [v("Bin")]),
-                    clause([at(true)], none, [
-                        {lc, ?ANNO, call_local(json_escape_byte, [v("B")]), [
-                            {b_generate, ?ANNO, bin_pat([{v("B"), i(8), [big, unsigned]}]), v("Bin")}
-                        ]}
-                    ])
-                ])
-            ])
-        ]}
-    ];
-helper_forms(json_escape_needed) ->
-    [
-        {function, ?ANNO, json_escape_needed, 1, [
+        {function, ?ANNO, json_escape, 2, [
             clause(
-                [bin_pat([{v("C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}])],
+                [
+                    bin_pat([{v("C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}]),
+                    v("Orig")
+                ],
                 [
                     {op, ?ANNO, 'andalso',
                         {op, ?ANNO, 'andalso', {op, ?ANNO, '=/=', v("C"), i(34)},
                             {op, ?ANNO, '=/=', v("C"), i(92)}},
                         {op, ?ANNO, '>=', v("C"), i(16#20)}}
                 ],
-                [call_local(json_escape_needed, [v("Rest")])]
+                [call_local(json_escape, [v("Rest"), v("Orig")])]
             ),
-            clause([bin_pat([])], none, [at(false)]),
-            clause([v("_")], none, [at(true)])
+            clause([bin_pat([]), v("Orig")], none, [v("Orig")]),
+            clause([v("_"), v("Orig")], none, [
+                {lc, ?ANNO, call_local(json_escape_byte, [v("B")]), [
+                    {b_generate, ?ANNO, bin_pat([{v("B"), i(8), [big, unsigned]}]), v("Orig")}
+                ]}
+            ])
         ]}
     ];
 helper_forms(json_escape_byte) ->
