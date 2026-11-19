@@ -334,10 +334,14 @@ required_check(Fields, Call) ->
             'case'(v("Value"), [
                 clause([Present], none, [Call]),
                 clause([v("_")], none, [
-                    err_encode(tuple_t([
-                        at(missing_required_fields),
-                        lc(v("N"), [{generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), false)])
-                    ]))
+                    err_encode(
+                        tuple_t([
+                            at(missing_required_fields),
+                            lc(v("N"), [
+                                {generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), false)
+                            ])
+                        ])
+                    )
                 ])
             ])
     end.
