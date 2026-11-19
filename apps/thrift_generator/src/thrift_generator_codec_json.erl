@@ -156,17 +156,18 @@ functions, container and scanner helpers, `json_codec/1`.
 """.
 -spec module_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 module_forms(Mod, Ctx) ->
-    WireTypes = [wtype(F#tg_field.type, Ctx) || S <- Mod#tg_module.structs, F <- S#tg_struct.fields],
+    %% The synthetic RPC codecs go last: the hooks in service_info reach
+    %% them directly, and keeping the declared structs' code layout
+    %% untouched matters more than grouping (BEAM layout sensitivity).
+    ServiceStructs = thrift_generator_codec_common:service_structs(Mod),
+    WireTypes = [
+        wtype(F#tg_field.type, Ctx)
+     || S <- Mod#tg_module.structs ++ ServiceStructs,
+        F <- S#tg_struct.fields
+    ],
     Enums = thrift_generator_codec_common:enum_registry(WireTypes),
-    Blocks = lists:append([
-        [
-            thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s json wire codecs", [thrift_generator_emitter:section_label(S)])
-            )
-        ] ++
-            struct_forms(S, Ctx, Enums)
-     || S <- Mod#tg_module.structs
-    ]),
+    Blocks = struct_blocks(Mod#tg_module.structs, Ctx, Enums),
+    ServiceBlocks = struct_blocks(ServiceStructs, Ctx, Enums),
     Containers = lists:usort(
         lists:append([containers_json(T) || T <- WireTypes])
     ),
@@ -183,10 +184,27 @@ module_forms(Mod, Ctx) ->
             helper_forms(Name)
          || Name <- ?HELPERS,
             lists:member(
-                Name, thrift_generator_codec_common:used_helpers(Blocks ++ ContainerForms ++ Codec, ?HELPER_DEPS)
+                Name,
+                thrift_generator_codec_common:used_helpers(
+                    Blocks ++ ServiceBlocks ++ ContainerForms ++ Codec, ?HELPER_DEPS
+                )
             )
         ]) ++
-        Codec.
+        Codec ++
+        ServiceBlocks.
+
+-spec struct_blocks([#tg_struct{}], #ectx{}, thrift_generator_codec_common:registry()) ->
+    erl_syntax:forms().
+struct_blocks(Structs, Ctx, Enums) ->
+    lists:append([
+        [
+            thrift_generator_emitter_syntax:section_form(
+                io_lib:format("~s json wire codecs", [thrift_generator_emitter:section_label(S)])
+            )
+        ] ++
+            struct_forms(S, Ctx, Enums)
+     || S <- Structs
+    ]).
 
 %% The JSON container set of one field type: like
 %% thrift_generator_codec_common:containers/1, but a map whose key no JSON

@@ -47,7 +47,15 @@ arguments in declaration order. They answer:
     %% reply type descriptor, `void` maps to `undefined`
     reply => thrift_runtime_binary:type_desc() | undefined,
     %% declared exceptions as throw-field descriptors
-    exceptions => [thrift_runtime_binary:field_desc()]
+    exceptions => [thrift_runtime_binary:field_desc()],
+    %% generated services only: specialized codec hooks per protocol
+    %% module (thrift_runtime_binary/compact/json). `params' is always
+    %% present, `result' absent for oneway functions; each value is the
+    %% `{Module, Encode, Decode}' triple of the synthetic struct codec.
+    %% The runtime calls the hook directly and falls back to the
+    %% descriptor path whenever the key, the protocol or (after a
+    %% reload) the function is missing.
+    codecs => #{module() => #{params => {module(), atom(), atom()}, result => {module(), atom(), atom()}}}
 }.
 
 -type service_info() :: #{binary() := function_info()}.

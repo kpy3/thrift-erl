@@ -849,6 +849,13 @@ not a 1% gate. An interval that crosses the configured threshold is
 inconclusive: increase the sample count or duration before claiming parity at
 that precision.
 
+`scripts/bench-rpc` measures the RPC path end to end: a generated
+`ThriftTest` server and client on a 127.0.0.1 loopback (framed transport,
+binary protocol), historical ref against the current checkout, paired
+rounds with the same 0.99 gate. `THRIFT_BENCH_FUNCTION` selects one
+function. It is the acceptance check for RPC-path optimizations, which
+codec-level numbers alone cannot prove.
+
 Our codec compiles type descriptors once — referenced structs in a shared
 `persistent_term` cache, inline descriptors in a per-process memo — so
 nested schemas are never re-resolved per wire occurrence. The emitter
@@ -858,9 +865,12 @@ for all three protocols — `encode_<X>_wire`/`decode_<X>_wire`,
 `encode_<X>_json`/`decode_<X>_json`, each behind its `binary_codec/1`,
 `compact_codec/1` or `json_codec/1` index — and named struct references
 dispatch straight into them, with no descriptor interpretation on the
-hot path. The generic engine remains for inline descriptors,
-introspection and as the equivalence reference the PropEr suite pins
-the specialized codecs to.
+hot path. RPC parameters and results get the same treatment: every
+generated function carries per-protocol `codecs` hooks in its
+`function_info`, so calls skip the descriptor engine even though params
+and results are synthetic inline structs. The generic engine remains for
+hand-written descriptors, custom protocol modules and as the equivalence
+reference the PropEr suite pins the specialized codecs to.
 
 | case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
 |------|-----------|-----------:|---------------------:|--------:|

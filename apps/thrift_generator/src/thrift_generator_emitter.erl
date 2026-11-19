@@ -1216,22 +1216,24 @@ exceptions_desc(F, Ctx) ->
 
 -spec service_info_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 service_info_forms(Mod, Ctx) ->
+    TypesMod = types_module_atom(Mod#tg_module.name),
     Entries = [
-        {S#tg_service.name, service_entry(S#tg_service.functions, Ctx, #{})}
+        {S#tg_service.name, service_entry(S#tg_service.name, S#tg_service.functions, TypesMod, Ctx, #{})}
      || S <- Mod#tg_module.services
     ],
     thrift_generator_emitter_syntax:fn_form(service_info, [
         thrift_generator_emitter_syntax:fn_clause([], thrift_generator_emitter_syntax:abstract(maps:from_list(Entries)))
     ]).
 
--spec service_entry([#tg_function{}], #ectx{}, map()) -> map().
-service_entry([], _Ctx, Acc) ->
+-spec service_entry(binary(), [#tg_function{}], module(), #ectx{}, map()) -> map().
+service_entry(_SvcName, [], _TypesMod, _Ctx, Acc) ->
     Acc;
-service_entry([F | Rest], Ctx, Acc) ->
+service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc) ->
     Info0 = #{
         name => F#tg_function.name,
         oneway => F#tg_function.oneway,
-        params => params_desc(F, Ctx)
+        params => params_desc(F, Ctx),
+        codecs => rpc_codecs(SvcName, F, TypesMod, Ctx)
     },
     Info1 =
         case reply_desc(F, Ctx) of
@@ -1243,7 +1245,44 @@ service_entry([F | Rest], Ctx, Acc) ->
             [] -> Info1;
             Exceptions -> Info1#{exceptions => Exceptions}
         end,
-    service_entry(Rest, Ctx, Acc#{F#tg_function.name => Info}).
+    service_entry(SvcName, Rest, TypesMod, Ctx, Acc#{F#tg_function.name => Info}).
+
+%% The specialized RPC codec hooks of one function, keyed by the
+%% runtime protocol module: the runtime picks the entry of its protocol
+%% and calls the params/result codecs directly, falling back to the
+%% descriptor path when the key or the protocol is absent (hand-written
+%% service modules, custom protocols).
+
+-spec rpc_codecs(binary(), #tg_function{}, module(), #ectx{}) -> map().
+rpc_codecs(SvcName, F, TypesMod, Ctx) ->
+    maps:from_list([
+        rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx)
+     || Protocol <- [wire, compact, json]
+    ]).
+
+-spec rpc_codec_entry(wire | compact | json, binary(), #tg_function{}, module(), #ectx{}) ->
+    {module(), map()}.
+rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx) ->
+    {EncParams, DecParams} = thrift_generator_codec_common:codec_pair(
+        Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, params), Ctx
+    ),
+    Entry = #{params => {TypesMod, EncParams, DecParams}},
+    Full =
+        case F#tg_function.oneway of
+            true ->
+                Entry;
+            false ->
+                {EncResult, DecResult} = thrift_generator_codec_common:codec_pair(
+                    Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, result), Ctx
+                ),
+                Entry#{result => {TypesMod, EncResult, DecResult}}
+        end,
+    {rpc_protocol_module(Protocol), Full}.
+
+-spec rpc_protocol_module(wire | compact | json) -> module().
+rpc_protocol_module(wire) -> thrift_runtime_binary;
+rpc_protocol_module(compact) -> thrift_runtime_compact;
+rpc_protocol_module(json) -> thrift_runtime_json.
 
 -spec record_fields_forms(#tg_module{}) -> erl_syntax:forms().
 record_fields_forms(Mod) ->

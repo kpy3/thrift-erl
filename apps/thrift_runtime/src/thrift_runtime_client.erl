@@ -462,13 +462,13 @@ prepare(Request, SeqId, #state{} = State) ->
 
 -spec prepare_args(#request{}, non_neg_integer(), thrift_runtime_service:function_info(), #state{}) ->
     {ok, iodata()} | {reply, term()}.
-prepare_args(Request, SeqId, #{params := ParamsDesc}, #state{} = State) ->
+prepare_args(Request, SeqId, #{params := ParamsDesc} = Info, #state{} = State) ->
     Names = [Name || {_, _, _, Name, _} <- thrift_runtime_binary:struct_fields(ParamsDesc)],
     Args = Request#request.args,
     case length(Args) =:= length(Names) of
         true ->
             Values = lists:zip(Names, Args),
-            case (State#state.protocol):encode(ParamsDesc, maps:from_list(Values)) of
+            case encode_params(Info, State#state.protocol, ParamsDesc, maps:from_list(Values)) of
                 {ok, Payload} ->
                     Type =
                         case Request#request.kind of
@@ -662,8 +662,7 @@ decode_reply(Function, SeqId, Info, Message, #state{} = State) ->
     {ok, call_result()} | {error, term()}.
 decode_result(Info, Tail, #state{} = State) ->
     Exceptions = maps:get(exceptions, Info, []),
-    ResultDesc = result_desc(Info),
-    case (State#state.protocol):decode(ResultDesc, Tail) of
+    case decode_result_payload(Info, State#state.protocol, Tail) of
         {ok, Values, _Rest} ->
             case exception_field(Values, Exceptions) of
                 {ok, Name, Value} ->
@@ -677,9 +676,63 @@ decode_result(Info, Tail, #state{} = State) ->
             {error, Reason}
     end.
 
+%% The params payload through the generated hook when the service info
+%% carries one for the active protocol; the descriptor engine otherwise,
+%% and also when a stale hook disappeared in a reload.
+
+-spec encode_params(map(), module(), thrift_runtime_binary:type_desc(), map()) ->
+    {ok, iodata()} | {error, term()}.
+encode_params(Info, Protocol, ParamsDesc, Values) ->
+    case rpc_hook(Info, Protocol, params) of
+        {ok, {Module, Encode, _Decode}} ->
+            try
+                Module:Encode(Values)
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(Module, Encode, 1) of
+                        true -> erlang:raise(error, undef, Stack);
+                        false -> Protocol:encode(ParamsDesc, Values)
+                    end
+            end;
+        error ->
+            Protocol:encode(ParamsDesc, Values)
+    end.
+
+%% The result descriptor is built only on the fallback path now: with a
+%% hook the decode goes straight to the generated codec.
+
+-spec decode_result_payload(thrift_runtime_service:function_info(), module(), binary()) ->
+    {ok, map(), binary()} | {error, term()}.
+decode_result_payload(Info, Protocol, Tail) ->
+    case rpc_hook(Info, Protocol, result) of
+        {ok, {Module, _Encode, Decode}} ->
+            try
+                Module:Decode(Tail)
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(Module, Decode, 1) of
+                        true -> erlang:raise(error, undef, Stack);
+                        false -> Protocol:decode(result_desc(Info), Tail)
+                    end
+            end;
+        error ->
+            Protocol:decode(result_desc(Info), Tail)
+    end.
+
+-spec rpc_hook(thrift_runtime_service:function_info(), module(), params | result) ->
+    {ok, {module(), atom(), atom()}} | error.
+rpc_hook(Info, Protocol, Kind) ->
+    case Info of
+        #{codecs := #{Protocol := #{Kind := MFA}}} ->
+            {ok, MFA};
+        _ ->
+            error
+    end.
+
 %% The reply payload descriptor: success field 0 plus every declared
 %% exception under its throw-field id. Exception values decode as maps
-%% (the generic struct representation).
+%% (the generic struct representation). Fallback-only: the hook path
+%% never builds it.
 
 -spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_binary:type_desc().
 result_desc(#{reply := ReplyType} = Info) when ReplyType =/= undefined ->
