@@ -119,7 +119,8 @@ rebar3 dialyzer
 rebar3 xref
 rebar3 fmt
 scripts/lint-elp    # ELP static analysis gate (needs the elp binary)
-./scripts/bench     # manual codec benchmark (not part of the suites)
+./scripts/bench             # manual codec benchmark (not part of the suites)
+./scripts/bench-regression  # paired historical regression benchmark
 ```
 
 ## CLI
@@ -827,8 +828,28 @@ mode, average of three 500 ms samples ± sample stddev, single process;
 knobs via `BENCH_WARMUP`, `BENCH_SAMPLES`, `BENCH_SAMPLE_MS`). The
 benchmark is a hand-run script, not a test suite. Reference numbers
 include a fresh membuffer transport and protocol per operation, which
-its API requires; both sides run on the same ThriftTest payloads. Our
-codec compiles type descriptors once — referenced structs in a shared
+its API requires; both sides run on the same ThriftTest payloads.
+
+`scripts/bench-regression` compares the current checkout with a real git ref
+(`v0.8.0` by default, override with `BENCH_REGRESSION_REF`). It generates both
+versions, checks byte equality and round-trips, then alternates paired
+measurements in one VM. Both sides use the same function atoms in distinct
+modules. Same-module direct rows isolate emitted code and form the regression
+gate. Public rows expose dispatch costs for diagnosis. Cross-module direct rows
+still dispatch nested references, so public and cross-module rows have distinct
+nested module/cache keys and are marked `gate=false`. Direct targets are
+external funs created before timing, not dynamic module lookups per iteration.
+Each row reports the median current/baseline throughput ratio and a bootstrap
+95% interval. A gated row passes only when both its median and the interval's
+lower bound meet 0.99; confirmed regressions and inconclusive rows both make
+the script fail. Use `THRIFT_BENCH_ROUNDS`, `THRIFT_BENCH_SAMPLE_MS`, `THRIFT_BENCH_THRESHOLD`,
+`THRIFT_BENCH_PROTOCOL`, and `THRIFT_BENCH_ENTRY` to control the run. The
+defaults are 31 rounds and 250 ms per side; shorter runs are for smoke checks,
+not a 1% gate. An interval that crosses the configured threshold is
+inconclusive: increase the sample count or duration before claiming parity at
+that precision.
+
+Our codec compiles type descriptors once — referenced structs in a shared
 `persistent_term` cache, inline descriptors in a per-process memo — so
 nested schemas are never re-resolved per wire occurrence. The emitter
 also writes specialized per-struct wire codecs into `<mod>_types.erl`
