@@ -7,14 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Generator (`thrift_generator`)
+
+- `scripts/bench-regression` runs a paired historical comparison against a
+  real git ref, with direct/public codec entries, a cross-module fixture,
+  per-cell throughput ratios and a configurable 0.99 regression threshold.
+- Specialized compact codecs keep their private varint/zigzag primitives
+  instead of importing them per call from the runtime. The paired historical
+  benchmark caught regressions above the 1% budget; wire format and generated
+  codec APIs are unchanged.
+
 ### Runtime (`thrift_runtime`)
 
-- `thrift_runtime_compact` exports the varint primitives its protocol
-  is built on — `varint/1`, `decode_varint/1`, `zigzag_varint/1`,
-  `decode_zigzag/1` — so the generator's specialized compact codecs
-  call the runtime's own ULEB128/zigzag routines through a generated
-  `-import` instead of emitting private per-module copies. Wire format,
-  codec APIs, and generated-module exports are unchanged.
+- `thrift_runtime_compact` exports its ULEB128/zigzag primitives — `varint/1`,
+  `decode_varint/1`, `zigzag_varint/1`, `decode_zigzag/1` — for callers that
+  need the shared routines. Generated compact codecs do not pay a remote call
+  per primitive.
 
 ## [0.8.0] — 2026-10-27
 

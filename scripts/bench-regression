@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Paired generated-codec benchmark against a real historical git ref.
+# Knobs: BENCH_REGRESSION_REF, THRIFT_BENCH_ROUNDS, THRIFT_BENCH_SAMPLE_MS,
+# THRIFT_BENCH_THRESHOLD, THRIFT_BENCH_PROTOCOL, THRIFT_BENCH_ENTRY.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ROOT=$PWD
+REF=${BENCH_REGRESSION_REF:-v0.8.0}
+TEST_DIR="$ROOT/_build/test/lib/thrift_generator/test"
+
+rebar3 as test compile >/dev/null
+TMP=$(mktemp -d "$ROOT/_build/thrift-regression.XXXXXX")
+trap 'rm -rf -- "$TMP"' EXIT
+mkdir -p "$TMP/baseline" "$TMP/base-beams" "$TMP/head-beams"
+git archive "$REF" | tar -x -C "$TMP/baseline"
+(
+    cd "$TMP/baseline"
+    rebar3 as test compile >/dev/null
+)
+
+generate() {
+    local checkout=$1
+    local base=$2
+    local suffix=$3
+    local idl=$4
+    local out=$5
+    (
+        cd "$checkout"
+        THRIFT_BENCH_BASE="$base" \
+        THRIFT_BENCH_SUFFIX="$suffix" \
+        THRIFT_BENCH_OUT="$out" \
+        THRIFT_BENCH_IDL="$idl" \
+        ERL_CRASH_DUMP_SECONDS=0 \
+        erl -noshell \
+            -pa "$checkout"/_build/test/lib/*/ebin \
+            -pa "$TEST_DIR" \
+            -eval 'thrift_bench_regression:main(["generate"])'
+    )
+}
+
+generate "$TMP/baseline" goldentest 080a apps/thrift_generator/test/thrift_golden_SUITE_data/ThriftTest.thrift "$TMP/base-beams"
+generate "$TMP/baseline" bench 080a "$ROOT/apps/thrift_generator/test/thrift_bench_regression_data/MultiRoot.thrift" "$TMP/base-beams"
+generate "$ROOT" goldentest head apps/thrift_generator/test/thrift_golden_SUITE_data/ThriftTest.thrift "$TMP/head-beams"
+generate "$ROOT" bench head "$ROOT/apps/thrift_generator/test/thrift_bench_regression_data/MultiRoot.thrift" "$TMP/head-beams"
+
+THRIFT_BENCH_BASE_BEAMS="$TMP/base-beams" \
+THRIFT_BENCH_HEAD_BEAMS="$TMP/head-beams" \
+ERL_CRASH_DUMP_SECONDS=0 \
+erl -noshell \
+    -pa "$ROOT"/_build/test/lib/*/ebin \
+    -pa "$ROOT"/_build/test/lib/*/test \
+    -eval 'thrift_bench_regression:main(["compare"])'
