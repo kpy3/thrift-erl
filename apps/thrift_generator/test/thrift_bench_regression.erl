@@ -186,7 +186,7 @@ load_version(Beams) ->
 benchmark_specs() ->
     Standard = [
         #{
-            id => Name,
+            id => Id,
             struct => Name,
             value => Value,
             base_prefix => <<"goldentest">>,
@@ -194,7 +194,7 @@ benchmark_specs() ->
             head_prefix => <<"goldentest">>,
             head_module => goldentesthead_types
         }
-     || {Name, Value} <- standard_values()
+     || {Id, Name, Value} <- standard_values()
     ],
     Cross = #{
         id => <<"CrossModule">>,
@@ -215,7 +215,14 @@ standard_values() ->
         <<"xtructs">> => [xtruct_value(<<"x">>, K rem 128, K, K * 1000) || K <- lists:seq(1, 100)]
     },
     U = #{<<"string_thing">> => <<"union value">>},
-    [{<<"Xtruct">>, X}, {<<"Xtruct2">>, X2}, {<<"Insanity">>, Ins}, {<<"SomeUnion">>, U}].
+    XL = xtruct_value(binary:copy(<<"long string payload ">>, 100), -1, 123456, 123456789012),
+    [
+        {<<"Xtruct">>, <<"Xtruct">>, X},
+        {<<"Xtruct2">>, <<"Xtruct2">>, X2},
+        {<<"Insanity">>, <<"Insanity">>, Ins},
+        {<<"SomeUnion">>, <<"SomeUnion">>, U},
+        {<<"XtructLong">>, <<"Xtruct">>, XL}
+    ].
 
 xtruct_value(String, Byte, I32, I64) ->
     #{

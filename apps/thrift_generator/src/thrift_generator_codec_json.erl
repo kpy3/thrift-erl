@@ -121,24 +121,24 @@ syntax trees like everywhere else in the emitter.
 %% mentions it, and its own dependencies come along.
 
 -define(HELPER_DEPS, #{
-    json_scan_string => [json_scan_string_body],
+    json_scan_string => [json_scan_string_plain, json_scan_string_body],
     json_scan_string_body => [json_hex_value],
     json_scan_number => [json_take_number, json_classify_number],
-    json_classify_number => [json_float_marker],
-    json_escape => [json_escape_byte]
+    json_escape => [json_escape_needed, json_escape_byte]
 }).
 
 -define(HELPERS, [
     json_skip_ws,
     json_expect,
     json_scan_string,
+    json_scan_string_plain,
     json_scan_string_body,
     json_hex_value,
     json_scan_number,
     json_take_number,
     json_classify_number,
-    json_float_marker,
     json_escape,
+    json_escape_needed,
     json_escape_byte,
     json_format_double,
     json_dup_keys,
@@ -1290,6 +1290,17 @@ truncated_guard(Rest, Last) ->
     ),
     {op, ?ANNO, 'andalso', {op, ?ANNO, '=:=', Rest, bin_lit(<<>>)}, Marks}.
 
+%% The plain-run slice of a scanner: the bytes of `Orig' preceding its
+%% remaining tail `Bin', as a zero-copy subbinary.
+
+-spec slice_prefix(ast(), ast()) -> ast().
+slice_prefix(Orig, Bin) ->
+    remote(binary, part, [
+        Orig,
+        i(0),
+        {op, ?ANNO, '-', call_local(byte_size, [Orig]), call_local(byte_size, [Bin])}
+    ]).
+
 %% The sequence decode: `[` , element tag (literal match), `,`, size,
 %% the optional comma, the element loop — the generic decode_sequence_j.
 
@@ -1662,12 +1673,57 @@ helper_forms(json_scan_string) ->
                     clause(
                         [bin_pat([{i(34), default, default}, {v("Rest"), default, [binary]}])],
                         none,
-                        [call_local(json_scan_string_body, [v("Rest"), nil()])]
+                        [call_local(json_scan_string_plain, [v("Rest"), v("Rest")])]
                     ),
                     clause([bin_pat([])], none, [at(more)]),
                     clause([v("_")], none, [err_decode(at(bad_string))])
                 ])
             ])
+        ]}
+    ];
+helper_forms(json_scan_string_plain) ->
+    %% Plain-run scan with no accumulator: the closing quote answers a
+    %% zero-copy slice, a backslash hands off to the escaping loop with
+    %% the plain prefix as the initial chunk, control bytes are rejected,
+    %% and anything else just advances. `Orig' is the unscanned binary
+    %% right after the opening quote, `Bin' its remaining tail.
+    [
+        {function, ?ANNO, json_scan_string_plain, 2, [
+            clause(
+                [
+                    v("Orig"),
+                    {match, ?ANNO, v("Bin"),
+                        bin_pat([{i(34), default, default}, {v("Rest"), default, [binary]}])}
+                ],
+                none,
+                [ok3(slice_prefix(v("Orig"), v("Bin")), v("Rest"))]
+            ),
+            clause(
+                [
+                    v("Orig"),
+                    {match, ?ANNO, v("Bin"),
+                        bin_pat([{i(92), default, default}, {v("_Rest0"), default, [binary]}])}
+                ],
+                none,
+                [call_local(json_scan_string_body, [v("Bin"), list_lit([slice_prefix(v("Orig"), v("Bin"))])])]
+            ),
+            clause(
+                [
+                    v("_Orig"),
+                    bin_pat([{v("C"), i(8), [big, unsigned]}, {v("_Rest"), default, [binary]}])
+                ],
+                [{op, ?ANNO, '<', v("C"), i(16#20)}],
+                [err_decode(at(bad_string))]
+            ),
+            clause(
+                [
+                    v("Orig"),
+                    bin_pat([{v("_C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}])
+                ],
+                none,
+                [call_local(json_scan_string_plain, [v("Orig"), v("Rest")])]
+            ),
+            clause([v("_Orig"), bin_pat([])], none, [at(more)])
         ]}
     ];
 helper_forms(json_scan_string_body) ->
@@ -1784,14 +1840,17 @@ helper_forms(json_scan_number) ->
                     clause([bin_pat([])], none, [at(more)]),
                     clause([v("Bin1")], none, [
                         'case'(
-                            {match, ?ANNO, tuple_pat([v("Token"), v("Rest")]),
-                                call_local(json_take_number, [v("Bin1"), nil()])},
+                            {match, ?ANNO, tuple_pat([v("Token"), v("Rest"), v("Float"), v("Last")]),
+                                call_local(json_take_number, [v("Bin1"), v("Bin1"), at(false), i(0)])},
                             [
                                 clause([v("_Match")], none, [
-                                    'case'(call_local(json_classify_number, [v("Token"), v("Rest")]), [
-                                        ok_bind_clause(v("Number"), ok3(v("Number"), v("Rest"))),
-                                        other_tail()
-                                    ])
+                                    'case'(
+                                        call_local(json_classify_number, [v("Token"), v("Rest"), v("Float"), v("Last")]),
+                                        [
+                                            ok_bind_clause(v("Number"), ok3(v("Number"), v("Rest"))),
+                                            other_tail()
+                                        ]
+                                    )
                                 ])
                             ]
                         )
@@ -1801,49 +1860,65 @@ helper_forms(json_scan_number) ->
         ]}
     ];
 helper_forms(json_take_number) ->
+    %% One pass, no accumulator: the token comes back as a slice of the
+    %% input, with the float marker and the last byte tracked in
+    %% arguments. The accepted byte class (digits, signs, dot, e/E) is
+    %% the generic engine's; token validity is decided by
+    %% binary_to_float/binary_to_integer downstream.
     [
-        {function, ?ANNO, json_take_number, 2, [
+        {function, ?ANNO, json_take_number, 4, [
             clause(
                 [
+                    v("Orig"),
                     bin_pat([{v("C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}]),
-                    v("Acc")
+                    v("F"),
+                    v("_L")
+                ],
+                [{op, ?ANNO, 'andalso', {op, ?ANNO, '>=', v("C"), i(48)}, {op, ?ANNO, '=<', v("C"), i(57)}}],
+                [call_local(json_take_number, [v("Orig"), v("Rest"), v("F"), v("C")])]
+            ),
+            clause(
+                [
+                    v("Orig"),
+                    bin_pat([{v("C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}]),
+                    v("_F"),
+                    v("_L")
                 ],
                 [
-                    {op, ?ANNO, 'orelse',
-                        {op, ?ANNO, 'orelse',
-                            {op, ?ANNO, 'orelse',
-                                {op, ?ANNO, 'orelse',
-                                    {op, ?ANNO, 'orelse',
-                                        {op, ?ANNO, 'andalso', {op, ?ANNO, '>=', v("C"), i(48)},
-                                            {op, ?ANNO, '=<', v("C"), i(57)}},
-                                        {op, ?ANNO, '=:=', v("C"), i(45)}},
-                                    {op, ?ANNO, '=:=', v("C"), i(43)}},
-                                {op, ?ANNO, '=:=', v("C"), i(46)}},
-                            {op, ?ANNO, '=:=', v("C"), i(101)}},
+                    {op, ?ANNO, 'orelse', {op, ?ANNO, 'orelse', {op, ?ANNO, '=:=', v("C"), i(46)},
+                        {op, ?ANNO, '=:=', v("C"), i(101)}},
                         {op, ?ANNO, '=:=', v("C"), i(69)}}
                 ],
-                [call_local(json_take_number, [v("Rest"), cons(v("C"), v("Acc"))])]
+                [call_local(json_take_number, [v("Orig"), v("Rest"), at(true), v("C")])]
             ),
-            clause([v("Rest"), v("Acc")], none, [
-                tuple_t([remote(lists, reverse, [v("Acc")]), v("Rest")])
+            clause(
+                [
+                    v("Orig"),
+                    bin_pat([{v("C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}]),
+                    v("F"),
+                    v("_L")
+                ],
+                [{op, ?ANNO, 'orelse', {op, ?ANNO, '=:=', v("C"), i(45)}, {op, ?ANNO, '=:=', v("C"), i(43)}}],
+                [call_local(json_take_number, [v("Orig"), v("Rest"), v("F"), v("C")])]
+            ),
+            clause([v("Orig"), v("Bin"), v("F"), v("L")], none, [
+                tuple_t([slice_prefix(v("Orig"), v("Bin")), v("Bin"), v("F"), v("L")])
             ])
         ]}
     ];
 helper_forms(json_classify_number) ->
     [
-        {function, ?ANNO, json_classify_number, 2, [
-            clause([nil(), bin_pat([])], none, [at(more)]),
-            clause([nil(), v("_Rest")], none, [err_decode(at(bad_number))]),
-            clause([v("Token"), v("Rest")], none, [
-                {match, ?ANNO, v("Text"), remote(erlang, iolist_to_binary, [v("Token")])},
-                {match, ?ANNO, v("Last"), remote(lists, last, [v("Token")])},
+        {function, ?ANNO, json_classify_number, 4, [
+            clause([bin_lit(<<>>), bin_pat([]), v("_F"), v("_L")], none, [at(more)]),
+            clause([bin_lit(<<>>), v("_Rest"), v("_F"), v("_L")], none, [err_decode(at(bad_number))]),
+            clause([v("Token"), v("Rest"), v("Float"), v("Last")], none, [
                 %% A literal cut off at the end of input mid-float may
                 %% still be completed by the next bytes: more, not an
                 %% error.
-                'case'(call_local(json_float_marker, [v("Token")]), [
+                'case'(v("Float"), [
                     clause([at(true)], none, [
                         try_catch(
-                            ok_t(tuple_t([at(float), remote(erlang, binary_to_float, [v("Text")])])),
+                            ok_t(tuple_t([at(float), remote(erlang, binary_to_float, [v("Token")])])),
                             [
                                 clause([v("_"), v("_")], [truncated_guard(v("Rest"), v("Last"))], [at(more)]),
                                 clause([v("_"), v("_")], none, [err_decode(at(bad_number))])
@@ -1852,7 +1927,7 @@ helper_forms(json_classify_number) ->
                     ]),
                     clause([at(false)], none, [
                         try_catch(
-                            ok_t(tuple_t([at(int), remote(erlang, binary_to_integer, [v("Text")])])),
+                            ok_t(tuple_t([at(int), remote(erlang, binary_to_integer, [v("Token")])])),
                             [
                                 clause([v("_"), v("_")], [truncated_guard(v("Rest"), v("Last"))], [at(more)]),
                                 clause([v("_"), v("_")], none, [err_decode(at(bad_number))])
@@ -1863,33 +1938,39 @@ helper_forms(json_classify_number) ->
             ])
         ]}
     ];
-helper_forms(json_float_marker) ->
+helper_forms(json_escape) ->
+    %% Scan first: plain binaries (the common case) are returned
+    %% untouched, and the per-byte escaping runs only past the first byte
+    %% that needs it.
     [
-        {function, ?ANNO, json_float_marker, 1, [
-            clause([v("Token")], none, [
-                remote(lists, any, [
-                    {'fun', ?ANNO,
-                        {clauses, [
-                            clause([v("C")], none, [
-                                {op, ?ANNO, 'orelse',
-                                    {op, ?ANNO, 'orelse', {op, ?ANNO, '=:=', v("C"), i(46)},
-                                        {op, ?ANNO, '=:=', v("C"), i(101)}},
-                                    {op, ?ANNO, '=:=', v("C"), i(69)}}
-                            ])
-                        ]}},
-                    v("Token")
+        {function, ?ANNO, json_escape, 1, [
+            clause([v("Bin")], none, [
+                'case'(call_local(json_escape_needed, [v("Bin")]), [
+                    clause([at(false)], none, [v("Bin")]),
+                    clause([at(true)], none, [
+                        {lc, ?ANNO, call_local(json_escape_byte, [v("B")]), [
+                            {b_generate, ?ANNO, bin_pat([{v("B"), i(8), [big, unsigned]}]), v("Bin")}
+                        ]}
+                    ])
                 ])
             ])
         ]}
     ];
-helper_forms(json_escape) ->
+helper_forms(json_escape_needed) ->
     [
-        {function, ?ANNO, json_escape, 1, [
-            clause([v("Bin")], none, [
-                {lc, ?ANNO, call_local(json_escape_byte, [v("B")]), [
-                    {b_generate, ?ANNO, bin_pat([{v("B"), i(8), [big, unsigned]}]), v("Bin")}
-                ]}
-            ])
+        {function, ?ANNO, json_escape_needed, 1, [
+            clause(
+                [bin_pat([{v("C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}])],
+                [
+                    {op, ?ANNO, 'andalso',
+                        {op, ?ANNO, 'andalso', {op, ?ANNO, '=/=', v("C"), i(34)},
+                            {op, ?ANNO, '=/=', v("C"), i(92)}},
+                        {op, ?ANNO, '>=', v("C"), i(16#20)}}
+                ],
+                [call_local(json_escape_needed, [v("Rest")])]
+            ),
+            clause([bin_pat([])], none, [at(false)]),
+            clause([v("_")], none, [at(true)])
         ]}
     ];
 helper_forms(json_escape_byte) ->
