@@ -22,6 +22,7 @@
     typed_prefix/2,
     current_prefix/1,
     codec_pair/3,
+    ref_codec_pair/4,
     decode_body_name/1,
     containers/1,
     elem_type/1,
@@ -129,6 +130,12 @@ codec_pair(Protocol, Name, Ctx) when is_binary(Name) ->
         binary_to_atom(<<"encode_", Prefix/binary, Suffix/binary>>, utf8),
         binary_to_atom(<<"decode_", Prefix/binary, Suffix/binary>>, utf8)
     }.
+
+-doc "Returns codec names in a referenced types module, using that module's namespace prefix.".
+-spec ref_codec_pair(wire | compact | json, module(), binary(), #ectx{}) -> {atom(), atom()}.
+ref_codec_pair(Protocol, TypesMod, Name, Ctx) ->
+    [Target] = [Key || {Key, Module} <- maps:to_list(Ctx#ectx.type_modules), Module =:= TypesMod],
+    codec_pair(Protocol, Name, Ctx#ectx{current = Target}).
 
 -spec protocol_suffix(wire | compact | json) -> binary().
 protocol_suffix(wire) -> <<"_wire">>;

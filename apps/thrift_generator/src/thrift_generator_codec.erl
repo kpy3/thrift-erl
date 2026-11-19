@@ -39,9 +39,9 @@ ids by wire type. The thrift_codec_test equivalence properties pin all
 of this against the generic engine.
 
 Nesting: same-module struct references become direct calls to the
-sibling wire functions; cross-module references go through
-`thrift_runtime_binary:encode/2` and `decode/2`, which re-enter the codec
-probe. Containers get private `enc_*/dec_*` helpers named after the
+sibling wire functions; cross-module references call the target module's
+exported codec directly with its own namespace prefix. Containers get
+private `enc_*/dec_*` helpers named after the
 rendered element type; enum members are inlined as case clauses at
 every use site.
 
@@ -94,7 +94,6 @@ everywhere else in the emitter.
     err_encode/1,
     err_decode/1,
     mismatch/1,
-    literal/1,
     atom_concat/2,
     encode_entry_clause/1,
     encode_error_clause/0,
@@ -516,7 +515,8 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
             {Encode, _Decode} = thrift_generator_codec_common:codec_pair(wire, Local, Ctx),
             call_local(Encode, [V]);
         false ->
-            remote(thrift_runtime_binary, encode, [literal({struct, {ref, TypesMod, Local}}), V])
+            {Encode, _Decode} = thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx),
+            remote(TypesMod, Encode, [V])
     end.
 
 -spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
@@ -526,7 +526,8 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
             {_Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, Local, Ctx),
             call_local(Decode, [Bin]);
         false ->
-            remote(thrift_runtime_binary, decode, [literal({struct, {ref, TypesMod, Local}}), Bin])
+            {_Encode, Decode} = thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx),
+            remote(TypesMod, Decode, [Bin])
     end.
 
 %% Same-module refs become direct sibling calls; the check rebuilds the
