@@ -477,8 +477,23 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
 
 -spec decode_params(binary(), thrift_runtime_service:function_info(), #state{}) ->
     {ok, [term()]} | {error, term()}.
-decode_params(Tail, #{params := ParamsDesc}, #state{} = State) ->
-    case (State#state.protocol):decode(ParamsDesc, Tail) of
+decode_params(Tail, #{params := ParamsDesc} = Info, #state{} = State) ->
+    Result =
+        case rpc_hook(Info, State#state.protocol, params) of
+            {ok, {Module, _Encode, Decode}} ->
+                try
+                    Module:Decode(Tail)
+                catch
+                    error:undef:Stack ->
+                        case erlang:function_exported(Module, Decode, 1) of
+                            true -> erlang:raise(error, undef, Stack);
+                            false -> (State#state.protocol):decode(ParamsDesc, Tail)
+                        end
+                end;
+            error ->
+                (State#state.protocol):decode(ParamsDesc, Tail)
+        end,
+    case Result of
         {ok, Values, _Rest} ->
             {ok, [
                 maps:get(Name, Values, undefined)
@@ -487,6 +502,49 @@ decode_params(Tail, #{params := ParamsDesc}, #state{} = State) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+%% The specialized RPC codec hook of the active protocol, emitted into
+%% the generated service info. Absent key, unknown protocol or a stale
+%% (reloaded away) codec all fall back to the descriptor engine.
+
+-spec rpc_hook(thrift_runtime_service:function_info(), module(), params | result) ->
+    {ok, {module(), atom(), atom()}} | error.
+rpc_hook(Info, Protocol, Kind) ->
+    case Info of
+        #{codecs := #{Protocol := #{Kind := MFA}}} ->
+            {ok, MFA};
+        _ ->
+            error
+    end.
+
+%% The reply payload through the result hook when present, else the
+%% generic engine over the full result descriptor (success field 0 plus
+%% the declared exceptions; absent keys are skipped, so the bytes match
+%% the historical single-field descriptors).
+
+-spec encode_result(thrift_runtime_service:function_info(), module(), map()) ->
+    {ok, iodata()} | {error, term()}.
+encode_result(Info, Protocol, Value) ->
+    case rpc_hook(Info, Protocol, result) of
+        {ok, {Module, Encode, _Decode}} ->
+            try
+                Module:Encode(Value)
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(Module, Encode, 1) of
+                        true -> erlang:raise(error, undef, Stack);
+                        false -> Protocol:encode(result_desc(Info), Value)
+                    end
+            end;
+        error ->
+            Protocol:encode(result_desc(Info), Value)
+    end.
+
+-spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_binary:type_desc().
+result_desc(#{reply := ReplyType} = Info) when ReplyType =/= undefined ->
+    {struct, {struct, [{0, default, ReplyType, <<"success">>, undefined} | maps:get(exceptions, Info, [])]}};
+result_desc(Info) ->
+    {struct, {struct, maps:get(exceptions, Info, [])}}.
 
 %% Record-API bridging: when enabled, handler arguments arrive as
 %% records and results (including declared exception values) go back
@@ -513,13 +571,8 @@ wire_result(Result, Info, #state{}) ->
 -spec encode_reply(
     binary(), non_neg_integer(), term(), thrift_runtime_service:function_info(), #state{}
 ) -> #state{}.
-encode_reply(Name, SeqId, Reply, #{reply := ReplyType} = _Info, #state{} = State) ->
-    case
-        (State#state.protocol):encode(
-            {struct, {struct, [{0, default, ReplyType, <<"success">>, undefined}]}},
-            #{<<"success">> => Reply}
-        )
-    of
+encode_reply(Name, SeqId, Reply, #{reply := _ReplyType} = Info, #state{} = State) ->
+    case encode_result(Info, State#state.protocol, #{<<"success">> => Reply}) of
         {ok, Payload} ->
             send_message(reply, Name, SeqId, Payload, State);
         {error, Reason} ->
@@ -531,9 +584,9 @@ encode_reply(Name, SeqId, Reply, #{reply := ReplyType} = _Info, #state{} = State
             }),
             reply_application_exception(Name, SeqId, <<"internal error">>, 6, State)
     end;
-encode_reply(Name, SeqId, _Reply, #{}, #state{} = State) ->
+encode_reply(Name, SeqId, _Reply, #{} = Info, #state{} = State) ->
     %% void function: empty struct payload.
-    {ok, Payload} = (State#state.protocol):encode({struct, {struct, []}}, #{}),
+    {ok, Payload} = encode_result(Info, State#state.protocol, #{}),
     send_message(reply, Name, SeqId, Payload, State).
 
 -spec encode_exception_reply(
@@ -558,12 +611,11 @@ encode_exception_reply(Name, SeqId, ExceptionName, ExceptionValue, Info, #state{
             false
     end,
     case lists:search(Pred, Exceptions) of
-        {value, {_, _, _, FieldName, _} = Field} ->
-            %% Encoding the one-field reply struct produces the same
-            %% bytes (field header, value, stop) without the connection
-            %% knowing protocol wire details.
-            PayloadDesc = {struct, {struct, [Field]}},
-            case (State#state.protocol):encode(PayloadDesc, #{FieldName => ExceptionValue}) of
+        {value, {_, _, _, FieldName, _}} ->
+            %% The result codec (or, without hooks, the full result
+            %% descriptor) writes only the present throw field, matching
+            %% the historical one-field descriptor byte for byte.
+            case encode_result(Info, State#state.protocol, #{FieldName => ExceptionValue}) of
                 {ok, Payload} ->
                     send_message(reply, Name, SeqId, Payload, State);
                 {error, Reason} ->

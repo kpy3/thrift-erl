@@ -41,6 +41,9 @@
     cross_module_typedef/1,
     cross_module_include_qualifier/1,
     cross_module_direct_dispatch/1,
+    rpc_specialized_codecs/1,
+    rpc_loopback_hooks/1,
+    rpc_loopback_fallback/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
     generated_map_mode/1,
@@ -66,6 +69,9 @@ all() ->
         cross_module_typedef,
         cross_module_include_qualifier,
         cross_module_direct_dispatch,
+        rpc_specialized_codecs,
+        rpc_loopback_hooks,
+        rpc_loopback_fallback,
         generated_loopback_buffered,
         generated_loopback_framed,
         generated_map_mode,
@@ -388,6 +394,171 @@ assert_without_runtime_dispatch(Runtime, Fun) ->
     _ = persistent_term:erase(Key),
     Fun(),
     ?assertEqual(missing, persistent_term:get(Key, missing)).
+
+%% RPC params/result hooks: the generated service info carries
+%% specialized per-protocol codec pairs for the synthetic params and
+%% result structs. They must match the generic descriptor engine
+%% byte-for-byte, including truncation and type errors; oneway functions
+%% carry no result hook.
+
+rpc_specialized_codecs(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    #{<<"MainService">> := Fns} = main_types:service_info(),
+    #{<<"ping">> := Ping, <<"area">> := Area, <<"fetch">> := Fetch, <<"fire">> := Fire} = Fns,
+    lists:foreach(
+        fun(Protocol) ->
+            check_rpc_params(Protocol, Area, #{<<"w">> => 3, <<"h">> => 4}, #{<<"w">> => <<"x">>, <<"h">> => 4}),
+            check_rpc_params(Protocol, Fetch, #{<<"id">> => 5}, #{<<"id">> => <<"x">>}),
+            check_rpc_params(Protocol, Ping, #{}, undefined),
+            check_rpc_params(Protocol, Fire, #{<<"code">> => 42}, undefined),
+            check_rpc_result(Protocol, Area, 12, <<"b">>, #{<<"message">> => <<"boom">>}),
+            check_rpc_result(Protocol, Fetch, #{<<"name">> => <<"5">>}, <<"f">>, #{
+                <<"reason">> => <<"negative id">>
+            }),
+            check_rpc_result(Protocol, Ping, undefined, undefined, undefined),
+            #{codecs := FireCodecs} = Fire,
+            ?assertNot(maps:is_key(result, maps:get(Protocol, FireCodecs)))
+        end,
+        [thrift_runtime_binary, thrift_runtime_compact, thrift_runtime_json]
+    ),
+    ok.
+
+check_rpc_params(Protocol, Info, Value, BadValue) ->
+    #{params := ParamsDesc, codecs := #{Protocol := #{params := {Mod, Enc, Dec}}}} = Info,
+    ?assertEqual(main_types, Mod),
+    {ok, GenericIo} = Protocol:encode(ParamsDesc, Value),
+    Wire = iolist_to_binary(GenericIo),
+    {ok, DirectIo} = apply(Mod, Enc, [Value]),
+    ?assertEqual(Wire, iolist_to_binary(DirectIo)),
+    ?assertEqual({ok, Value, <<>>}, Protocol:decode(ParamsDesc, Wire)),
+    ?assertEqual({ok, Value, <<>>}, apply(Mod, Dec, [Wire])),
+    case BadValue of
+        undefined ->
+            ok;
+        _ ->
+            ?assertEqual(Protocol:encode(ParamsDesc, BadValue), apply(Mod, Enc, [BadValue]))
+    end,
+    lists:foreach(
+        fun(Size) ->
+            Prefix = binary:part(Wire, 0, Size),
+            ?assertEqual(Protocol:decode(ParamsDesc, Prefix), apply(Mod, Dec, [Prefix]))
+        end,
+        lists:seq(0, byte_size(Wire) - 1)
+    ).
+
+check_rpc_result(Protocol, Info, SuccessValue, ExceptionField, ExceptionValue) ->
+    Reply = maps:get(reply, Info, undefined),
+    Exceptions = maps:get(exceptions, Info, []),
+    Fields =
+        case Reply of
+            undefined -> Exceptions;
+            _ -> [{0, default, Reply, <<"success">>, undefined} | Exceptions]
+        end,
+    ResultDesc = {struct, {struct, Fields}},
+    #{codecs := #{Protocol := #{result := {Mod, Enc, Dec}}}} = Info,
+    ?assertEqual(main_types, Mod),
+    Value =
+        case Reply of
+            undefined -> #{};
+            _ -> #{<<"success">> => SuccessValue}
+        end,
+    check_rpc_value(Protocol, ResultDesc, Mod, Enc, Dec, Value),
+    case ExceptionField of
+        undefined ->
+            ok;
+        _ ->
+            check_rpc_value(Protocol, ResultDesc, Mod, Enc, Dec, #{ExceptionField => ExceptionValue})
+    end.
+
+check_rpc_value(Protocol, Desc, Mod, Enc, Dec, Value) ->
+    {ok, GenericIo} = Protocol:encode(Desc, Value),
+    Wire = iolist_to_binary(GenericIo),
+    {ok, DirectIo} = apply(Mod, Enc, [Value]),
+    ?assertEqual(Wire, iolist_to_binary(DirectIo)),
+    ?assertEqual({ok, Value, <<>>}, Protocol:decode(Desc, Wire)),
+    ?assertEqual({ok, Value, <<>>}, apply(Mod, Dec, [Wire])),
+    lists:foreach(
+        fun(Size) ->
+            Prefix = binary:part(Wire, 0, Size),
+            ?assertEqual(Protocol:decode(Desc, Prefix), apply(Mod, Dec, [Prefix]))
+        end,
+        lists:seq(0, byte_size(Wire) - 1)
+    ).
+
+%% Hook-path proof: the hooked service descriptor keeps the generated
+%% codecs but corrupts every descriptor leaf type, so a successful call
+%% is only possible when client and server both use the specialized
+%% hooks instead of the generic descriptor engine.
+
+rpc_loopback_hooks(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {ok, Server} = thrift_runtime_server:start_link(#{
+        port => 0,
+        handler => thrift_generator_rpc_wire_handler,
+        service => thrift_generator_rpc_hooked_service,
+        name => rpc_hooks_server
+    }),
+    try
+        {ok, Port} = thrift_runtime_server:port(Server),
+        {ok, Client} = thrift_runtime_client:start_link(#{
+            host => "127.0.0.1",
+            port => Port,
+            service => thrift_generator_rpc_hooked_service
+        }),
+        try
+            ?assertEqual({ok, 12}, thrift_runtime_client:call(Client, <<"area">>, [3, 4], 5000)),
+            ?assertMatch(
+                {ok, #{<<"name">> := <<"5">>}},
+                thrift_runtime_client:call(Client, <<"fetch">>, [5], 5000)
+            ),
+            ?assertMatch(
+                {error, {exception, <<"Failed">>, #{<<"reason">> := <<"negative id">>}}},
+                thrift_runtime_client:call(Client, <<"fetch">>, [-1], 5000)
+            ),
+            ?assertEqual({ok, undefined}, thrift_runtime_client:call(Client, <<"ping">>, [], 5000)),
+            ?assertEqual(ok, thrift_runtime_client:oneway(Client, <<"fire">>, [42], 5000))
+        after
+            thrift_runtime_client:stop(Client)
+        end
+    after
+        thrift_runtime_server:stop(Server)
+    end.
+
+%% Fallback proof: without the codecs key the same generated stack keeps
+%% working on the generic descriptor path.
+
+rpc_loopback_fallback(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {ok, Server} = thrift_runtime_server:start_link(#{
+        port => 0,
+        handler => thrift_generator_rpc_wire_handler,
+        service => thrift_generator_rpc_stripped_service,
+        name => rpc_fallback_server
+    }),
+    try
+        {ok, Port} = thrift_runtime_server:port(Server),
+        {ok, Client} = thrift_runtime_client:start_link(#{
+            host => "127.0.0.1",
+            port => Port,
+            service => thrift_generator_rpc_stripped_service
+        }),
+        try
+            ?assertEqual({ok, 12}, thrift_runtime_client:call(Client, <<"area">>, [3, 4], 5000)),
+            ?assertMatch(
+                {ok, #{<<"name">> := <<"5">>}},
+                thrift_runtime_client:call(Client, <<"fetch">>, [5], 5000)
+            ),
+            ?assertMatch(
+                {error, {exception, <<"Failed">>, #{<<"reason">> := <<"negative id">>}}},
+                thrift_runtime_client:call(Client, <<"fetch">>, [-1], 5000)
+            ),
+            ?assertEqual({ok, undefined}, thrift_runtime_client:call(Client, <<"ping">>, [], 5000))
+        after
+            thrift_runtime_client:stop(Client)
+        end
+    after
+        thrift_runtime_server:stop(Server)
+    end.
 
 loader_duplicate_module(Config) ->
     One = data_file(Config, "semantic/dup_one.thrift"),

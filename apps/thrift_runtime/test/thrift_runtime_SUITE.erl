@@ -44,7 +44,8 @@
     drain_closes_listener_and_idle_connections/1,
     handshake_timeout_reaches_acceptor/1,
     client_stats/1,
-    client_stats_queue_full/1
+    client_stats_queue_full/1,
+    rpc_hook_undef_is_raised/1
 ]).
 
 all() ->
@@ -70,7 +71,8 @@ all() ->
         drain_closes_listener_and_idle_connections,
         handshake_timeout_reaches_acceptor,
         client_stats,
-        client_stats_queue_full
+        client_stats_queue_full,
+        rpc_hook_undef_is_raised
     ].
 
 -define(SERVICE, thrift_runtime_test_service).
@@ -675,3 +677,41 @@ multiplex_client(Port, Service, ServiceMod) ->
     thrift_runtime_client:start_link(#{
         host => "127.0.0.1", port => Port, service => ServiceMod, multiplex => Service
     }).
+
+%% An exported-but-broken hook (raises undef from inside) must crash the
+%% call, not silently fall back to the descriptor engine: the fallback
+%% exists for missing hooks and stale codecs after a reload, not for
+%% bugs in generated code.
+
+rpc_hook_undef_is_raised(_Config) ->
+    {ok, Server} = thrift_runtime_server:start_link(#{
+        port => 0,
+        handler => ?HANDLER,
+        service => thrift_runtime_test_hooked_service,
+        name => rpc_hook_undef_server
+    }),
+    try
+        {ok, Port} = thrift_runtime_server:port(Server),
+        {ok, Client} = thrift_runtime_client:start_link(#{
+            host => "127.0.0.1", port => Port, service => thrift_runtime_test_hooked_service
+        }),
+        %% Only after the starts: their exit-shielding dance restores
+        %% trap_exit to false, and the linked client dies on the
+        %% re-raised undef below.
+        process_flag(trap_exit, true),
+        Result =
+            try
+                _ = call(Client, <<"echo">>, [<<"x">>]),
+                fallback_masked_the_bug
+            catch
+                exit:Reason -> {crashed, Reason}
+            end,
+        ?assertMatch({crashed, {{undef, _}, _}}, Result),
+        ?assertNot(is_process_alive(Client)),
+        receive
+            {'EXIT', Client, _} -> ok
+        after 0 -> ok
+        end
+    after
+        thrift_runtime_server:stop(Server)
+    end.

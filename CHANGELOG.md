@@ -20,8 +20,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespace prefix instead of performing runtime dispatch for every nested
   value. JSON uses the non-folding decode body. Public ref descriptors and the
   runtime's generic fallback are unchanged.
+- Every RPC function gets specialized params/result codecs: the generator
+  emits synthetic struct codecs (`<Svc>$<Fn>$params` / `$result`) into the
+  types module for all three protocols, and `service_info/0` carries them as
+  `codecs` hooks keyed by protocol module. Oneway functions carry no result
+  hook. The synthetic names embed `$`, so they can never collide with a
+  declared struct.
+- `scripts/bench-rpc` runs a paired loopback RPC benchmark (client and server
+  on 127.0.0.1, framed/binary) of a historical git ref against the current
+  checkout, with the same per-cell 0.99 gate as `scripts/bench-regression`.
 
 ### Runtime (`thrift_runtime`)
+
+- `thrift_runtime_client` and `thrift_runtime_connection` encode and decode
+  RPC params/results through the generated `codecs` hooks when the active
+  protocol has one, skipping descriptor memoization and interpretation on the
+  RPC hot path; the reply descriptor is no longer rebuilt per call. Missing
+  hooks (hand-written service modules, custom protocols) and stale codecs
+  after a reload fall back to the generic descriptor engine with unchanged
+  behavior. `thrift_runtime_service:function_info()` documents the optional
+  `codecs` key.
 
 - `thrift_runtime_compact` exports its ULEB128/zigzag primitives — `varint/1`,
   `decode_varint/1`, `zigzag_varint/1`, `decode_zigzag/1` — for callers that

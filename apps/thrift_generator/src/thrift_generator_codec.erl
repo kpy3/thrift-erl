@@ -130,19 +130,33 @@ everywhere else in the emitter.
 -doc "Every wire-codec form of the module: per-struct encode/decode functions, container helpers, `binary_codec/1`.".
 -spec module_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 module_forms(Mod, Ctx) ->
-    WireTypes = [wtype(F#tg_field.type, Ctx) || S <- Mod#tg_module.structs, F <- S#tg_struct.fields],
+    %% The synthetic RPC codecs go last: the hooks in service_info reach
+    %% them directly, and keeping the declared structs' code layout
+    %% untouched matters more than grouping (BEAM layout sensitivity).
+    ServiceStructs = thrift_generator_codec_common:service_structs(Mod),
+    WireTypes = [
+        wtype(F#tg_field.type, Ctx)
+     || S <- Mod#tg_module.structs ++ ServiceStructs,
+        F <- S#tg_struct.fields
+    ],
     Enums = thrift_generator_codec_common:enum_registry(WireTypes),
+    struct_blocks(Mod#tg_module.structs, <<"wire codecs">>, Ctx, Enums) ++
+        helper_forms(WireTypes, Ctx, Enums) ++
+        thrift_generator_codec_common:codec_index_forms(wire, Mod, Ctx) ++
+        struct_blocks(ServiceStructs, <<"wire codecs">>, Ctx, Enums).
+
+-spec struct_blocks([#tg_struct{}], binary(), #ectx{}, thrift_generator_codec_common:registry()) ->
+    erl_syntax:forms().
+struct_blocks(Structs, Label, Ctx, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s wire codecs", [thrift_generator_emitter:section_label(S)])
+                io_lib:format("~s ~ts", [thrift_generator_emitter:section_label(S), Label])
             )
         ] ++
             struct_forms(S, Ctx, Enums)
-     || S <- Mod#tg_module.structs
-    ]) ++
-        helper_forms(WireTypes, Ctx, Enums) ++
-        thrift_generator_codec_common:codec_index_forms(wire, Mod, Ctx).
+     || S <- Structs
+    ]).
 
 %%--------------------------------------------------------------------
 %% Names

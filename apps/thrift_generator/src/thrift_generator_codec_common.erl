@@ -23,6 +23,8 @@
     current_prefix/1,
     codec_pair/3,
     ref_codec_pair/4,
+    service_structs/1,
+    rpc_struct_name/3,
     decode_body_name/1,
     containers/1,
     elem_type/1,
@@ -137,6 +139,63 @@ ref_codec_pair(Protocol, TypesMod, Name, Ctx) ->
     [Target] = [Key || {Key, Module} <- maps:to_list(Ctx#ectx.type_modules), Module =:= TypesMod],
     codec_pair(Protocol, Name, Ctx#ectx{current = Target}).
 
+-doc """
+Synthetic structs for the RPC params/result codecs of every service
+function: the params struct carries the declared arguments, the result
+struct carries field 0 `success` (absent for `void`) plus the declared
+exceptions. Oneway functions get no result struct. They feed only the
+codec emitters — never `struct_info/1` or the codec indexes.
+""".
+-spec service_structs(#tg_module{}) -> [#tg_struct{}].
+service_structs(Mod) ->
+    lists:append([
+        service_function_structs(Svc#tg_service.name, F)
+     || Svc <- Mod#tg_module.services,
+        F <- Svc#tg_service.functions
+    ]).
+
+-spec service_function_structs(binary(), #tg_function{}) -> [#tg_struct{}].
+service_function_structs(SvcName, F) ->
+    Params = #tg_struct{
+        kind = struct,
+        name = rpc_struct_name(SvcName, F#tg_function.name, params),
+        fields = F#tg_function.params
+    },
+    case F#tg_function.oneway of
+        true ->
+            [Params];
+        false ->
+            [
+                Params,
+                #tg_struct{
+                    kind = struct,
+                    name = rpc_struct_name(SvcName, F#tg_function.name, result),
+                    fields = rpc_result_fields(F)
+                }
+            ]
+    end.
+
+-doc """
+The synthetic struct name of a function's params or result: service and
+function names joined with `$` — impossible in an IDL identifier, so the
+name can never collide with a declared struct.
+""".
+-spec rpc_struct_name(binary(), binary(), params | result) -> binary().
+rpc_struct_name(SvcName, FnName, Kind) ->
+    <<SvcName/binary, "$", FnName/binary, "$", (atom_to_binary(Kind, utf8))/binary>>.
+
+-spec rpc_result_fields(#tg_function{}) -> [#tg_field{}].
+rpc_result_fields(F) ->
+    case F#tg_function.return_type of
+        void ->
+            F#tg_function.throws;
+        Type ->
+            [
+                #tg_field{id = 0, required = default, type = Type, name = <<"success">>, default = undefined}
+                | F#tg_function.throws
+            ]
+    end.
+
 -spec protocol_suffix(wire | compact | json) -> binary().
 protocol_suffix(wire) -> <<"_wire">>;
 protocol_suffix(compact) -> <<"_compact">>;
@@ -189,7 +248,7 @@ and the emitter must agree on the spelling, so it lives here.
 decode_body_name(Decode) ->
     atom_concat(Decode, <<"_body">>).
 
--doc "Returns the export entries of one protocol's specialized codecs.".
+-doc "Returns the export entries of one protocol's specialized codecs, including the RPC params/result pairs.".
 -spec export_entries(wire | compact | json, #tg_module{}, #ectx{}) -> [{atom(), arity()}].
 export_entries(Protocol, Mod, Ctx) ->
     [{protocol_index(Protocol), 1}] ++
@@ -199,7 +258,10 @@ export_entries(Protocol, Mod, Ctx) ->
                     json -> [{decode_body_name(Decode), 1}];
                     _ -> []
                 end
-         || {Encode, Decode} <- [codec_pair(Protocol, S, Ctx) || S <- Mod#tg_module.structs]
+         || {Encode, Decode} <- [
+                codec_pair(Protocol, S, Ctx)
+             || S <- Mod#tg_module.structs ++ service_structs(Mod)
+            ]
         ]).
 
 -doc "Builds the public codec index of one protocol.".
