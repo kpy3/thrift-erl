@@ -214,7 +214,8 @@ standard_values() ->
         <<"userMap">> => #{'ONE' => 1, 'TWO' => 2, 'THREE' => 3, 'FIVE' => 5, 'SIX' => 6, 'EIGHT' => 8},
         <<"xtructs">> => [xtruct_value(<<"x">>, K rem 128, K, K * 1000) || K <- lists:seq(1, 100)]
     },
-    [{<<"Xtruct">>, X}, {<<"Xtruct2">>, X2}, {<<"Insanity">>, Ins}].
+    U = #{<<"string_thing">> => <<"union value">>},
+    [{<<"Xtruct">>, X}, {<<"Xtruct2">>, X2}, {<<"Insanity">>, Ins}, {<<"SomeUnion">>, U}].
 
 xtruct_value(String, Byte, I32, I64) ->
     #{

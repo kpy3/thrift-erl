@@ -42,6 +42,9 @@
     cross_module_include_qualifier/1,
     cross_module_direct_dispatch/1,
     base_fields_guarded_encode/1,
+    required_encode_map_pattern/1,
+    union_encode_count/1,
+    required_decode_bitmask/1,
     rpc_specialized_codecs/1,
     rpc_loopback_hooks/1,
     rpc_loopback_fallback/1,
@@ -71,6 +74,9 @@ all() ->
         cross_module_include_qualifier,
         cross_module_direct_dispatch,
         base_fields_guarded_encode,
+        required_encode_map_pattern,
+        union_encode_count,
+        required_decode_bitmask,
         rpc_specialized_codecs,
         rpc_loopback_hooks,
         rpc_loopback_fallback,
@@ -441,6 +447,116 @@ base_fields_guarded_encode(Config) ->
         end,
         Patterns
     ),
+    ok.
+
+%% The required-field encode check matches the required keys in one map
+%% pattern on the valid path and builds the missing-names list only on
+%% the error branch; structs without required fields carry no check at
+%% all (the old empty-comprehension case is not emitted).
+
+required_encode_map_pattern(Config) ->
+    Path = write_snippet(
+        Config,
+        "reqshape.thrift",
+        <<
+            "namespace erl reqshape\n"
+            "struct R {\n"
+            "  1: required string s,\n"
+            "  2: required i32 n,\n"
+            "  3: optional bool b\n"
+            "}\n"
+            "struct NoReq {\n"
+            "  1: optional i32 x\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    %% one map-pattern clause per protocol (binary, compact, json)
+    ?assertMatch(
+        {match, [_, _, _]},
+        re:run(Src, <<"#\\{<<\"s\">> := _,\\s*<<\"n\">> := _\\}">>, [dotall, global])
+    ),
+    %% the missing list survives on the error branch only
+    ?assertMatch(
+        {match, _},
+        re:run(Src, <<"missing_required_fields,\\s*\\[\\s*N\\s*\\|\\|\\s*N\\s*<-\\s*\\[<<\"s\">>,\\s*<<\"n\">>\\]">>, [
+            dotall
+        ])
+    ),
+    %% no empty comprehension for structs without required fields
+    ?assertEqual(nomatch, re:run(Src, <<"N\\s*<-\\s*\\[\\]">>, [dotall])),
+    ok.
+
+%% The union encode check counts present fields arithmetically — no
+%% intermediate list comprehension on the valid path; the union_empty
+%% and union_multiple error terms are unchanged.
+
+union_encode_count(Config) ->
+    Path = write_snippet(
+        Config,
+        "unionshape.thrift",
+        <<
+            "namespace erl unionshape\n"
+            "union U {\n"
+            "  1: optional i32 a,\n"
+            "  2: optional string b\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    ?assertMatch(
+        {match, _},
+        re:run(Src, <<"maps:is_key\\(<<\"a\">>, Value\\) of\\s*true\\s*->\\s*1;\\s*false\\s*->\\s*0">>, [dotall])
+    ),
+    %% the list-comprehension count is gone
+    ?assertEqual(
+        nomatch,
+        re:run(Src, <<"N\\s*<-\\s*\\[<<\"a\">>,\\s*<<\"b\">>\\],\\s*maps:is_key">>, [dotall])
+    ),
+    ?assertMatch({match, _}, re:run(Src, <<"union_empty">>, [])),
+    ?assertMatch({match, _}, re:run(Src, <<"union_multiple">>, [])),
+    ok.
+
+%% Required-presence tracking on decode is a bitmask: one bit per
+%% required field in ascending id order, `bor' on a decoded field, the
+%% full mask matched as a literal at the stop byte; the missing-names
+%% list (ascending id order, DoubleReq pins the generic engines' order)
+%% is rebuilt only on the error branch. No list keydelete, map remove,
+%% or maps:values on the valid path.
+
+required_decode_bitmask(Config) ->
+    Path = write_snippet(
+        Config,
+        "reqmask.thrift",
+        <<
+            "namespace erl reqmask\n"
+            "struct R {\n"
+            "  1: required string s,\n"
+            "  2: required i32 n,\n"
+            "  3: optional bool b\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    %% full mask literal (fields s=bit 1, n=bit 2) at the stop byte:
+    %% binary and compact loops close on it, json closes in _done
+    ?assertMatch({match, [_, _]}, re:run(Src, <<"<<0,\\s*Rest\\/binary>>, 3, Acc">>, [global])),
+    ?assertMatch({match, _}, re:run(Src, <<"_done\\(3, Acc, Rest\\)">>, [])),
+    %% decoded required fields set their bit
+    ?assertMatch({match, [_, _, _]}, re:run(Src, <<"Req bor 1">>, [global])),
+    ?assertMatch({match, [_, _, _]}, re:run(Src, <<"Req bor 2">>, [global])),
+    %% missing names are rebuilt from the mask only on the error branch
+    ?assertMatch({match, _}, re:run(Src, <<"Req band B\\s*=:=\\s*0">>, [dotall])),
+    %% the list/map tracking is gone
+    ?assertEqual(nomatch, re:run(Src, <<"keydelete">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"maps:remove">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"maps:values">>, [])),
     ok.
 
 %% RPC params/result hooks: the generated service info carries

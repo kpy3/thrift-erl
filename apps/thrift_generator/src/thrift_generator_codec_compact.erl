@@ -108,6 +108,10 @@ everywhere else in the emitter.
     encode_error_clause/0,
     union_check/2,
     required_check/2,
+    required_bits/1,
+    required_bit/2,
+    full_mask/1,
+    missing_names/2,
     t_atom/1,
     t_atom_lit/1,
     t_map_exact/0,
@@ -507,15 +511,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     Fields = S#tg_struct.fields,
     FieldsLoop = atom_concat(Decode, <<"_fields">>),
     FieldDispatch = atom_concat(Decode, <<"_field">>),
-    Required =
-        lists:keysort(
-            1,
-            [
-                {F#tg_field.id, F#tg_field.name}
-             || {F, _T} <- lists:zip(Fields, FieldTypes),
-                F#tg_field.required =:= required
-            ]
-        ),
+    Bits = required_bits(Fields),
     Doc =
         <<
             "Decodes the compact protocol into the wire representation,"
@@ -536,58 +532,61 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
             ]),
             {function, ?ANNO, Decode, 1, [
                 clause([v("Binary")], [remote(erlang, is_binary, [v("Binary")])], [
-                    call_local(FieldsLoop, [v("Binary"), required_map_lit(Required), map_empty(), i(0)])
+                    call_local(FieldsLoop, [v("Binary"), i(0), map_empty(), i(0)])
                 ])
             ]},
-            {function, ?ANNO, FieldsLoop, 4, loop_clauses(Required, FieldDispatch)},
-            {function, ?ANNO, FieldDispatch, 5, dispatch_clauses(lists:zip(Fields, FieldTypes), FieldsLoop, Ctx, Enums)}
+            {function, ?ANNO, FieldsLoop, 4, loop_clauses(Bits, FieldDispatch)},
+            {function, ?ANNO, FieldDispatch, 5,
+                dispatch_clauses(lists:zip(Fields, FieldTypes), Bits, FieldsLoop, Ctx, Enums)}
         ].
 
-%% The required map mirrors the generic engine's compiled struct: ids to
-%% names, `maps:remove/2` marks a seen field, `maps:values/1` at the
-%% stop byte reports the missing names.
+%% Required presence is a bitmask (thrift_generator_codec_ast:required_bits/1):
+%% the stop byte matches the full mask as a literal, and the missing
+%% names (ascending id order, like the generic engine's required map)
+%% are rebuilt from the mask only on the error branch.
 
--spec required_map_lit([{integer(), binary()}]) -> ast().
-required_map_lit(Required) ->
-    %% One flat literal: a folded map_put over #{} renders as
-    %% `(#{})#{3 => ...}` and the compiler warns on updating a literal.
-    {map, ?ANNO, [{map_field_assoc, ?ANNO, i(Id), name_lit(Name)} || {Id, Name} <- Required]}.
-
--spec loop_clauses([{integer(), binary()}], atom()) -> [ast()].
-loop_clauses(Required, FieldDispatch) ->
-    StopClause =
-        case Required of
+-spec loop_clauses([{integer(), pos_integer(), binary()}], atom()) -> [ast()].
+loop_clauses(Bits, FieldDispatch) ->
+    StopClauses =
+        case Bits of
             %% No required fields: the stop byte just closes the struct,
             %% without the missing-fields scan.
             [] ->
-                clause(
-                    [
-                        bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
-                        v("_Req"),
-                        v("Acc"),
-                        v("_LastId")
-                    ],
-                    none,
-                    [ok3(v("Acc"), v("Rest"))]
-                );
+                [
+                    clause(
+                        [
+                            bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
+                            v("_Req"),
+                            v("Acc"),
+                            v("_LastId")
+                        ],
+                        none,
+                        [ok3(v("Acc"), v("Rest"))]
+                    )
+                ];
             _ ->
-                clause(
-                    [
-                        bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
-                        v("Req"),
-                        v("Acc"),
-                        v("_LastId")
-                    ],
-                    none,
-                    [
-                        'case'(remote(maps, values, [v("Req")]), [
-                            clause([nil()], none, [ok3(v("Acc"), v("Rest"))]),
-                            clause([v("Missing")], none, [
-                                err_decode(tuple_t([at(missing_required_fields), v("Missing")]))
-                            ])
-                        ])
-                    ]
-                )
+                [
+                    clause(
+                        [
+                            bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
+                            i(full_mask(Bits)),
+                            v("Acc"),
+                            v("_LastId")
+                        ],
+                        none,
+                        [ok3(v("Acc"), v("Rest"))]
+                    ),
+                    clause(
+                        [
+                            bin_pat([{i(0), default, default}, {v("_Rest"), default, [binary]}]),
+                            v("Req"),
+                            v("_Acc"),
+                            v("_LastId")
+                        ],
+                        none,
+                        [err_decode(tuple_t([at(missing_required_fields), missing_names(Bits, v("Req"))]))]
+                    )
+                ]
         end,
     HeaderClause =
         clause(
@@ -630,17 +629,23 @@ loop_clauses(Required, FieldDispatch) ->
             [{op, ?ANNO, '<', call_local(byte_size, [v("Bin")]), i(1)}],
             [at(more)]
         ),
-    [StopClause, HeaderClause, MoreClause].
+    StopClauses ++ [HeaderClause, MoreClause].
 
 %% The dispatch is reached for every header: known ids match dedicated
 %% clause pairs, unknown ones skip by nibble. Known fields pass their
 %% own id as the new delta base — the generic engine's LastId = Id at
 %% every decode_field_k call.
 
--spec dispatch_clauses([{#tg_field{}, wire_type()}], atom(), #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec dispatch_clauses(
+    [{#tg_field{}, wire_type()}],
+    [{integer(), pos_integer(), binary()}],
+    atom(),
+    #ectx{},
+    thrift_generator_codec_common:registry()
+) ->
     [ast()].
-dispatch_clauses(FieldPairs, FieldsLoop, Ctx, Enums) ->
-    lists:append([field_clauses_one(F, T, FieldsLoop, Ctx, Enums) || {F, T} <- FieldPairs]) ++
+dispatch_clauses(FieldPairs, Bits, FieldsLoop, Ctx, Enums) ->
+    lists:append([field_clauses_one(F, T, Bits, FieldsLoop, Ctx, Enums) || {F, T} <- FieldPairs]) ++
         [skip_clause(FieldsLoop)].
 
 %% Two clauses per known id: the right nibble decodes and recurses (a
@@ -648,11 +653,18 @@ dispatch_clauses(FieldPairs, FieldsLoop, Ctx, Enums) ->
 %% all — the generic engine's three-way by_id match split by
 %% construction.
 
--spec field_clauses_one(#tg_field{}, wire_type(), atom(), #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec field_clauses_one(
+    #tg_field{},
+    wire_type(),
+    [{integer(), pos_integer(), binary()}],
+    atom(),
+    #ectx{},
+    thrift_generator_codec_common:registry()
+) ->
     [ast()].
-field_clauses_one(F, {base, uuid}, _FieldsLoop, _Ctx, _Enums) ->
+field_clauses_one(F, {base, uuid}, _Bits, _FieldsLoop, _Ctx, _Enums) ->
     [mismatch_clause(F#tg_field.id)];
-field_clauses_one(F, {base, bool}, FieldsLoop, _Ctx, _Enums) ->
+field_clauses_one(F, {base, bool}, Bits, FieldsLoop, _Ctx, _Enums) ->
     Id = F#tg_field.id,
     [
         clause(
@@ -664,7 +676,7 @@ field_clauses_one(F, {base, bool}, FieldsLoop, _Ctx, _Enums) ->
             [
                 call_local(FieldsLoop, [
                     v("Bin"),
-                    req_expr(F),
+                    req_expr(F, Bits),
                     map_put(
                         v("Acc"),
                         name_lit(F#tg_field.name),
@@ -676,7 +688,7 @@ field_clauses_one(F, {base, bool}, FieldsLoop, _Ctx, _Enums) ->
         ),
         mismatch_clause(Id)
     ];
-field_clauses_one(F, T, FieldsLoop, Ctx, Enums) ->
+field_clauses_one(F, T, Bits, FieldsLoop, Ctx, Enums) ->
     Id = F#tg_field.id,
     [
         clause(
@@ -689,7 +701,7 @@ field_clauses_one(F, T, FieldsLoop, Ctx, Enums) ->
                         v("Rest"),
                         call_local(FieldsLoop, [
                             v("Rest"),
-                            req_expr(F),
+                            req_expr(F, Bits),
                             map_put(v("Acc"), name_lit(F#tg_field.name), v("V")),
                             i(Id)
                         ])
@@ -708,13 +720,13 @@ mismatch_clause(Id) ->
         err_decode(tuple_t([at(field_type_mismatch), i(Id)]))
     ]).
 
-%% Only required fields need dropping from the remaining-required map —
-%% optional and default fields recurse with it unchanged.
+%% Only required fields set their presence bit — optional and default
+%% fields recurse with the mask unchanged.
 
--spec req_expr(#tg_field{}) -> ast().
-req_expr(#tg_field{required = required, id = Id}) ->
-    remote(maps, remove, [i(Id), v("Req")]);
-req_expr(_F) ->
+-spec req_expr(#tg_field{}, [{integer(), pos_integer(), binary()}]) -> ast().
+req_expr(#tg_field{required = required, id = Id}, Bits) ->
+    {op, ?ANNO, 'bor', v("Req"), i(required_bit(Id, Bits))};
+req_expr(_F, _Bits) ->
     v("Req").
 
 -spec skip_clause(atom()) -> ast().
