@@ -18,9 +18,9 @@
 Paired historical benchmark for generated codecs. `generate` runs in each
 checkout and writes generated beams; `compare` proves wire and round-trip
 equality, then alternates baseline/current measurements. Both sides use the
-same function atoms in distinct modules. Same-module direct rows isolate
-emitted code and form the regression gate; public rows expose dispatch costs
-for diagnosis. Public and cross-module rows have distinct nested module/cache
+same function atoms in distinct modules. Same-module and cross-module direct
+rows isolate emitted code and form the regression gate; public rows expose
+dispatch costs for diagnosis. Public rows have distinct top-level module/cache
 keys, so they are unsuitable for a 1% hard gate. Direct targets are external
 funs created before timing, not dynamic module lookups on every iteration.
 
@@ -399,7 +399,7 @@ report(C, Samples0, Threshold) ->
         pass := Pass,
         inconclusive := Inconclusive
     } = Evaluation,
-    Gate = Entry =:= direct andalso Id =/= <<"CrossModule">>,
+    Gate = Entry =:= direct,
     io:format(
         "~ts ~p ~p ~p base=~.1f head=~.1f ratio=~.4f ci95=[~.4f,~.4f] delta=~.2f% pass=~p inc=~p gate=~p~n",
         [

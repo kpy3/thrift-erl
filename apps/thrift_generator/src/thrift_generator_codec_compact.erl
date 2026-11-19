@@ -47,7 +47,7 @@ ever matches on decode (a `field_type_mismatch`).
 
 Nesting and naming follow the binary emitter: same-module struct
 references become direct calls to the sibling functions, cross-module
-references go through `thrift_runtime_compact:encode/2` and `decode/2`;
+references call the target module's exported codec with its own prefix;
 containers get private `*_c` helpers named after the rendered element
 type (the suffix keeps them clear of the binary codec's helpers emitted
 into the same module); enum members are inlined as case clauses at
@@ -103,7 +103,6 @@ everywhere else in the emitter.
     err_encode/1,
     err_decode/1,
     mismatch/1,
-    literal/1,
     atom_concat/2,
     encode_entry_clause/1,
     encode_error_clause/0,
@@ -720,7 +719,8 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
             {Encode, _Decode} = thrift_generator_codec_common:codec_pair(compact, Local, Ctx),
             call_local(Encode, [V]);
         false ->
-            remote(thrift_runtime_compact, encode, [literal({struct, {ref, TypesMod, Local}}), V])
+            {Encode, _Decode} = thrift_generator_codec_common:ref_codec_pair(compact, TypesMod, Local, Ctx),
+            remote(TypesMod, Encode, [V])
     end.
 
 -spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
@@ -730,7 +730,8 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
             {_Encode, Decode} = thrift_generator_codec_common:codec_pair(compact, Local, Ctx),
             call_local(Decode, [Bin]);
         false ->
-            remote(thrift_runtime_compact, decode, [literal({struct, {ref, TypesMod, Local}}), Bin])
+            {_Encode, Decode} = thrift_generator_codec_common:ref_codec_pair(compact, TypesMod, Local, Ctx),
+            remote(TypesMod, Decode, [Bin])
     end.
 
 %% Same-module refs become direct sibling calls; the check rebuilds the

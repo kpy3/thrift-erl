@@ -40,6 +40,7 @@
     same_struct_names_coexist/1,
     cross_module_typedef/1,
     cross_module_include_qualifier/1,
+    cross_module_direct_dispatch/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
     generated_map_mode/1,
@@ -64,6 +65,7 @@ all() ->
         same_struct_names_coexist,
         cross_module_typedef,
         cross_module_include_qualifier,
+        cross_module_direct_dispatch,
         generated_loopback_buffered,
         generated_loopback_framed,
         generated_map_mode,
@@ -324,6 +326,68 @@ cross_module_include_qualifier(Config) ->
         element(3, ByModuleField)
     ),
     ok.
+
+cross_module_direct_dispatch(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    Value = #{
+        <<"inner">> => #{<<"name">> => <<"nested">>},
+        <<"count">> => 10,
+        <<"seen_at">> => 123456789
+    },
+    lists:foreach(fun(Protocol) -> check_cross_module_protocol(Protocol, Value) end, [binary, compact, json]).
+
+check_cross_module_protocol(Protocol, Value) ->
+    {Runtime, GenericEncode, GenericDecode, Encode, Decode} =
+        case Protocol of
+            binary ->
+                {
+                    thrift_runtime_binary,
+                    fun thrift_runtime_binary:encode/2,
+                    fun thrift_runtime_binary:decode/2,
+                    fun main_types:encode_main_outer_wire/1,
+                    fun main_types:decode_main_outer_wire/1
+                };
+            compact ->
+                {
+                    thrift_runtime_compact,
+                    fun thrift_runtime_compact:encode/2,
+                    fun thrift_runtime_compact:decode/2,
+                    fun main_types:encode_main_outer_compact/1,
+                    fun main_types:decode_main_outer_compact/1
+                };
+            json ->
+                {
+                    thrift_runtime_json,
+                    fun thrift_runtime_json:encode/2,
+                    fun thrift_runtime_json:decode/2,
+                    fun main_types:encode_main_outer_json/1,
+                    fun main_types:decode_main_outer_json/1
+                }
+        end,
+    Inline = {struct, main_types:struct_info(<<"Outer">>)},
+    {ok, GenericIo} = GenericEncode(Inline, Value),
+    {ok, DirectIo} = Encode(Value),
+    Wire = iolist_to_binary(GenericIo),
+    ?assertEqual(Wire, iolist_to_binary(DirectIo)),
+    ?assertEqual({ok, Value, <<>>}, GenericDecode(Inline, Wire)),
+    ?assertEqual({ok, Value, <<>>}, Decode(Wire)),
+    BadValue = Value#{<<"inner">> := #{<<"name">> => 42}},
+    ?assertEqual(GenericEncode(Inline, BadValue), Encode(BadValue)),
+    lists:foreach(
+        fun(Size) ->
+            Prefix = binary:part(Wire, 0, Size),
+            ?assertEqual(GenericDecode(Inline, Prefix), Decode(Prefix))
+        end,
+        lists:seq(0, byte_size(Wire) - 1)
+    ),
+    assert_without_runtime_dispatch(Runtime, fun() -> {ok, _} = Encode(Value) end),
+    assert_without_runtime_dispatch(Runtime, fun() -> {ok, _, _} = Decode(Wire) end).
+
+assert_without_runtime_dispatch(Runtime, Fun) ->
+    Key = {Runtime, codec_mfa, shared_types},
+    _ = persistent_term:erase(Key),
+    Fun(),
+    ?assertEqual(missing, persistent_term:get(Key, missing)).
 
 loader_duplicate_module(Config) ->
     One = data_file(Config, "semantic/dup_one.thrift"),

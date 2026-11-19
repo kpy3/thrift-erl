@@ -834,11 +834,11 @@ its API requires; both sides run on the same ThriftTest payloads.
 (`v0.8.0` by default, override with `BENCH_REGRESSION_REF`). It generates both
 versions, checks byte equality and round-trips, then alternates paired
 measurements in one VM. Both sides use the same function atoms in distinct
-modules. Same-module direct rows isolate emitted code and form the regression
-gate. Public rows expose dispatch costs for diagnosis. Cross-module direct rows
-still dispatch nested references, so public and cross-module rows have distinct
-nested module/cache keys and are marked `gate=false`. Direct targets are
-external funs created before timing, not dynamic module lookups per iteration.
+modules. Same-module and cross-module direct rows isolate emitted code and form
+the regression gate. Public rows expose dispatch costs for diagnosis and remain
+`gate=false` because their top-level module/cache keys differ. Direct targets
+are external funs created before timing, not dynamic module lookups per
+iteration.
 Each row reports the median current/baseline throughput ratio and a bootstrap
 95% interval. A gated row passes only when both its median and the interval's
 lower bound meet 0.99; confirmed regressions and inconclusive rows both make
@@ -906,8 +906,8 @@ The numbers above were measured on OTP 29; an OTP 28 run confirms the
 same ratios. The specialized codecs also hold their own against the
 generic interpreter inside this runtime — the same benchmark reports
 specialized vs generic ratios of 0.9–1.5× across the protocol/struct
-matrix (nested same-module references call sibling codecs directly,
-and the dispatch cache is read without a module hop).
+matrix (same-module and cross-module references call generated codecs
+directly; public ref entries read the dispatch cache without a module hop).
 
 Only the speedup ratios on the same machine are meaningful; run
 `./scripts/bench` to get numbers for your hardware.

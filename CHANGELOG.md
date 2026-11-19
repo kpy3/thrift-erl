@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of importing them per call from the runtime. The paired historical
   benchmark caught regressions above the 1% budget; wire format and generated
   codec APIs are unchanged.
+- Specialized codecs call cross-module struct codecs directly with the target
+  namespace prefix instead of performing runtime dispatch for every nested
+  value. JSON uses the non-folding decode body. Public ref descriptors and the
+  runtime's generic fallback are unchanged.
 
 ### Runtime (`thrift_runtime`)
 

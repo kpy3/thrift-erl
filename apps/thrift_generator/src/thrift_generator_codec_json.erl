@@ -43,9 +43,9 @@ Every type tag (`"i32"`, `"str"`, `"rec"`, ...) and the
 the shared `json_format_double` (16 fractional digits), map keys are
 restricted to scalars and enums — a map over any other key type degrades
 to constant `type_not_supported` errors, and so does `uuid` anywhere.
-Nested same-module struct refs call the sibling's decode body (the
-`]`-fold belongs to the top level only); cross-module refs go through
-the generic engine, which probes the target module's `json_codec/1`.
+Nested struct refs call the decode body directly (the `]`-fold belongs
+to the top level only), including cross-module refs through the target
+module's exported body function and namespace prefix.
 
 Forms are built as raw `erl_parse` trees — patterns, guards and the
 `try ... catch` key conversions have no convenient `erl_syntax`
@@ -510,20 +510,22 @@ struct_encode_call(TypesMod, Local, V, Ctx) ->
             {Encode, _Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
             call_local(Encode, [V]);
         false ->
-            remote(thrift_runtime_json, encode, [literal({struct, {ref, TypesMod, Local}}), V])
+            {Encode, _Decode} = thrift_generator_codec_common:ref_codec_pair(json, TypesMod, Local, Ctx),
+            remote(TypesMod, Encode, [V])
     end.
 
 -spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
-%% Nested same-module refs call the body (no `]`-fold); cross-module
-%% refs go through the runtime's non-folding nested entry, which probes
-%% the specialized pair and falls back to the generic nested decode.
+%% Nested refs call the body directly (no `]`-fold); the target prefix
+%% selects the exported cross-module function.
 struct_decode_call(TypesMod, Local, Bin, Ctx) ->
     case TypesMod =:= types_module_atom(Ctx#ectx.current) of
         true ->
             {_Encode, Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
             call_local(thrift_generator_codec_common:decode_body_name(Decode), [Bin]);
         false ->
-            remote(thrift_runtime_json, decode_nested, [literal({struct, {ref, TypesMod, Local}}), Bin])
+            {_Encode, Decode} = thrift_generator_codec_common:ref_codec_pair(json, TypesMod, Local, Ctx),
+            DecodeBody = thrift_generator_codec_common:decode_body_name(Decode),
+            remote(TypesMod, DecodeBody, [Bin])
     end.
 
 %% The emitter derives the types-module atom from the module key with
