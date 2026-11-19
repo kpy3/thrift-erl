@@ -42,8 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SomeUnion cells) pass the 0.99 gate; direct gains on required-heavy
   CrossModule reach +90%/+67% (binary encode/decode), +36%/+63%
   (compact), +40%/+9% (json), and union encode gains +14%/+11%/+6%
-  (binary/compact/json). Wire bytes, error terms, and the missing-names
-  order are unchanged.
+  (binary/compact/json). Wire bytes and error terms are unchanged; the
+  decode missing-names order is deterministic ascending field id (the
+  generic engines' map iteration order only coincides with it for up to
+  32 required fields).
 - `scripts/bench-rpc` runs a paired loopback RPC benchmark (client and server
   on 127.0.0.1, framed/binary) of a historical git ref against the current
   checkout, with the same per-cell 0.99 gate as `scripts/bench-regression`.

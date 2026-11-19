@@ -45,6 +45,8 @@
     required_encode_map_pattern/1,
     union_encode_count/1,
     required_decode_bitmask/1,
+    required_decode_order_many/1,
+    empty_union_no_dead_code/1,
     rpc_specialized_codecs/1,
     rpc_loopback_hooks/1,
     rpc_loopback_fallback/1,
@@ -77,6 +79,8 @@ all() ->
         required_encode_map_pattern,
         union_encode_count,
         required_decode_bitmask,
+        required_decode_order_many,
+        empty_union_no_dead_code,
         rpc_specialized_codecs,
         rpc_loopback_hooks,
         rpc_loopback_fallback,
@@ -557,6 +561,60 @@ required_decode_bitmask(Config) ->
     ?assertEqual(nomatch, re:run(Src, <<"keydelete">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"maps:remove">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"maps:values">>, [])),
+    ok.
+
+%% Deliberate pin: the decode missing-names order is deterministic
+%% ascending field id, even past the 32-field flatmap boundary where the
+%% generic engines' required map switches to unspecified hash order.
+%% Fields are declared in reverse id order to make the pin meaningful.
+
+required_decode_order_many(Config) ->
+    Fields = [
+        ["  ", integer_to_binary(I), ": required i32 f", integer_to_binary(I)]
+     || I <- lists:seq(40, 1, -1)
+    ],
+    Path = write_snippet(
+        Config,
+        "bigreq.thrift",
+        iolist_to_binary(["namespace erl bigreq\nstruct R {\n", lists:join(",\n", Fields), "\n}\n"])
+    ),
+    ok = generate_modules(Path),
+    Expected = [<<"f", (integer_to_binary(I))/binary>> || I <- lists:seq(1, 40)],
+    lists:foreach(
+        fun({Decode, Wire}) ->
+            ?assertEqual({error, {decode, {missing_required_fields, Expected}}}, Decode(Wire))
+        end,
+        [
+            {fun bigreq_types:decode_bigreq_r_wire/1, <<0>>},
+            {fun bigreq_types:decode_bigreq_r_compact/1, <<0>>},
+            {fun bigreq_types:decode_bigreq_r_json/1, <<"{}">>}
+        ]
+    ),
+    ok.
+
+%% An empty union's check can never hand off to the encode chain, so the
+%% chain is not emitted at all — generated modules stay clean under
+%% warnings_as_errors (a dead chain entry function would break user
+%% builds).
+
+empty_union_no_dead_code(Config) ->
+    Path = write_snippet(
+        Config,
+        "emptyunion.thrift",
+        <<
+            "namespace erl emptyunion\n"
+            "union E {\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    ?assertEqual(nomatch, re:run(Src, <<"encode_emptyunion_e_wire_fields">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"encode_emptyunion_e_compact_fields">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"encode_emptyunion_e_json_fields">>, [])),
+    ?assertMatch({match, _}, re:run(Src, <<"union_empty">>, [])),
+    ?assertMatch([{ok, _, _}], thrift_generator_emitter:compile_sources(Model)),
     ok.
 
 %% RPC params/result hooks: the generated service info carries

@@ -267,7 +267,13 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         [
             spec_form(Encode, 1, [t_fun([t_map_exact()], t_union([t_ok(t_atom(iodata)), t_error()]))]),
             {function, ?ANNO, Encode, 1, [encode_entry_clause(CheckBody), encode_error_clause()]}
-        ] ++ chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1).
+        ] ++
+        %% An empty union's check never hands off to the chain — emitting
+        %% it would leave an unused function under warnings_as_errors.
+        case {S#tg_struct.kind, S#tg_struct.fields} of
+            {union, []} -> [];
+            _ -> chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1)
+        end.
 
 -spec chain_forms(
     atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()

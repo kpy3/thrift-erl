@@ -349,9 +349,10 @@ required_check(Fields, Call) ->
 %% Required-presence tracking on the decode side: one bit per required
 %% field in ascending id order. The loop carries the mask, a decoded
 %% required field sets its bit with `bor', and the stop byte matches the
-%% full mask as a literal; the missing names (ascending id order, like
-%% the generic engines' required map) are rebuilt only on the error
-%% branch.
+%% full mask as a literal; the missing names are rebuilt only on the
+%% error branch. The order is deterministic ascending id — the generic
+%% engines iterate their required map, whose order coincides only for
+%% small (flatmap) maps.
 
 -spec required_bits([#tg_field{}]) -> [{integer(), pos_integer(), binary()}].
 required_bits(Fields) ->
