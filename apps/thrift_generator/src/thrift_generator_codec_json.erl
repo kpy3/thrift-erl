@@ -102,6 +102,10 @@ syntax trees like everywhere else in the emitter.
     encode_error_clause/0,
     union_check/2,
     required_check/2,
+    required_bits/1,
+    required_bit/2,
+    full_mask/1,
+    missing_names/2,
     t_atom/1,
     t_atom_lit/1,
     t_map_exact/0,
@@ -295,7 +299,13 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         [
             spec_form(Encode, 1, [t_fun([t_map_exact()], t_union([t_ok(t_atom(iodata)), t_error()]))]),
             {function, ?ANNO, Encode, 1, [encode_entry_clause(CheckBody), encode_error_clause()]}
-        ] ++ chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1).
+        ] ++
+        %% An empty union's check never hands off to the chain — emitting
+        %% it would leave an unused function under warnings_as_errors.
+        case {S#tg_struct.kind, S#tg_struct.fields} of
+            {union, []} -> [];
+            _ -> chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1)
+        end.
 
 -spec chain_forms(
     atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
@@ -567,11 +577,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     AfterName = atom_concat(Decode, <<"_after">>),
     DoneName = atom_concat(Decode, <<"_done">>),
     BodyName = thrift_generator_codec_common:decode_body_name(Decode),
-    Required = required_map_lit([
-        {F#tg_field.id, F#tg_field.name}
-     || {F, _T} <- lists:zip(Fields, FieldTypes),
-        F#tg_field.required =:= required
-    ]),
+    Bits = required_bits(Fields),
     Doc =
         <<
             "Decodes the JSON protocol into the wire representation,"
@@ -613,7 +619,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
             {function, ?ANNO, BodyName, 1, [
                 clause([v("Binary")], [remote(erlang, is_binary, [v("Binary")])], [
                     'case'(call_local(json_expect, [v("Binary"), i(123)]), [
-                        ok_bind_clause(v("Rest"), call_local(FieldsName, [v("Rest"), Required, map_empty()])),
+                        ok_bind_clause(v("Rest"), call_local(FieldsName, [v("Rest"), i(0), map_empty()])),
                         other_tail()
                     ])
                 ])
@@ -621,17 +627,10 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
             {function, ?ANNO, FieldsName, 3, fields_clauses(FieldName, AfterName, DoneName)},
             {function, ?ANNO, FieldName, 3, field_clauses(Decode)},
             {function, ?ANNO, atom_concat(Decode, <<"_field_value">>), 4,
-                dispatch_clauses(lists:zip(Fields, FieldTypes), Ctx, Enums)},
+                dispatch_clauses(lists:zip(Fields, FieldTypes), Bits, Ctx, Enums)},
             {function, ?ANNO, AfterName, 3, after_clauses(FieldsName, DoneName)},
-            {function, ?ANNO, DoneName, 3, done_clauses()}
+            {function, ?ANNO, DoneName, 3, done_clauses(Bits)}
         ].
-
-%% One flat literal — a folded map_put over #{} would render as
-%% `(#{})#{3 => ...}` and the compiler warns on updating a literal.
-
--spec required_map_lit([{integer(), binary()}]) -> ast().
-required_map_lit(Required) ->
-    {map, ?ANNO, [{map_field_assoc, ?ANNO, i(Id), name_lit(Name)} || {Id, Name} <- Required]}.
 
 %% The loop: whitespace, then either the closing brace (required scan),
 %% the end of input (more), or one field and its separator.
@@ -686,16 +685,21 @@ after_clauses(FieldsName, DoneName) ->
         ])
     ].
 
--spec done_clauses() -> [ast()].
-done_clauses() ->
+%% The closing brace: the full required-presence bitmask is matched as a
+%% literal, and the missing names (ascending id order, like the generic
+%% engine's required map) are rebuilt from the mask only on the error
+%% branch.
+
+-spec done_clauses([{integer(), pos_integer(), binary()}]) -> [ast()].
+done_clauses([]) ->
     [
-        clause([v("Req"), v("Acc"), v("Rest")], none, [
-            'case'(remote(maps, values, [v("Req")]), [
-                clause([nil()], none, [ok3(v("Acc"), v("Rest"))]),
-                clause([v("Missing")], none, [
-                    err_decode(tuple_t([at(missing_required_fields), v("Missing")]))
-                ])
-            ])
+        clause([v("_Req"), v("Acc"), v("Rest")], none, [ok3(v("Acc"), v("Rest"))])
+    ];
+done_clauses(Bits) ->
+    [
+        clause([i(full_mask(Bits)), v("Acc"), v("Rest")], none, [ok3(v("Acc"), v("Rest"))]),
+        clause([v("Req"), v("_Acc"), v("_Rest")], none, [
+            err_decode(tuple_t([at(missing_required_fields), missing_names(Bits, v("Req"))]))
         ])
     ].
 
@@ -767,13 +771,26 @@ put_acc(NamePut, V, Acc) ->
 %% uuid field matches only the empty tag and constant-errors, unknown
 %% ids skip by tag.
 
--spec dispatch_clauses([{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry()) -> [ast()].
-dispatch_clauses(FieldTypes, Ctx, Enums) ->
-    [field_value_clause(F, T, Ctx, Enums) || {F, T} <- FieldTypes] ++
+-spec dispatch_clauses(
+    [{#tg_field{}, wire_type()}],
+    [{integer(), pos_integer(), binary()}],
+    #ectx{},
+    thrift_generator_codec_common:registry()
+) ->
+    [ast()].
+dispatch_clauses(FieldTypes, Bits, Ctx, Enums) ->
+    [field_value_clause(F, T, Bits, Ctx, Enums) || {F, T} <- FieldTypes] ++
         [skip_clause()].
 
--spec field_value_clause(#tg_field{}, wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> ast().
-field_value_clause(F, {base, uuid}, _Ctx, _Enums) ->
+-spec field_value_clause(
+    #tg_field{},
+    wire_type(),
+    [{integer(), pos_integer(), binary()}],
+    #ectx{},
+    thrift_generator_codec_common:registry()
+) ->
+    ast().
+field_value_clause(F, {base, uuid}, _Bits, _Ctx, _Enums) ->
     %% tag(j_unsupported) is the empty string: the field matches only
     %% `""` and then constant-errors, exactly the generic path. The
     %% unused tail parameters stay underscored — the constant error
@@ -788,7 +805,7 @@ field_value_clause(F, {base, uuid}, _Ctx, _Enums) ->
             ])
         ]
     );
-field_value_clause(F, T, Ctx, Enums) ->
+field_value_clause(F, T, Bits, Ctx, Enums) ->
     Id = F#tg_field.id,
     clause(
         [i(Id), v("Tag"), v("Bin"), v("Req")],
@@ -809,7 +826,7 @@ field_value_clause(F, T, Ctx, Enums) ->
                                         at(ok),
                                         v("Val"),
                                         v("RestBrace"),
-                                        mark_present(i(Id), v("Req")),
+                                        mark_present(F, Bits, v("Req")),
                                         name_lit(F#tg_field.name)
                                     ])
                                 ),
@@ -831,14 +848,11 @@ field_value_clause(F, T, Ctx, Enums) ->
 mismatch_body(Id) ->
     clause([v("_")], none, [err_decode(tuple_t([at(field_type_mismatch), i(Id)]))]).
 
--spec mark_present(ast(), ast()) -> ast().
-mark_present(Id, Req) ->
-    'case'(Req, [
-        clause([{map, ?ANNO, [{map_field_exact, ?ANNO, Id, v("_")}]}], none, [
-            remote(maps, remove, [Id, Req])
-        ]),
-        clause([v("_")], none, [Req])
-    ]).
+-spec mark_present(#tg_field{}, [{integer(), pos_integer(), binary()}], ast()) -> ast().
+mark_present(#tg_field{required = required, id = Id}, Bits, Req) ->
+    {op, ?ANNO, 'bor', Req, i(required_bit(Id, Bits))};
+mark_present(_F, _Bits, Req) ->
+    Req.
 
 -spec skip_clause() -> ast().
 skip_clause() ->

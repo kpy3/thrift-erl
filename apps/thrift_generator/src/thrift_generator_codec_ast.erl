@@ -68,6 +68,10 @@ width headers, length prefixes) stay in their emitters.
     encode_error_clause/0,
     union_check/2,
     required_check/2,
+    required_bits/1,
+    required_bit/2,
+    full_mask/1,
+    missing_names/2,
     key_filter/3,
     fun_type/2,
     t_atom/1,
@@ -290,37 +294,93 @@ encode_error_clause() ->
     %% report it.
     mismatch_fn_tail().
 
-%% The union check counts present fields by name (declaration order);
-%% the required check collects the missing names in declaration order —
-%% both mirror check_present_fields of the generic engines. `Call' is
+%% The union check counts present fields arithmetically (declaration
+%% order); the required check matches the required keys in one map
+%% pattern and builds the missing names (declaration order) only on the
+%% error branch — both mirror check_present_fields of the generic
+%% engines, without an intermediate list on the valid path. `Call' is
 %% the protocol-specific handoff expression (the first chain function
 %% with its arguments).
 
 -spec union_check([#tg_field{}], ast()) -> ast().
+union_check([], _Call) ->
+    %% An empty union can never carry exactly one field.
+    err_encode(at(union_empty));
 union_check(Fields, Call) ->
-    Names = [name_lit(F#tg_field.name) || F <- Fields],
-    'case'(
-        lc(v("N"), [{generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), true)]),
-        [
-            clause([cons(v("_"), nil())], none, [Call]),
-            clause([nil()], none, [err_encode(at(union_empty))]),
-            clause([v("_")], none, [err_encode(at(union_multiple))])
-        ]
-    ).
+    Counts = [
+        'case'(remote(maps, is_key, [name_lit(F#tg_field.name), v("Value")]), [
+            clause([at(true)], none, [i(1)]),
+            clause([at(false)], none, [i(0)])
+        ])
+     || F <- Fields
+    ],
+    Sum = lists:foldl(fun(C, Acc) -> {op, ?ANNO, '+', Acc, C} end, hd(Counts), tl(Counts)),
+    'case'(Sum, [
+        clause([i(1)], none, [Call]),
+        clause([i(0)], none, [err_encode(at(union_empty))]),
+        clause([v("_")], none, [err_encode(at(union_multiple))])
+    ]).
 
 -spec required_check([#tg_field{}], ast()) -> ast().
 required_check(Fields, Call) ->
     Required = [F || F <- Fields, F#tg_field.required =:= required],
-    Names = [name_lit(F#tg_field.name) || F <- Required],
-    'case'(
-        lc(v("N"), [{generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), false)]),
-        [
-            clause([nil()], none, [Call]),
-            clause([v("Missing")], none, [
-                err_encode(tuple_t([at(missing_required_fields), v("Missing")]))
+    case Required of
+        [] ->
+            Call;
+        _ ->
+            Present =
+                {map, ?ANNO, [{map_field_exact, ?ANNO, name_lit(F#tg_field.name), v("_")} || F <- Required]},
+            Names = [name_lit(F#tg_field.name) || F <- Required],
+            'case'(v("Value"), [
+                clause([Present], none, [Call]),
+                clause([v("_")], none, [
+                    err_encode(
+                        tuple_t([
+                            at(missing_required_fields),
+                            lc(v("N"), [
+                                {generate, ?ANNO, v("N"), list_lit(Names)}, key_filter(v("N"), v("Value"), false)
+                            ])
+                        ])
+                    )
+                ])
             ])
-        ]
-    ).
+    end.
+
+%% Required-presence tracking on the decode side: one bit per required
+%% field in ascending id order. The loop carries the mask, a decoded
+%% required field sets its bit with `bor', and the stop byte matches the
+%% full mask as a literal; the missing names are rebuilt only on the
+%% error branch. The order is deterministic ascending id — the generic
+%% engines iterate their required map, whose order coincides only for
+%% small (flatmap) maps.
+
+-spec required_bits([#tg_field{}]) -> [{integer(), pos_integer(), binary()}].
+required_bits(Fields) ->
+    Required = lists:keysort(#tg_field.id, [F || F <- Fields, F#tg_field.required =:= required]),
+    [
+        {F#tg_field.id, 1 bsl (I - 1), F#tg_field.name}
+     || {I, F} <- lists:zip(lists:seq(1, length(Required)), Required)
+    ].
+
+-spec required_bit(integer(), [{integer(), pos_integer(), binary()}]) -> pos_integer().
+required_bit(Id, Bits) ->
+    {value, {Id, Bit, _Name}} = lists:keysearch(Id, 1, Bits),
+    Bit.
+
+-spec full_mask([{integer(), pos_integer(), binary()}]) -> non_neg_integer().
+full_mask(Bits) ->
+    lists:foldl(fun({_Id, Bit, _Name}, Acc) -> Acc bor Bit end, 0, Bits).
+
+%% `[N || {B, N} <- [{Bit, Name}, ...], Seen band B =:= 0]' — the pairs
+%% literal rides in ascending id order, and so do the missing names.
+
+-spec missing_names([{integer(), pos_integer(), binary()}], ast()) -> ast().
+missing_names(Bits, Seen) ->
+    Pairs = list_lit([tuple_t([i(Bit), name_lit(Name)]) || {_Id, Bit, Name} <- Bits]),
+    lc(v("N"), [
+        {generate, ?ANNO, tuple_pat([v("B"), v("N")]), Pairs},
+        {op, ?ANNO, '=:=', {op, ?ANNO, 'band', Seen, v("B")}, i(0)}
+    ]).
 
 %% Comprehension filters are bare expressions in the abstract format —
 %% the `{filter, _}' wrapper exists only in erl_syntax trees.
