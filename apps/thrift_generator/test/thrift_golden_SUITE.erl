@@ -79,7 +79,7 @@ init_per_suite(Config) ->
     %% build copy in the test profile. The fixture is a reference
     %% artifact: nothing compiles it except this suite.
     GenDir = filename:join(code:lib_dir(thrift), "include/golden/gen-erl"),
-    ok = compile_official_generated(GenDir, priv_dir(Config)),
+    ok = compile_official_generated(GenDir),
     DataDir = proplists:get_value(data_dir, Config),
     ok = load_our_thrift_test_modules(DataDir),
     Config.
@@ -407,15 +407,9 @@ assert_official_map_map(MapMap) ->
     ?assertEqual([{J, J} || J <- lists:seq(1, 4)], lists:sort(dict:to_list(Pos))).
 
 %%--------------------------------------------------------------------
-%% Setup helpers
-%%--------------------------------------------------------------------
-
-priv_dir(Config) ->
-    proplists:get_value(priv_dir, Config).
-
 %% Compiles the committed officially generated sources in memory and
 %% loads them. They only need their own headers, which sit next to them.
-compile_official_generated(GenDir, _PrivDir) ->
+compile_official_generated(GenDir) ->
     Files = filelib:wildcard(filename:join(GenDir, "*.erl")),
     ?assertNotEqual([], Files),
     lists:foreach(

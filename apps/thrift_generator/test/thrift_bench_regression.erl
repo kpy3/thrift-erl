@@ -263,6 +263,20 @@ check_spec(Spec) ->
 %% (native values carry their module's identity, so they compare through
 %% the to_wire round trip instead of by value).
 
+%% The parity assertions of the sanity gate: written as explicit
+%% comparisons rather than pattern matches (elp W0060).
+
+-spec assert_equal(term(), term()) -> ok.
+assert_equal(Expected, Got) ->
+    case Got =:= Expected of
+        true -> ok;
+        false -> erlang:error({parity_mismatch, Expected, Got})
+    end.
+
+-spec assert_true(boolean()) -> ok.
+assert_true(true) -> ok;
+assert_true(false) -> erlang:error(parity_check_failed).
+
 check_conversion(Spec) ->
     Name = maps:get(struct, Spec),
     Value = maps:get(value, Spec),
@@ -275,8 +289,8 @@ check_conversion(Spec) ->
                 fun(Repr) ->
                     BaseIn = conversion_input(BaseModule, Name, Repr, to_wire, Value),
                     HeadIn = conversion_input(HeadModule, Name, Repr, to_wire, Value),
-                    Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseIn),
-                    Value = thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadIn)
+                    assert_equal(Value, thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseIn)),
+                    assert_equal(Value, thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadIn))
                 end,
                 Reprs
             ),
@@ -284,24 +298,24 @@ check_conversion(Spec) ->
                 fun(Repr) ->
                     BaseOut = thrift_runtime_record:from_wire({struct, {ref, BaseModule, Name}}, Value, Repr),
                     HeadOut = thrift_runtime_record:from_wire({struct, {ref, HeadModule, Name}}, Value, Repr),
-                    Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseOut),
-                    Value = thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadOut),
+                    assert_equal(Value, thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseOut)),
+                    assert_equal(Value, thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadOut)),
                     %% Native values carry their module's identity and
                     %% cannot compare by value; everything else must
                     %% agree exactly.
-                    true = Repr =:= native orelse (BaseOut =:= HeadOut)
+                    assert_true(Repr =:= native orelse BaseOut =:= HeadOut)
                 end,
                 Reprs
             );
         sum ->
             BaseIn = conversion_input(BaseModule, Name, sum, to_wire, Value),
             HeadIn = conversion_input(HeadModule, Name, sum, to_wire, Value),
-            Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseIn),
-            Value = thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadIn),
+            assert_equal(Value, thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseIn)),
+            assert_equal(Value, thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadIn)),
             BaseOut = thrift_runtime_record:from_wire({struct, {ref, BaseModule, Name}}, Value, record),
             HeadOut = thrift_runtime_record:from_wire({struct, {ref, HeadModule, Name}}, Value, record),
-            true = BaseOut =:= HeadOut,
-            Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseOut);
+            assert_equal(BaseOut, HeadOut),
+            assert_equal(Value, thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseOut));
         _ ->
             ok
     end.

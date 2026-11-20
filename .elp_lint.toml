@@ -17,6 +17,13 @@
 #   is excluded on the CLI.
 # - W0017 undefined_function: the rebar3 plugin calls the rebar3 API,
 #   which is not a project dependency (xref ignores it the same way).
+# - W0095 used_ignored_variable / W0088 unnecessary_function_arg for
+#   thrift_parser and thrift_lexer: leex/yecc outputs, regenerated from
+#   .xrl/.yrl at build time — edit those, never the generated files.
+# - W0092 unused_type for thrift_runtime_service: handler_result/0 is
+#   the documented callback contract the generated handlers reference
+#   in their specs as a remote type — the analyzer's usage scan cannot
+#   see that.
 
 [linters.W0083]
 enabled = false
@@ -32,3 +39,12 @@ exclude_apps = ["thrift_generator", "thrift_runtime"]
 
 [linters.W0017]
 exclude_apps = ["rebar3_thrift"]
+
+[linters.W0095]
+exclude_modules = ["thrift_parser", "thrift_lexer"]
+
+[linters.W0088]
+exclude_modules = ["thrift_lexer"]
+
+[linters.W0092]
+exclude_modules = ["thrift_runtime_service"]

@@ -247,10 +247,10 @@ encode_k({k_enum, _N, Desc}, V) ->
         {ok, Int} -> {ok, zigzag_varint(Int)};
         error -> {error, {encode, {unknown_enum_value, V}}}
     end;
-encode_k({k_list, N, KElem}, Values) when is_list(Values) ->
-    encode_sequence_k(N, KElem, Values);
-encode_k({k_set, N, KElem}, Values) when is_list(Values) ->
-    encode_sequence_k(N, KElem, Values);
+encode_k({k_list, _N, KElem}, Values) when is_list(Values) ->
+    encode_sequence_k(KElem, Values);
+encode_k({k_set, _N, KElem}, Values) when is_list(Values) ->
+    encode_sequence_k(KElem, Values);
 encode_k({k_map, _N, KKey, KVal, KElem, KVElem}, Value) when is_map(Value) ->
     encode_map_k(KKey, KVal, KElem, KVElem, Value);
 encode_k({k_struct, _N, Compiled}, Value) when is_map(Value) ->
@@ -552,8 +552,8 @@ check_present_fields(Kind, ReqNames, Fields, Map) ->
 %% Containers
 %%--------------------------------------------------------------------
 
--spec encode_sequence_k(non_neg_integer(), k_type(), [term()]) -> {ok, iodata()} | {error, term()}.
-encode_sequence_k(_N, KElem, Values) ->
+-spec encode_sequence_k(k_type(), [term()]) -> {ok, iodata()} | {error, term()}.
+encode_sequence_k(KElem, Values) ->
     case encode_elements_k(KElem, Values) of
         {ok, Encoded} ->
             %% The collection header carries the ELEMENT type nibble —

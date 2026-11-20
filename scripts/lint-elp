@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# ELP lint gate. `elp lint` always exits 0 — its exit code carries no
-# finding information — so this wrapper fails (exit 1) when any finding
-# at warning severity or above is reported. Suppressed findings
-# (.elp_lint.toml disables/exclusions) stay below the threshold and do
-# not affect the gate; each suppression carries its justification there.
+# ELP lint gate. Since elp 1.1.0 (build 2026-11-16) `elp lint` exits
+# non-zero when it reports findings, so this wrapper relies on content,
+# not on the exit code: any finding at warning severity or above fails
+# the gate (exit 1); a non-zero exit WITHOUT findings is an invocation
+# failure (exit 2). Suppressed findings (.elp_lint.toml disables/
+# exclusions) stay below the threshold and do not affect the gate; each
+# suppression carries its justification there.
+#
+# Findings under `/_build/` are dropped before the verdict: nested
+# build output (the rebar3 plugin's vendored dependencies and docs
+# copies) is generated third-party content, never a lint subject.
 #
 # --no-connect matches CI exactly: the standalone run is the
 # deterministic one (a daemon-startup timeout silently falls back to a
@@ -11,16 +17,25 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TMP=$(mktemp)
-trap 'rm -f "$TMP"' EXIT
-if ! elp lint --rebar --as test --no-connect --ignore-app thrift --format json --severity warning \
-    > "$TMP"; then
-    echo "lint-elp: elp invocation failed" >&2
-    exit 2
-fi
-if [ -s "$TMP" ]; then
+RAW=$(mktemp)
+ERR=$(mktemp)
+FILTERED=$(mktemp)
+trap 'rm -f "$RAW" "$ERR" "$FILTERED"' EXIT
+RC=0
+elp lint --rebar --as test --no-connect --ignore-app thrift --format json --severity warning \
+    > "$RAW" 2> "$ERR" || RC=$?
+grep -v '/_build/' "$RAW" > "$FILTERED" || true
+if [ -s "$FILTERED" ]; then
     echo "lint-elp: findings at warning severity or above:" >&2
-    cat "$TMP" >&2
+    cat "$FILTERED" >&2
+    cat "$ERR" >&2 || true
     exit 1
+fi
+# elp answers 101 when findings exist — here the filter removed them
+# all (build output only). Any other non-zero exit is a real failure.
+if [ "$RC" -ne 0 ] && [ "$RC" -ne 101 ]; then
+    echo "lint-elp: elp invocation failed (exit $RC)" >&2
+    cat "$ERR" >&2 || true
+    exit 2
 fi
 echo "lint-elp: clean"

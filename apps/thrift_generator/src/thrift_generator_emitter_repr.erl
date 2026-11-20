@@ -258,7 +258,7 @@ maps_chain(Steps) ->
         {[], map_empty()},
         Steps
     ),
-    lists:reverse(FormsRev) ++ [LastAcc].
+    lists:reverse(FormsRev, [LastAcc]).
 
 acc_var(I) ->
     v("Acc" ++ integer_to_list(I)).

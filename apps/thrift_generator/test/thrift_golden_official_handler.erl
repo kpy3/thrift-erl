@@ -75,8 +75,8 @@ handle_function(testEnum, {Thing}) ->
     {reply, Thing};
 handle_function(testTypedef, {Thing}) ->
     {reply, Thing};
-handle_function(testMapMap, {Hi}) ->
-    {reply, map_map(Hi)};
+handle_function(testMapMap, {_Hi}) ->
+    {reply, map_map()};
 handle_function(testException, {<<"Xception">>}) ->
     erlang:throw(#'thrift.test.Xception'{errorCode = 1001, message = <<"Xception">>});
 handle_function(testException, _Args) ->
@@ -98,7 +98,7 @@ handle_function(testOneway, {Secs}) ->
 %% own values (-4..-1 for -4, 1..4 for 4). The official representation
 %% uses `dict()` at every map level.
 
-map_map(_Hi) ->
+map_map() ->
     dict:from_list([
         {I, dict:from_list([{J, J} || J <- inner_keys(I)])}
      || I <- [-4, 4]
