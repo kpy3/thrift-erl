@@ -61,7 +61,9 @@ between incompatible versions.
     encode_application_exception/2,
     decode_application_exception/1,
     struct_fields/1,
-    skip_by_wire/2
+    skip_by_wire/2,
+    decode_repr/3,
+    encode_repr/2
 ]).
 
 %% The exported encode/decode/message functions are the
@@ -142,6 +144,181 @@ between incompatible versions.
 %%--------------------------------------------------------------------
 %% Values
 %%--------------------------------------------------------------------
+
+%%--------------------------------------------------------------------
+%% Repr-native one-pass dispatch
+%%--------------------------------------------------------------------
+
+%% The same probe/cache contract as the codec dispatch: the hot path
+%% reads this module's persistent_term key, the cold probe asks the
+%% types module's `binary_repr_codec/2' once per {Name, Repr} and
+%% caches the {Encode, Decode} pair (or `false'); a reload that drops
+%% the family surfaces as undef, drops the entry and the caller falls
+%% back to the two-pass path.
+
+-spec repr_codec_cached(module(), binary(), thrift_runtime:repr()) -> {atom(), atom()} | false | cold.
+repr_codec_cached(Module, Name, Repr) ->
+    case persistent_term:get({?MODULE, repr_codec_mfa, Module}, probe) of
+        #{{Name, Repr} := Entry} -> Entry;
+        _ -> cold
+    end.
+
+-spec repr_probe(module(), binary(), thrift_runtime:repr()) -> {atom(), atom()} | false.
+repr_probe(Module, Name, Repr) ->
+    Entry =
+        case code:ensure_loaded(Module) of
+            {module, Module} ->
+                case erlang:function_exported(Module, binary_repr_codec, 2) of
+                    true ->
+                        case Module:binary_repr_codec(Name, Repr) of
+                            {ok, {Encode, Decode}} when is_atom(Encode), is_atom(Decode) ->
+                                {Encode, Decode};
+                            error ->
+                                false
+                        end;
+                    false ->
+                        false
+                end;
+            {error, _} ->
+                false
+        end,
+    repr_cache(Module, Name, Repr, Entry),
+    Entry.
+
+-spec repr_cache(module(), binary(), thrift_runtime:repr(), {atom(), atom()} | false) -> ok.
+repr_cache(Module, Name, Repr, Entry) ->
+    Key = {?MODULE, repr_codec_mfa, Module},
+    case persistent_term:get(Key, probe) of
+        Cached when is_map(Cached) ->
+            persistent_term:put(Key, Cached#{{Name, Repr} => Entry});
+        _ ->
+            persistent_term:put(Key, #{{Name, Repr} => Entry})
+    end.
+
+-spec repr_stale(module(), binary(), thrift_runtime:repr()) -> ok.
+repr_stale(Module, Name, Repr) ->
+    Key = {?MODULE, repr_codec_mfa, Module},
+    case persistent_term:get(Key, probe) of
+        Cached when is_map(Cached) ->
+            persistent_term:put(Key, maps:remove({Name, Repr}, Cached));
+        _ ->
+            ok
+    end.
+
+%% Decodes straight into the requested representation. Answers `miss'
+%% when the struct has no repr codec (hand-written modules, native-mode
+%% and sum unions) so the facade falls back to decode-to-wire plus
+%% conversion with identical results.
+
+-spec decode_repr(thrift_runtime_binary:type_desc(), binary(), thrift_runtime:repr()) ->
+    {ok, term(), binary()} | more | {error, term()} | miss.
+decode_repr({struct, {ref, Module, Name}}, Binary, Repr) ->
+    case repr_codec_cached(Module, Name, Repr) of
+        {_, Decode} ->
+            try
+                Module:Decode(Binary)
+            catch
+                error:undef:Stack ->
+                    case erlang:function_exported(Module, Decode, 1) of
+                        true ->
+                            erlang:raise(error, undef, Stack);
+                        false ->
+                            repr_stale(Module, Name, Repr),
+                            miss
+                    end
+            end;
+        false ->
+            miss;
+        cold ->
+            case repr_probe(Module, Name, Repr) of
+                {_, _} ->
+                    decode_repr({struct, {ref, Module, Name}}, Binary, Repr);
+                false ->
+                    miss
+            end
+    end;
+decode_repr(_Desc, _Binary, _Repr) ->
+    miss.
+
+%% Encodes straight from an eligible value. Eligibility mirrors the
+%% conversion layer's accepted shapes: native records (read through
+%% thrift_runtime_native:fields/1), tuples (the record family matches
+%% the tag and reports the unwrapped mismatch itself), and maps (the
+%% map family reads binary names first, exactly like declared_to_wire).
+%% A fast-path {error, {value_does_not_match_type, V}} is NOT final:
+%% the facade retries the two-pass path, which answers the identical
+%% error for genuinely bad values but still accepts mixed nesting
+%% (a record holding a wire-map nested value) that the one-pass shape
+%% cannot represent.
+
+-spec encode_repr(thrift_runtime_binary:type_desc(), term()) -> {ok, iodata()} | {error, term()} | miss.
+encode_repr({struct, {ref, Module, Name}}, Value) ->
+    case repr_flavor(Module, Name, Value) of
+        {ok, Flavor, Arg} ->
+            case repr_codec_cached(Module, Name, Flavor) of
+                {Encode, _} ->
+                    repr_encode_apply(Module, Name, Flavor, Encode, Arg);
+                false ->
+                    miss;
+                cold ->
+                    case repr_probe(Module, Name, Flavor) of
+                        {_, _} -> encode_repr({struct, {ref, Module, Name}}, Value);
+                        false -> miss
+                    end
+            end;
+        miss ->
+            miss
+    end;
+encode_repr(_Desc, _Value) ->
+    miss.
+
+repr_flavor(Module, Name, Value) ->
+    case thrift_runtime_native:is_native(Value) of
+        true ->
+            try
+                {_RecModule, _RecName, FieldMap} = thrift_runtime_native:fields(Value),
+                {ok, map, FieldMap}
+            catch
+                _:_ -> miss
+            end;
+        false ->
+            case is_tuple(Value) of
+                true ->
+                    case repr_mode_of(Module, Name) of
+                        record -> {ok, record, Value};
+                        _ -> miss
+                    end;
+                false ->
+                    case is_map(Value) of
+                        true -> {ok, map, Value};
+                        false -> miss
+                    end
+            end
+    end.
+
+repr_mode_of(Module, Name) ->
+    try Module:record_fields(Name) of
+        {Tag, _} when is_atom(Tag) -> record;
+        _ -> other
+    catch
+        error:undef -> other
+    end.
+
+-spec repr_encode_apply(module(), binary(), thrift_runtime:repr(), atom(), term()) ->
+    {ok, iodata()} | {error, term()} | miss.
+repr_encode_apply(Module, Name, Flavor, Encode, Arg) ->
+    try
+        Module:Encode(Arg)
+    catch
+        error:undef:Stack ->
+            case erlang:function_exported(Module, Encode, 1) of
+                true ->
+                    erlang:raise(error, undef, Stack);
+                false ->
+                    repr_stale(Module, Name, Flavor),
+                    miss
+            end
+    end.
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
 -spec encode(type_desc(), term()) -> {ok, iodata()} | {error, term()}.

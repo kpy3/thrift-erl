@@ -146,6 +146,24 @@ strict_check(Desc, Value, Opts) ->
 -spec encode_wire(thrift_runtime_binary:type_desc(), term(), module()) ->
     {ok, iodata()} | {error, term()}.
 encode_wire(Desc, Value, Mod) ->
+    case Mod of
+        thrift_runtime_binary ->
+            case thrift_runtime_binary:encode_repr(Desc, Value) of
+                {ok, IoData} ->
+                    {ok, IoData};
+                %% Any fast-path failure retries the two-pass path:
+                %% it answers the identical error for genuinely bad
+                %% values and still accepts shapes the one-pass family
+                %% cannot represent (mixed nesting).
+                _ ->
+                    encode_wire_two_pass(Desc, Value, Mod)
+            end;
+        _ ->
+            encode_wire_two_pass(Desc, Value, Mod)
+    end.
+
+%% The two-pass baseline: conversion first, then the wire codec.
+encode_wire_two_pass(Desc, Value, Mod) ->
     try thrift_runtime_record:to_wire(Desc, Value) of
         Wire ->
             Mod:encode(Desc, Wire)
@@ -175,21 +193,43 @@ decode(Desc, Binary, Repr, Protocol) ->
         ok ->
             case protocol_module(Protocol) of
                 {ok, Mod} ->
-                    case Mod:decode(Desc, Binary) of
-                        {ok, Value, <<>>} ->
-                            decode_repr(Desc, Value, Repr);
-                        {ok, _Value, _Rest} ->
-                            {error, trailing};
-                        more ->
-                            {error, truncated};
-                        {error, Reason} ->
-                            {error, Reason}
-                    end;
+                    decode_fast(Mod, Desc, Binary, Repr);
                 {error, Reason} ->
                     {error, Reason}
             end;
         {error, _} = Error ->
             Error
+    end.
+
+%% The one-pass attempt: binary protocol only; any other protocol (or
+%% a miss — hand-written modules, native-mode and sum unions) takes
+%% the decode-to-wire + conversion path with identical results.
+decode_fast(thrift_runtime_binary, Desc, Binary, Repr) ->
+    case thrift_runtime_binary:decode_repr(Desc, Binary, Repr) of
+        miss ->
+            decode_two_pass(thrift_runtime_binary, Desc, Binary, Repr);
+        {ok, Value, <<>>} ->
+            {ok, Value};
+        {ok, _Value, _Rest} ->
+            {error, trailing};
+        more ->
+            {error, truncated};
+        {error, _} = Error ->
+            Error
+    end;
+decode_fast(Mod, Desc, Binary, Repr) ->
+    decode_two_pass(Mod, Desc, Binary, Repr).
+
+decode_two_pass(Mod, Desc, Binary, Repr) ->
+    case Mod:decode(Desc, Binary) of
+        {ok, Value, <<>>} ->
+            decode_repr(Desc, Value, Repr);
+        {ok, _Value, _Rest} ->
+            {error, trailing};
+        more ->
+            {error, truncated};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% A map-representation or native-representation struct has no record

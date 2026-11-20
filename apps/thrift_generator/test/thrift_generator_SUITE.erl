@@ -53,6 +53,7 @@
     repr_native_binary_encoders/1,
     repr_native_binary_decoders/1,
     repr_native_native_and_index/1,
+    repr_native_facade_routing/1,
     repr_wide_struct/1,
     compact_enum_literals/1,
     compact_static_headers/1,
@@ -96,6 +97,7 @@ all() ->
         repr_native_binary_encoders,
         repr_native_binary_decoders,
         repr_native_native_and_index,
+        repr_native_facade_routing,
         repr_wide_struct,
         compact_enum_literals,
         compact_static_headers,
@@ -1141,6 +1143,94 @@ repr_native_native_and_index(Config) ->
         false ->
             ok
     end,
+    ok.
+
+%% Facade routing: thrift_runtime decode/4 and encode/2 take the
+%% one-pass path underneath for eligible inputs and fall back to the
+%% two-pass conversion otherwise, with identical bytes, values and
+%% error terms on every shape.
+
+repr_native_facade_routing(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativefacade.thrift",
+        <<
+            "namespace erl reprnativefacade\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner,\n"
+            "  3: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativefacade_types,
+    Desc = {struct, {ref, Mod, <<"Outer">>}},
+    Wire = #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}, <<"n">> => 7},
+    {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
+    Bin = iolist_to_binary(Io),
+    %% decode/4 one-pass equals the two-pass result
+    {ok, Rec} = thrift_runtime:decode(Desc, Bin, record),
+    ?assertEqual({reprnativefacade_outer, <<"o-1">>, {reprnativefacade_inner, <<"v">>}, 7}, Rec),
+    {ok, Map} = thrift_runtime:decode(Desc, Bin, map),
+    ?assertEqual(#{id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}, Map),
+    {ok, Struct} = thrift_runtime:decode(Desc, Bin, struct),
+    ?assertEqual(
+        #{'__struct__' => reprnativefacade_outer, id => <<"o-1">>, inner => #{'__struct__' => reprnativefacade_inner, s => <<"v">>}, n => 7},
+        Struct
+    ),
+    %% decode of a record-mode struct under map mode keeps working
+    %% through the index; truncated and trailing behave as today
+    {error, truncated} = thrift_runtime:decode(Desc, binary:part(Bin, 0, byte_size(Bin) - 1), record),
+    {error, trailing} = thrift_runtime:decode(Desc, <<Bin/binary, 0>>, record),
+    %% encode/2 from every accepted shape equals the wire encode
+    {ok, EncRec} = thrift_runtime:encode(Desc, Rec),
+    ?assertEqual(Bin, EncRec),
+    {ok, EncMap} = thrift_runtime:encode(Desc, Map),
+    ?assertEqual(Bin, EncMap),
+    %% binary-keyed wire map input keeps identical bytes (Review Focus 1)
+    {ok, EncWire} = thrift_runtime:encode(Desc, Wire),
+    ?assertEqual(Bin, EncWire),
+    %% __struct__ map input encodes identically (Review Focus 2)
+    {ok, EncStruct} = thrift_runtime:encode(Desc, Struct),
+    ?assertEqual(Bin, EncStruct),
+    %% wrong-tag tuple: the unwrapped conversion error (Review Focus 5)
+    ?assertEqual(
+        {error, {value_does_not_match_type, {wrong, <<"o-1">>, {reprnativefacade_inner, <<"v">>}, 7}}},
+        thrift_runtime:encode(Desc, {wrong, <<"o-1">>, {reprnativefacade_inner, <<"v">>}, 7})
+    ),
+    %% mixed nesting (record holding a wire-map nested value): the
+    %% fast path rejects it, the facade retries two-pass and answers
+    %% exactly what the two-pass path answers today — success
+    Mixed = {reprnativefacade_outer, <<"o-1">>, #{<<"s">> => <<"v">>}, 7},
+    {ok, EncMixed} = thrift_runtime:encode(Desc, Mixed),
+    TwoPassMixed = begin
+        WireMixed = thrift_runtime_record:to_wire(Desc, Mixed),
+        iolist_to_binary(element(2, thrift_runtime_binary:encode(Desc, WireMixed)))
+    end,
+    ?assertEqual(TwoPassMixed, EncMixed),
+    %% non-eligible input falls back with today's error
+    ?assertEqual(
+        {error, {value_does_not_match_type, not_a_value}},
+        thrift_runtime:encode(Desc, not_a_value)
+    ),
+    %% the fast path left its verdicts in the dispatch cache
+    CacheKey = {thrift_runtime_binary, repr_codec_mfa, Mod},
+    Cache = persistent_term:get(CacheKey),
+    ?assertMatch(#{ {<<"Outer">>, record} := {_, _} }, Cache),
+    ?assertMatch(#{ {<<"Outer">>, map} := {_, _} }, Cache),
+    _ = persistent_term:erase(CacheKey),
     ok.
 
 %% RPC params/result hooks: the generated service info carries

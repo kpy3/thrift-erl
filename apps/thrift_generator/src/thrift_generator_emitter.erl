@@ -49,6 +49,7 @@ the descriptor terms, which keeps the emitter declarative.
     section_label/1,
     struct_type/1,
     sum_mode/1,
+    map_key_type/1,
     type_desc/2,
     field_atom/1,
     record_tag_of/2,

@@ -1150,11 +1150,19 @@ repr_decode_struct_forms(S, Ctx, Enums) ->
     Fields = S#tg_struct.fields,
     Bits = required_bits(Fields),
     Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
+    StructTag =
+        case thrift_generator_emitter:has_record(S) of
+            true -> Tag;
+            %% Map-mode structs tag their struct maps by the wire name
+            %% (the same rule the descriptor engine's
+            %% wire_to_struct_map(record_tag(Name)) follows).
+            false -> binary_to_atom(thrift_generator_names:snake(S#tg_struct.name), utf8)
+        end,
     MapName = repr_decode_name(Decode, map),
     StructName = repr_decode_name(Decode, struct),
     ModAtom = types_module_atom(Ctx#ectx.current),
     MapForms = repr_decode_one(MapName, Fields, FieldTypes, Bits, map, undefined, ModAtom, Ctx, Enums),
-    StructForms = repr_decode_one(StructName, Fields, FieldTypes, Bits, struct, Tag, ModAtom, Ctx, Enums),
+    StructForms = repr_decode_one(StructName, Fields, FieldTypes, Bits, struct, StructTag, ModAtom, Ctx, Enums),
     case thrift_generator_emitter:has_record(S) of
         true ->
             RecName = repr_decode_name(Decode, record),
@@ -1312,19 +1320,32 @@ repr_acc_put(_Flavor, F, _N, V) ->
 %% targets answer to the map flavor); containers decode through the
 %% repr helpers with set-impl upgrades.
 
-repr_field_decode({struct, {ref, TypesMod, Local}}, Bin, Flavor, Ctx, _Enums, _Suffix) ->
-    NestedFlavor =
-        case (Flavor =:= record orelse Flavor =:= native) andalso not nested_has_record(TypesMod, Local, Ctx) of
-            true -> map;
-            false -> Flavor
-        end,
-    repr_struct_decode_call(TypesMod, Local, Bin, NestedFlavor, Ctx);
+repr_field_decode({struct, {ref, TypesMod, Local}}, Bin, Flavor, Ctx, Enums, Suffix) ->
+    case repr_nested_route(TypesMod, Local, Flavor, Ctx) of
+        {repr, NestedFlavor} ->
+            repr_struct_decode_call(TypesMod, Local, Bin, NestedFlavor, Ctx);
+        wire ->
+            decode_wire_expr({struct, {ref, TypesMod, Local}}, Bin, Ctx, Enums, Suffix)
+    end;
 repr_field_decode({set, Elem, ordset}, Bin, Flavor, _Ctx, Enums, _Suffix) ->
     {Dec, _Aux} = repr_decode_container_names({set, Elem}, Enums, Flavor),
-    remote(ordsets, from_list, [call_local(Dec, [Bin])]);
+    'case'(call_local(Dec, [Bin]), [
+        %% The struct loop consumes the triple and recurses on the rest,
+        %% so the impl upgrade must stay inside the value slot.
+        ok3_bind_clause(v("Vs"), v("RestSet"), ok3(remote(ordsets, from_list, [v("Vs")]), v("RestSet"))),
+        clause([at(more)], none, [at(more)]),
+        %% error_clause/0 binds the shared `Err' — unsafe next to the
+        %% outer case's own error clause, so this one binds its own in
+        %% the pattern (the error_clause shape, renamed).
+        clause([{match, ?ANNO, tuple_t([at(error), v("_")]), v("ErrSet")}], none, [v("ErrSet")])
+    ]);
 repr_field_decode({set, Elem, sets}, Bin, Flavor, _Ctx, Enums, _Suffix) ->
     {Dec, _Aux} = repr_decode_container_names({set, Elem}, Enums, Flavor),
-    remote(sets, from_list, [call_local(Dec, [Bin])]);
+    'case'(call_local(Dec, [Bin]), [
+        ok3_bind_clause(v("Vs"), v("RestSet"), ok3(remote(sets, from_list, [v("Vs")]), v("RestSet"))),
+        clause([at(more)], none, [at(more)]),
+        clause([{match, ?ANNO, tuple_t([at(error), v("_")]), v("ErrSet")}], none, [v("ErrSet")])
+    ]);
 repr_field_decode({set, Elem}, Bin, Flavor, _Ctx, Enums, _Suffix) ->
     {Dec, _Aux} = repr_decode_container_names({set, Elem}, Enums, Flavor),
     call_local(Dec, [Bin]);
@@ -1389,16 +1410,14 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
             clause(
                 [bin_pat([{i(Wire), i(8), [big, unsigned]}, {v("Size"), i(32), [big, signed]}, {v("Rest"), default, [binary]}])],
                 none,
-                [
-                    'case'(call_local(DecElems, [v("Rest"), v("Size"), nil()]), [
-                        ok_bind_clause(v("Vs"), ok3(v("Vs"), v("Rest")))
-                    ])
-                ]
+                %% The elems tail carries the consumed rest out itself;
+                %% `more` and `{error, _}` propagate unchanged.
+                [call_local(DecElems, [v("Rest"), v("Size"), nil()])]
             ),
             clause([v("_")], none, [at(more)])
         ]},
         {function, ?ANNO, DecElems, 3, [
-            clause([v("_Rest"), i(0), v("Acc")], none, [ok_t(remote(lists, reverse, [v("Acc")]))]),
+            clause([v("Rest"), i(0), v("Acc")], none, [ok3(remote(lists, reverse, [v("Acc")]), v("Rest"))]),
             clause(
                 [
                     bin_pat([{v("_"), default, default}, {v("_"), i(32), [big, signed]}, {v("_Rest"), default, [binary]}]),
@@ -1435,16 +1454,12 @@ repr_decode_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
             clause(
                 [bin_pat([{i(KWire), i(8), [big, unsigned]}, {i(VWire), i(8), [big, unsigned]}, {v("Size"), i(32), [big, signed]}, {v("Rest"), default, [binary]}])],
                 none,
-                [
-                    'case'(call_local(DecPairs, [v("Rest"), v("Size"), map_empty()]), [
-                        ok_bind_clause(v("M"), ok3(v("M"), v("Rest")))
-                    ])
-                ]
+                [call_local(DecPairs, [v("Rest"), v("Size"), map_empty()])]
             ),
             clause([v("_")], none, [at(more)])
         ]},
         {function, ?ANNO, DecPairs, 3, [
-            clause([v("_Rest"), i(0), v("Acc")], none, [ok_t(v("Acc"))]),
+            clause([v("Rest"), i(0), v("Acc")], none, [ok3(v("Acc"), v("Rest"))]),
             clause(
                 [
                     bin_pat([{v("_"), default, default}, {v("_"), i(32), [big, signed]}, {v("_Rest"), default, [binary]}]),
@@ -1827,39 +1842,64 @@ repr_field_encode(T, Val, Flavor, _Ctx, Enums, _Suffix) ->
     {Enc, _Elems} = repr_container_names(T, Enums, Flavor),
     call_local(Enc, [Val]).
 
-nested_has_record(TypesMod, Local, Ctx) ->
-    %% Refs carry the types module atom for same-file structs and the
-    %% include-qualified module key for cross-file ones.
-    Mod =
-        case maps:get(TypesMod, Ctx#ectx.modules, undefined) of
-            undefined ->
-                case maps:get(TypesMod, Ctx#ectx.include_modules, undefined) of
-                    undefined ->
-                        lists:foldl(
-                            fun(M, Acc) ->
-                                case Acc =:= undefined andalso types_module_atom(M#tg_module.name) =:= TypesMod of
-                                    true -> M;
-                                    false -> Acc
-                                end
-                            end,
-                            undefined,
-                            maps:values(Ctx#ectx.modules)
-                        );
-                    Key ->
-                        maps:get(Key, Ctx#ectx.modules, undefined)
-                end;
-            M ->
-                M
-        end,
-    case Mod of
-        undefined ->
-            true;
+%% Where a nested struct decode goes: a map-mode target answers with
+%% its map decoder for atom keys, but a {map, binary} target's map
+%% decoder would mint atom keys the conversion never produces — its
+%% wire decoder IS its representation, so the nested call stays on the
+%% wire function. Record-mode targets follow the parent's flavor.
+repr_nested_route(TypesMod, Local, Flavor, Ctx) ->
+    case nested_mode(TypesMod, Local, Ctx) of
+        record ->
+            {repr, Flavor};
+        {map, atom} ->
+            {repr, map};
+        {map, binary} ->
+            wire;
         _ ->
+            {repr, Flavor}
+    end.
+
+nested_mode(TypesMod, Local, Ctx) ->
+    case nested_module(TypesMod, Local, Ctx) of
+        undefined ->
+            record;
+        Mod ->
             case lists:search(fun(S) -> S#tg_struct.name =:= Local end, Mod#tg_module.structs) of
-                {value, S} -> thrift_generator_emitter:has_record(S);
-                false -> true
+                {value, S} ->
+                    case thrift_generator_emitter:has_record(S) of
+                        true -> record;
+                        false -> {map, thrift_generator_emitter:map_key_type(S)}
+                    end;
+                false ->
+                    record
             end
     end.
+
+nested_module(TypesMod, Local, Ctx) ->
+    _ = Local,
+    case maps:get(TypesMod, Ctx#ectx.modules, undefined) of
+        undefined ->
+            case maps:get(TypesMod, Ctx#ectx.include_modules, undefined) of
+                undefined ->
+                    lists:foldl(
+                        fun(M, Acc) ->
+                            case Acc =:= undefined andalso types_module_atom(M#tg_module.name) =:= TypesMod of
+                                true -> M;
+                                false -> Acc
+                            end
+                        end,
+                        undefined,
+                        maps:values(Ctx#ectx.modules)
+                    );
+                Key ->
+                    maps:get(Key, Ctx#ectx.modules, undefined)
+            end;
+        M ->
+            M
+    end.
+
+nested_has_record(TypesMod, Local, Ctx) ->
+    nested_mode(TypesMod, Local, Ctx) =:= record.
 
 repr_struct_encode_call(TypesMod, Local, V, Flavor, Ctx) ->
     {Encode, _Decode} =
@@ -2059,7 +2099,10 @@ repr_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
                         {match, ?ANNO, v("Sorted"), remote(lists, sort, [SortFun, v("Pairs")])},
                         %% The encoded-key term shape matches the wire
                         %% helper's, so the sort order (map pairs sort
-                        %% by the encoded-key term) is identical.
+                        %% by the encoded-key term) is identical. The
+                        %% sorted accumulator holds `{KE, VE}' tuples;
+                        %% flatten them into the iodata like the wire
+                        %% helper's pairs_lc does.
                         ok_t(
                             list_lit([
                                 list_lit([
@@ -2069,7 +2112,7 @@ repr_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
                                     ]},
                                     i32_seg(call_local(length, [v("Sorted")]))
                                 ]),
-                                v("Sorted")
+                                pairs_lc()
                             ])
                         )
                     ]),
