@@ -47,6 +47,7 @@
     required_decode_bitmask/1,
     required_decode_order_many/1,
     empty_union_no_dead_code/1,
+    json_fast_path_helpers/1,
     rpc_specialized_codecs/1,
     rpc_loopback_hooks/1,
     rpc_loopback_fallback/1,
@@ -81,6 +82,7 @@ all() ->
         required_decode_bitmask,
         required_decode_order_many,
         empty_union_no_dead_code,
+        json_fast_path_helpers,
         rpc_specialized_codecs,
         rpc_loopback_hooks,
         rpc_loopback_fallback,
@@ -615,6 +617,42 @@ empty_union_no_dead_code(Config) ->
     ?assertEqual(nomatch, re:run(Src, <<"encode_emptyunion_e_json_fields">>, [])),
     ?assertMatch({match, _}, re:run(Src, <<"union_empty">>, [])),
     ?assertMatch([{ok, _, _}], thrift_generator_emitter:compile_sources(Model)),
+    ok.
+
+%% JSON string/number helpers scan in one pass without per-byte list
+%% accumulation: plain string runs return a binary:part slice (the
+%% legacy cons loop only runs past the first escape), number tokens come
+%% back as slices with a float flag, and json_escape returns plain
+%% binaries untouched. (The pins match erl_prettypr's concrete layout.)
+
+json_fast_path_helpers(Config) ->
+    Path = write_snippet(
+        Config,
+        "jsonfast.thrift",
+        <<
+            "namespace erl jsonfast\n"
+            "struct S {\n"
+            "  1: optional string s,\n"
+            "  2: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    %% plain-run string scanner with zero-copy slices
+    ?assertMatch({match, _}, re:run(Src, <<"json_scan_string_plain">>, [])),
+    ?assertMatch({match, _}, re:run(Src, <<"binary:part">>, [])),
+    %% escape detection folded into a two-argument json_escape (no
+    %% forwarder call, plain prefixes returned as-is)
+    ?assertMatch({match, _}, re:run(Src, <<"json_escape\\(Rest, Orig\\)">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"json_escape_needed">>, [])),
+    %% single-byte plain strings return immediately, without the scan loop
+    ?assertMatch({match, _}, re:run(Src, <<"json_escape\\(<<C:8/big-unsigned>>, Orig\\)">>, [])),
+    %% the list-based number classification is gone
+    ?assertEqual(nomatch, re:run(Src, <<"lists:last">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"lists:any">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"json_float_marker">>, [])),
     ok.
 
 %% RPC params/result hooks: the generated service info carries
