@@ -40,13 +40,14 @@ representation. Use `scripts/bench-regression`, which supplies generation
 and cleanup.
 """.
 
--export([main/1, median/1, evaluate/2]).
+-export([main/1, median/1, evaluate/2, cases/1]).
 -export([repeat/3, encode/1, decode/1, call/1, to_wire/1, from_wire/1]).
+-export([decode_twopass/1, decode_onepass/1, encode_twopass/1, encode_onepass/1, onepass_cases/1]).
 -export_type([sample/0, evaluation/0]).
 
 -type protocol_name() :: binary | compact | json.
 -type repr_name() :: record | map | struct | sum | native.
--type entry() :: public | direct | conversion.
+-type entry() :: public | direct | conversion | onepass.
 -type operation() :: encode | decode | to_wire | from_wire.
 -type sample() :: {BaseUs :: pos_integer(), HeadUs :: pos_integer(), Iterations :: pos_integer()}.
 -type evaluation() :: #{
@@ -360,7 +361,9 @@ cases(Specs) ->
         selected(Protocol, Entry),
         Op <- [encode, decode]
     ],
-    Codec ++ lists:append([conversion_cases(Spec) || Spec <- Specs]).
+    Codec ++
+        lists:append([conversion_cases(Spec) || Spec <- Specs]) ++
+        lists:append([onepass_cases(Spec) || Spec <- Specs]).
 
 %% Conversion cells: one per struct x representation x direction the
 %% struct's mode supports. The representation sits in the protocol slot
@@ -404,6 +407,80 @@ conversion_cases(Spec) ->
 selected_conversion(Repr) ->
     selected_env("THRIFT_BENCH_ENTRY", <<"conversion">>) andalso
         selected_env("THRIFT_BENCH_REPR", atom_to_binary(Repr, utf8)).
+
+%% One-pass facade cells: `base` is the explicit two-pass baseline
+%% (codec decode/encode + thrift_runtime_record conversion) and `head`
+%% is the facade fast path, both on the head side's modules — the pair
+%% measures the algorithm, not a code generation. Both baseline and
+%% head exist from this task on, so the pre-fast-path run reads
+%% ratio ~= 1.00.
+
+onepass_cases(Spec) ->
+    Name = maps:get(struct, Spec),
+    Value = maps:get(value, Spec),
+    HeadModule = maps:get(head_module, Spec),
+    HeadDesc = {struct, {ref, HeadModule, Name}},
+    Reprs = [record, map, struct] ++ native_repr(),
+    lists:append([
+        begin
+            Bin =
+                case thrift_runtime_binary:encode(HeadDesc, Value) of
+                    {ok, Io} -> iolist_to_binary(Io)
+                end,
+            EncValue =
+                case Repr of
+                    struct -> struct_input(HeadModule, Name, Value);
+                    _ -> conversion_input(HeadModule, Name, Repr, to_wire, Value)
+                end,
+            [
+                onepass_case(Spec, Repr, decode, {HeadDesc, Bin, Repr}),
+                onepass_case(Spec, Repr, encode, {HeadDesc, EncValue})
+             || selected_onepass(Repr)
+            ]
+        end
+     || Repr <- Reprs
+    ]).
+
+struct_input(Module, Name, Value) ->
+    {Tag, _} = Module:record_fields(Name),
+    (conversion_input(Module, Name, map, to_wire, Value))#{'__struct__' => Tag}.
+
+onepass_case(Spec, Repr, Op, HeadArg) ->
+    #{
+        key => {maps:get(id, Spec), Repr, onepass, Op},
+        base => {onepass_base_op(Op), HeadArg},
+        head => {onepass_head_op(Op), HeadArg},
+        n => 0
+    }.
+
+onepass_base_op(decode) -> decode_twopass;
+onepass_base_op(encode) -> encode_twopass.
+
+onepass_head_op(decode) -> decode_onepass;
+onepass_head_op(encode) -> encode_onepass.
+
+selected_onepass(Repr) ->
+    selected_env("THRIFT_BENCH_ENTRY", <<"onepass">>) andalso
+        selected_env("THRIFT_BENCH_REPR", atom_to_binary(Repr, utf8)).
+
+decode_twopass({Desc, Bin, Repr}) ->
+    {ok, Wire, <<>>} = thrift_runtime_binary:decode(Desc, Bin),
+    thrift_runtime_record:from_wire(Desc, Wire, Repr).
+
+decode_onepass({Desc, Bin, Repr}) ->
+    {ok, Value} = thrift_runtime:decode(Desc, Bin, Repr),
+    Value.
+
+encode_twopass({Desc, Value}) ->
+    Wire = thrift_runtime_record:to_wire(Desc, Value),
+    {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
+    %% The facade answers {ok, binary()} — flatten on the baseline too,
+    %% so both sides measure the same output contract.
+    iolist_to_binary(Io).
+
+encode_onepass({Desc, Value}) ->
+    {ok, Io} = thrift_runtime:encode(Desc, Value),
+    Io.
 
 -spec repr_mode_of(module(), binary()) -> record | {map, atom | binary} | sum | native | wire.
 repr_mode_of(Module, Name) ->
@@ -598,7 +675,7 @@ report(C, Samples0, Threshold) ->
         pass := Pass,
         inconclusive := Inconclusive
     } = Evaluation,
-    Gate = Entry =:= direct orelse Entry =:= conversion,
+    Gate = Entry =:= direct orelse Entry =:= conversion orelse Entry =:= onepass,
     io:format(
         "~ts ~p ~p ~p base=~.1f head=~.1f ratio=~.4f ci95=[~.4f,~.4f] delta=~.2f% pass=~p inc=~p gate=~p~n",
         [

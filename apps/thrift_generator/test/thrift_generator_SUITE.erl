@@ -49,6 +49,7 @@
     empty_union_no_dead_code/1,
     json_fast_path_helpers/1,
     repr_direct_converters/1,
+    onepass_cells_exist/1,
     repr_wide_struct/1,
     compact_enum_literals/1,
     compact_static_headers/1,
@@ -88,6 +89,7 @@ all() ->
         empty_union_no_dead_code,
         json_fast_path_helpers,
         repr_direct_converters,
+        onepass_cells_exist,
         repr_wide_struct,
         compact_enum_literals,
         compact_static_headers,
@@ -898,6 +900,52 @@ compact_static_headers(Config) ->
     ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\031\">>">>)),
     ?assertNotEqual(nomatch, binary:match(Src, <<"encode_statichead_b_compact_fields_f4(Value, _LastId)">>)),
     ?assertMatch([{ok, _, _}, {ok, _, _}], lists:sort(thrift_generator_emitter:compile_sources(Model))),
+    ok.
+
+%% Facade-level one-pass measurement cells exist: the bench harness
+%% exposes an `onepass` case family keyed {Id, Repr, onepass, Op},
+%% pairing the explicit two-pass baseline with the facade fast path.
+%% The cells exist before the fast path does; head then measures the
+%% same code, so the baseline run must read ratio ~= 1.00.
+
+onepass_cells_exist(Config) ->
+    Path = write_snippet(
+        Config,
+        "onepasspin.thrift",
+        <<
+            "namespace erl onepasspin\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Spec = #{
+        id => <<"Outer">>,
+        struct => <<"Outer">>,
+        value => #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}},
+        base_prefix => <<"onepasspin">>,
+        base_module => onepasspin_types,
+        head_prefix => <<"onepasspin">>,
+        head_module => onepasspin_types
+    },
+    CellKeys = [maps:get(key, C) || C <- thrift_bench_regression:onepass_cases(Spec)],
+    ?assertMatch(
+        [{<<"Outer">>, record, onepass, decode} | _],
+        [K || K = {_, record, onepass, decode} <- CellKeys]
+    ),
     ok.
 
 %% RPC params/result hooks: the generated service info carries
