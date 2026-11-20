@@ -59,7 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   XtructLong 2 KB-string cell) pass the 0.99 gate; direct JSON gains reach
   +398%/+192% (long-string encode/decode), +37%/+17% (number-heavy
   CrossModule), +42%/+10% (SomeUnion). Wire bytes and error terms are
-  unchanged.
+  unchanged. Note: fully plain decoded strings are now zero-copy slices,
+  so a decoded value may retain the underlying input buffer (slices of
+  64 bytes or less are still copied to the heap).
 
 ### Runtime (`thrift_runtime`)
 

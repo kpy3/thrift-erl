@@ -1947,8 +1947,8 @@ helper_forms(json_escape) ->
     %% whole binary while the first argument is consumed.
     [
         {function, ?ANNO, json_escape, 2, [
-            %% One plain byte returns directly: short flag-like strings
-            %% skip the scan loop entirely (Insanity carries 100 of them).
+            %% One plain byte returns directly: short strings skip the
+            %% scan loop entirely, which dominates flag-like payloads.
             clause(
                 [bin_pat([{v("C"), i(8), [big, unsigned]}]), v("Orig")],
                 [
