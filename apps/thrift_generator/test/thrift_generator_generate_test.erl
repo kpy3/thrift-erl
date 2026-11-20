@@ -51,7 +51,13 @@ generate_check_up_to_date_test() ->
         {ok, Generated} = thrift_generator:generate(File, OutDir, #{}),
         Modules = [Module || #{module := Module} <- Generated],
         ?assertEqual(
-            [checkgate_pinger_client, checkgate_pinger_handler, checkgate_pinger_server, checkgate_types],
+            [
+                checkgate_pinger_client,
+                checkgate_pinger_handler,
+                checkgate_pinger_server,
+                checkgate_types,
+                checkgate_types_repr
+            ],
             lists:sort(Modules)
         ),
         ?assertEqual(ok, thrift_generator:check(File, OutDir, #{})),

@@ -820,6 +820,15 @@ Introspection in the spirit of the official generator: `struct_info/1`,
 `enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`,
 `tag_index/0` and `convert/2` in `<mod>_types.erl`.
 
+Record-mode structs also generate a companion `<mod>_types_repr.erl`
+with direct representation converters `repr_to_wire_<name>/1` /
+`repr_from_wire_<name>/2` (literal field atoms, no descriptor walk)
+registered in its `repr_index/1`; `thrift_runtime_record` dispatches
+through it for `to_wire`/`from_wire`. The converters live outside the
+types module on purpose — generated-code layout is a measured
+performance variable. Sum unions, map-mode and native-mode structs get
+no converters and keep the descriptor engine.
+
 ## Performance
 
 The codec hot path is benchmarked against the vendored official Apache

@@ -116,7 +116,7 @@ generate() ->
 compile_all_modules_test() ->
     Results = generate(),
     Names = [Name || {ok, Name, _} <- Results],
-    ?assertEqual([t_svc_client, t_svc_handler, t_svc_server, t_types], lists:sort(Names)),
+    ?assertEqual([t_svc_client, t_svc_handler, t_svc_server, t_types, t_types_repr], lists:sort(Names)),
     ok.
 
 struct_info_descriptor_test() ->
@@ -752,7 +752,13 @@ namespace_prefix_test() ->
         Results
     ),
     ?assertEqual(
-        ['demo_widgets_svc_client', 'demo_widgets_svc_handler', 'demo_widgets_svc_server', demo_widgets_types],
+        [
+            'demo_widgets_svc_client',
+            'demo_widgets_svc_handler',
+            'demo_widgets_svc_server',
+            demo_widgets_types,
+            demo_widgets_types_repr
+        ],
         lists:sort([Name || {ok, Name, _} <- Results])
     ),
 

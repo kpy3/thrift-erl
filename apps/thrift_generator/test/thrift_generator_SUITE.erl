@@ -48,6 +48,8 @@
     required_decode_order_many/1,
     empty_union_no_dead_code/1,
     json_fast_path_helpers/1,
+    repr_direct_converters/1,
+    repr_wide_struct/1,
     rpc_specialized_codecs/1,
     rpc_loopback_hooks/1,
     rpc_loopback_fallback/1,
@@ -83,6 +85,8 @@ all() ->
         required_decode_order_many,
         empty_union_no_dead_code,
         json_fast_path_helpers,
+        repr_direct_converters,
+        repr_wide_struct,
         rpc_specialized_codecs,
         rpc_loopback_hooks,
         rpc_loopback_fallback,
@@ -432,7 +436,7 @@ base_fields_guarded_encode(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     Patterns = [
         %% binary: i32 payload segment right after the header literal
         <<"1:16\\/big-signed>>,\\s*<<V:32\\/big-signed>>">>,
@@ -478,7 +482,7 @@ required_encode_map_pattern(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     %% one map-pattern clause per protocol (binary, compact, json)
     ?assertMatch(
         {match, [_, _, _]},
@@ -513,7 +517,7 @@ union_encode_count(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     ?assertMatch(
         {match, _},
         re:run(Src, <<"maps:is_key\\(<<\"a\">>, Value\\) of\\s*true\\s*->\\s*1;\\s*false\\s*->\\s*0">>, [dotall])
@@ -549,7 +553,7 @@ required_decode_bitmask(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     %% full mask literal (fields s=bit 1, n=bit 2) at the stop byte:
     %% binary and compact loops close on it, json closes in _done
     ?assertMatch({match, [_, _]}, re:run(Src, <<"<<0,\\s*Rest\\/binary>>, 3, Acc">>, [global])),
@@ -611,7 +615,7 @@ empty_union_no_dead_code(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     ?assertEqual(nomatch, re:run(Src, <<"encode_emptyunion_e_wire_fields">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"encode_emptyunion_e_compact_fields">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"encode_emptyunion_e_json_fields">>, [])),
@@ -639,7 +643,7 @@ json_fast_path_helpers(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    [#{source := Src}] = thrift_generator_emitter:sources(Model),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     %% plain-run string scanner with zero-copy slices
     ?assertMatch({match, _}, re:run(Src, <<"json_scan_string_plain">>, [])),
     ?assertMatch({match, _}, re:run(Src, <<"binary:part">>, [])),
@@ -653,6 +657,149 @@ json_fast_path_helpers(Config) ->
     ?assertEqual(nomatch, re:run(Src, <<"lists:last">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"lists:any">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"json_float_marker">>, [])),
+    ok.
+
+%% Direct representation converters: record-mode structs emit
+%% `repr_to_wire_<name>` / `repr_from_wire_<name>` with literal field
+%% atoms and binary names, registered in a `repr_index/1` the runtime
+%% probes instead of walking descriptors. Behavior must match the
+%% descriptor engine exactly, including the binary-key-first lookup and
+%% the error terms. (The pins match erl_prettypr's concrete layout.)
+
+repr_direct_converters(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprdirect.thrift",
+        <<
+            "namespace erl reprdirect\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: optional string s,\n"
+            "  2: optional i32 n,\n"
+            "  3: optional Inner inner,\n"
+            "  4: optional list<Inner> inners\n"
+            "}\n"
+            "union U {\n"
+            "  1: optional string s\n"
+            "} (erl.union_type = \"sum\")\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    %% the converters live in their own module: the types module's codec
+    %% sections stay byte-identical (BEAM layout is a measured variable)
+    [#{source := TypesSrc}, #{source := Src}] = thrift_generator_emitter:sources(Model),
+    ?assertEqual(nomatch, re:run(TypesSrc, <<"repr_to_wire">>, [])),
+    ?assertMatch({match, _}, re:run(Src, <<"repr_index\\(">>, [])),
+    ?assertMatch({match, _}, re:run(Src, <<"repr_to_wire_outer\\(">>, [])),
+    ?assertMatch({match, _}, re:run(Src, <<"repr_from_wire_outer\\(">>, [])),
+    ?assertMatch({match, _}, re:run(Src, <<"repr_to_wire_inner\\(">>, [])),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    CacheKey = {thrift_runtime_record, repr_mfa, reprdirect_types},
+    _ = persistent_term:erase(CacheKey),
+    Outer = {struct, {ref, reprdirect_types, <<"Outer">>}},
+    %% tuple record input, nested tuple converted too
+    Wire = #{<<"s">> => <<"a">>, <<"n">> => 3, <<"inner">> => #{<<"s">> => <<"b">>}},
+    ?assertEqual(
+        Wire,
+        thrift_runtime_record:to_wire(Outer, {reprdirect_outer, <<"a">>, 3, {reprdirect_inner, <<"b">>}, undefined})
+    ),
+    %% atom-keyed and binary-keyed map inputs agree; unknown keys drop
+    ?assertEqual(Wire, thrift_runtime_record:to_wire(Outer, #{s => <<"a">>, n => 3, inner => #{s => <<"b">>}})),
+    ?assertEqual(Wire, thrift_runtime_record:to_wire(Outer, Wire#{unknown => 1})),
+    %% a binary key wins over the atom key for the same field
+    ?assertEqual(
+        #{<<"s">> => <<"w">>},
+        thrift_runtime_record:to_wire(Outer, #{s => <<"a">>, <<"s">> => <<"w">>})
+    ),
+    %% a present binary key converts even when its value is undefined
+    ?assertEqual(
+        #{<<"s">> => undefined},
+        thrift_runtime_record:to_wire(Outer, #{<<"s">> => undefined})
+    ),
+    %% from_wire: record carries every field, map/struct only the present ones
+    ?assertEqual(
+        {reprdirect_outer, <<"a">>, undefined, undefined, undefined},
+        thrift_runtime_record:from_wire(Outer, #{<<"s">> => <<"a">>}, record)
+    ),
+    ?assertEqual(#{s => <<"a">>}, thrift_runtime_record:from_wire(Outer, #{<<"s">> => <<"a">>}, map)),
+    ?assertEqual(
+        #{'__struct__' => reprdirect_outer, s => <<"a">>},
+        thrift_runtime_record:from_wire(Outer, #{<<"s">> => <<"a">>}, struct)
+    ),
+    %% nested lists convert element-wise
+    ?assertEqual(
+        {reprdirect_outer, undefined, undefined, undefined, [{reprdirect_inner, <<"x">>}]},
+        thrift_runtime_record:from_wire(Outer, #{<<"inners">> => [#{<<"s">> => <<"x">>}]}, record)
+    ),
+    %% error terms match the descriptor engine
+    ?assertError(
+        {value_does_not_match_type, {wrong, 1, 2, 3, 4}},
+        thrift_runtime_record:to_wire(Outer, {wrong, 1, 2, 3, 4})
+    ),
+    %% a tuple of the wrong arity is not this struct's record: the direct
+    %% converter deliberately rejects it where the descriptor engine
+    %% silently truncated (documented divergence)
+    ?assertError(
+        {value_does_not_match_type, {reprdirect_outer, <<"a">>}},
+        thrift_runtime_record:to_wire(Outer, {reprdirect_outer, <<"a">>})
+    ),
+    %% sum unions get no converter: the index answers error, the verdict
+    %% caches as false, and the descriptor engine converts the value
+    UnionDesc = {struct, {ref, reprdirect_types, <<"U">>}},
+    ?assertEqual(#{<<"s">> => <<"v">>}, thrift_runtime_record:to_wire(UnionDesc, {s, <<"v">>})),
+    %% the fast path left its verdicts in the dispatch cache
+    Cache = persistent_term:get(CacheKey),
+    ?assertMatch(#{<<"Outer">> := {_, _, _}}, Cache),
+    ?assertMatch(#{<<"U">> := false}, Cache),
+    %% native target round-trips through the emitted create call (OTP 29+)
+    case thrift_runtime_native:supported() of
+        true ->
+            Native = thrift_runtime_record:from_wire(Outer, Wire, native),
+            ?assert(thrift_runtime_native:is_native(Native)),
+            ?assertEqual(Wire, thrift_runtime_record:to_wire(Outer, Native));
+        false ->
+            ok
+    end,
+    _ = persistent_term:erase(CacheKey),
+    ok.
+
+%% The flat accumulator chain in repr_to_wire/repr_from_wire MUST stay
+%% flat: embedding it into case branches doubles the form tree per
+%% field, and a 100-field struct hangs the compiler. This case keeps a
+%% wide struct in the fixture set so a regression of the chain shape
+%% fails fast instead of timing CI out.
+
+repr_wide_struct(Config) ->
+    Fields = [
+        io_lib:format("  ~p: optional i32 f~p~n", [I, I])
+     || I <- lists:seq(1, 60)
+    ],
+    Path = write_snippet(
+        Config,
+        "reprwide.thrift",
+        iolist_to_binary([
+            "namespace erl reprwide\n",
+            "struct Wide {\n",
+            Fields,
+            "}\n"
+        ])
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := _TypesSrc}, #{source := ReprSrc}] = thrift_generator_emitter:sources(Model),
+    %% a flat chain is linear in the field count; a nested one explodes
+    ?assert(byte_size(ReprSrc) < 500000),
+    [{ok, reprwide_types, _}, {ok, reprwide_types_repr, _}] =
+        thrift_generator_emitter:compile_sources(Model),
     ok.
 
 %% RPC params/result hooks: the generated service info carries
@@ -878,6 +1025,7 @@ loader_namespace_prefix(Config) ->
             source := Src,
             hrl := Hrl
         }
+        | _
     ] = Sources,
     ?assertMatch(
         {match, _},
