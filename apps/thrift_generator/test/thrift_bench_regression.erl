@@ -432,11 +432,15 @@ onepass_cases(Spec) ->
                     struct -> struct_input(HeadModule, Name, Value);
                     _ -> conversion_input(HeadModule, Name, Repr, to_wire, Value)
                 end,
-            [
-                onepass_case(Spec, Repr, decode, {HeadDesc, Bin, Repr}),
-                onepass_case(Spec, Repr, encode, {HeadDesc, EncValue})
-             || selected_onepass(Repr)
-            ]
+            case selected_onepass(Repr) of
+                true ->
+                    [
+                        onepass_case(Spec, Repr, decode, {HeadDesc, Bin, Repr}),
+                        onepass_case(Spec, Repr, encode, {HeadDesc, EncValue})
+                    ];
+                false ->
+                    []
+            end
         end
      || Repr <- Reprs
     ]).
