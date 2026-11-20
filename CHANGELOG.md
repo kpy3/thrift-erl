@@ -9,123 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Generator (`thrift_generator`)
 
-- `scripts/bench-regression` runs a paired historical comparison against a
-  real git ref, with direct/public codec entries, a cross-module fixture,
-  per-cell throughput ratios and a configurable 0.99 regression threshold.
-- Specialized compact codecs keep their private varint/zigzag primitives
-  instead of importing them per call from the runtime. The paired historical
-  benchmark caught regressions above the 1% budget; wire format and generated
-  codec APIs are unchanged.
-- Specialized codecs call cross-module struct codecs directly with the target
-  namespace prefix instead of performing runtime dispatch for every nested
-  value. JSON uses the non-folding decode body. Public ref descriptors and the
-  runtime's generic fallback are unchanged.
-- Every RPC function gets specialized params/result codecs: the generator
-  emits synthetic struct codecs (`<Svc>$<Fn>$params` / `$result`) into the
-  types module for all three protocols, and `service_info/0` carries them as
-  `codecs` hooks keyed by protocol module. Oneway functions carry no result
-  hook. The synthetic names embed `$`, so they can never collide with a
-  declared struct.
-- Binary and compact encode chains for base-type struct fields fold the
-  type/range check into the map-match clause guard and place the payload
-  straight into the chunk, instead of building and destructuring an
-  `{ok, Payload}` tuple per field — the shape the JSON emitter already
-  used. Paired benchmark against `v0.8.0`: all binary/compact encode
-  cells pass the 0.99 gate with direct-encode gains up to +3% on
-  base-heavy structs; wire bytes and error terms are unchanged.
-- Required and union checks no longer allocate on the valid path. Encode
-  matches the required keys in one map pattern and counts union members
-  arithmetically; decode tracks required presence in a bitmask instead
-  of a `lists:keydelete` list (binary) or a `maps:remove` map (compact,
-  JSON), rebuilding the missing-names list only on the error branch.
-  Paired benchmark against `v0.8.0`: all 60 cells (including the new
-  SomeUnion cells) pass the 0.99 gate; direct gains on required-heavy
-  CrossModule reach +90%/+67% (binary encode/decode), +36%/+63%
-  (compact), +40%/+9% (json), and union encode gains +14%/+11%/+6%
-  (binary/compact/json). Wire bytes and error terms are unchanged; the
-  decode missing-names order is deterministic ascending field id (the
-  generic engines' map iteration order only coincides with it for up to
-  32 required fields).
-- `scripts/bench-rpc` runs a paired loopback RPC benchmark (client and server
-  on 127.0.0.1, framed/binary) of a historical git ref against the current
-  checkout, with the same per-cell 0.99 gate as `scripts/bench-regression`.
-- JSON string/number helpers scan in one pass without per-byte list
-  accumulation: plain string runs decode to a zero-copy slice and escape-free
-  strings encode untouched (a single plain byte returns directly, without
-  the scan loop), and number tokens are sliced with the float marker
-  tracked in arguments instead of `lists:last`/`lists:any` over a reversed
-  accumulator. Paired benchmark against `v0.8.0` (31 rounds, borderline
-  cells re-measured at 121 rounds): all 72 cells (including the new
-  XtructLong 2 KB-string cell) pass the 0.99 gate; direct JSON gains reach
-  +398%/+192% (long-string encode/decode), +37%/+17% (number-heavy
-  CrossModule), +42%/+10% (SomeUnion). Wire bytes and error terms are
-  unchanged. Note: fully plain decoded strings are now zero-copy slices,
-  so a decoded value may retain the underlying input buffer (slices of
-  64 bytes or less are still copied to the heap).
-- Record-mode structs (and record-mode unions) generate a companion
-  `<mod>_types_repr.erl` with direct representation converters
-  `repr_to_wire_<name>/1` / `repr_from_wire_<name>/2` (literal field
-  atoms and binary field names) registered in its `repr_index/1`;
-  `thrift_runtime_record` probes it instead of walking descriptors. The
-  converters live outside the types module so its codec sections stay
-  byte-identical — generated-code layout is a measured variable. Paired
-  conversion benchmark against `v0.8.0` (48 cells: struct x
-  representation x direction, 31 rounds): all cells pass the 0.99 gate;
-  `from_wire` gains reach +113..+152% for the atom-keyed `map`/`struct`
-  targets, +67..+97% for `native`, +25..+55% for `record`, and
-  `to_wire` gains +2..+59% with the top end on deeply nested values
-  (CrossModule). Conversion results and error terms are unchanged for
-  well-formed values; on malformed inputs the direct converters are
-  deliberately stricter than the descriptor engine (a tuple of the wrong
-  arity is rejected instead of being silently truncated, and a malformed
-  container raises instead of passing through untouched).
-- `scripts/bench-regression` measures representation conversion as
-  first-class cells: `THRIFT_BENCH_ENTRY=conversion` selects them,
-  `THRIFT_BENCH_REPR` narrows to one representation; native cells run
-  only on OTP 29+.
-- Compact codecs compute enum payloads and statically-known field
-  headers at generation: an enum value the generator knows emits its
-  zigzag-varint bytes as a literal (in the generic engine's iodata term
-  shape — map pairs sort by the encoded-key term), and a field whose
-  predecessor is required gets its one- or two-part header emitted as
-  bytes instead of a runtime `enc_header` call. Wire bytes are
-  unchanged; the dynamic paths remain for values and delta bases the
-  generator cannot prove. Paired benchmark against `v0.8.0`: direct
-  compact encode gains reach +4% (Xtruct), +9% (Insanity), +12%
-  (SomeUnion) and +36% (nested CrossModule); the full 120-cell matrix
-  shows no confirmed regression above the 1% budget.
+- `scripts/bench-regression`: paired historical benchmark of generated
+  code against a git ref (defaults to `v0.8.0`), per-cell 0.99 gate,
+  direct/public entries, cross-module and representation-conversion
+  cells (native on OTP 29+ only).
+- Compact codecs keep local varint/zigzag primitives instead of per-call
+  runtime imports — the >1% regression source is removed; wire format
+  and codec APIs unchanged.
+- Cross-module struct codecs are called directly with the target
+  namespace prefix; no runtime dispatch per nested value.
+- Specialized RPC params/result codecs (synthetic structs
+  `<Svc>$<Fn>$params`/`$result`, `codecs` hooks in `service_info/0`):
+  loopback RPC +1..+10% against `v0.8.0`.
+- Binary/compact base-field encode folds the type/range check into the
+  map-match guard, dropping the per-field `{ok, _}` round trip; up to
+  +3% on base-heavy structs.
+- Required/union checks allocate nothing on the valid path: one
+  map-pattern on encode, a bitmask on decode, missing-names list only
+  on the error branch; up to +90%/+67% (binary) on required-heavy
+  CrossModule.
+- JSON string/number helpers scan in one pass without per-byte lists:
+  zero-copy slices, scan-first escape with a single-byte fast clause.
+  Up to +398%/+192% (long strings), +37%/+17% (CrossModule). Fully
+  plain decoded strings are zero-copy slices and retain the input
+  buffer (>64 bytes).
+- Record-mode structs generate a companion `<mod>_types_repr.erl` with
+  direct representation converters (`repr_index/1`, literal atoms; the
+  types module stays byte-identical — layout is a measured variable):
+  `from_wire` +113..+152% (map/struct), +67..+97% (native), +25..+55%
+  (record), `to_wire` up to +59% on nested values. Malformed inputs
+  meet deliberately stricter converters.
+- Compact enum payloads and statically-known field headers are computed
+  at generation (iodata term shape preserved — map key order depends on
+  it): direct compact encode +2.5..+36% (CrossModule +36%).
+- `scripts/bench-rpc`: paired loopback RPC benchmark against a git ref
+  with the same per-cell 0.99 gate.
 
 ### Runtime (`thrift_runtime`)
 
-- `thrift_runtime_client` and `thrift_runtime_connection` encode and decode
-  RPC params/results through the generated `codecs` hooks when the active
-  protocol has one, skipping descriptor memoization and interpretation on the
-  RPC hot path; the reply descriptor is no longer rebuilt per call. Missing
-  hooks (hand-written service modules, custom protocols) and stale codecs
-  after a reload fall back to the generic descriptor engine with unchanged
-  behavior. `thrift_runtime_service:function_info()` documents the optional
-  `codecs` key.
-
-- `thrift_runtime_compact` exports its ULEB128/zigzag primitives — `varint/1`,
-  `decode_varint/1`, `zigzag_varint/1`, `decode_zigzag/1` — for callers that
-  need the shared routines. Generated compact codecs do not pay a remote call
-  per primitive.
-
-- `thrift_runtime_record` dispatches record-mode structs through the
-  generated `<mod>_types_repr` module's `repr_index/1` converters: the
-  index is probed once per struct and the `{ReprModule, ToWire, FromWire}`
-  triple is cached in `persistent_term` (the same contract as the codec
-  dispatch), so `to_wire`/`from_wire` no longer re-resolve
-  `record_fields`/`struct_info` or mint field atoms on every conversion.
-  Native input values keep their identity-checked descriptor path; sum
-  unions, map-mode and native-mode structs and hand-written modules have
-  no converters and keep the descriptor engine. Conversion results and
-  error terms are unchanged for well-formed values (malformed inputs
-  meet deliberately stricter direct converters — see the generator
-  notes).
-- The generic JSON engine answers its `i8`/`i16`/`i32`/`i64` type tags
-  as compile-time binaries instead of rebuilding them with
-  `atom_to_binary` on every collection header.
+- `thrift_runtime_client`/`thrift_runtime_connection` use the
+  `codecs` hooks for RPC params/results, skipping descriptor
+  interpretation; missing hooks or stale codecs fall back to the
+  generic engine.
+- `thrift_runtime_compact` exports its varint/zigzag primitives for
+  shared use.
+- `thrift_runtime_record` dispatches converters through `repr_index/1`
+  (persistent_term cache, same contract as the codec dispatch); sum,
+  map-mode and native-mode structs and hand-written modules keep the
+  descriptor engine.
+- The generic JSON engine answers `i8`/`i16`/`i32`/`i64` tags as
+  compile-time binaries.
 
 ## [0.8.0] — 2026-10-27
 
