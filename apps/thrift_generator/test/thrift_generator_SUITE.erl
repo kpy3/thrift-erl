@@ -51,6 +51,7 @@
     repr_direct_converters/1,
     onepass_cells_exist/1,
     repr_native_binary_encoders/1,
+    repr_native_binary_decoders/1,
     repr_wide_struct/1,
     compact_enum_literals/1,
     compact_static_headers/1,
@@ -92,6 +93,7 @@ all() ->
         repr_direct_converters,
         onepass_cells_exist,
         repr_native_binary_encoders,
+        repr_native_binary_decoders,
         repr_wide_struct,
         compact_enum_literals,
         compact_static_headers,
@@ -565,11 +567,13 @@ required_decode_bitmask(Config) ->
     [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     %% full mask literal (fields s=bit 1, n=bit 2) at the stop byte:
     %% binary and compact loops close on it, json closes in _done
-    ?assertMatch({match, [_, _]}, re:run(Src, <<"<<0,\\s*Rest\\/binary>>, 3, Acc">>, [global])),
+    %% the wire decoder and every repr decoder share the bitmask STOP
+    %% clauses, so the count is at least the two wire shapes
+    ?assertMatch({match, [_, _ | _]}, re:run(Src, <<"<<0,\\s*Rest\\/binary>>, 3, Acc">>, [global])),
     ?assertMatch({match, _}, re:run(Src, <<"_done\\(3, Acc, Rest\\)">>, [])),
     %% decoded required fields set their bit
-    ?assertMatch({match, [_, _, _]}, re:run(Src, <<"Req bor 1">>, [global])),
-    ?assertMatch({match, [_, _, _]}, re:run(Src, <<"Req bor 2">>, [global])),
+    ?assertMatch({match, [_, _, _ | _]}, re:run(Src, <<"Req bor 1">>, [global])),
+    ?assertMatch({match, [_, _, _ | _]}, re:run(Src, <<"Req bor 2">>, [global])),
     %% missing names are rebuilt from the mask only on the error branch
     ?assertMatch({match, _}, re:run(Src, <<"Req band B\\s*=:=\\s*0">>, [dotall])),
     %% the list/map tracking is gone
@@ -1026,6 +1030,61 @@ repr_native_binary_encoders(Config) ->
         {error, {value_does_not_match_type, not_a_value}},
         Mod:encode_reprnativeenc_outer_wire_from_record(not_a_value)
     ),
+    ok.
+
+%% Repr-native binary decoders build the record tuple / atom-keyed
+%% map / struct map directly from the wire bytes, with the wire
+%% chain's skip, `more` and required-bitmask semantics.
+
+repr_native_binary_decoders(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativedec.thrift",
+        <<
+            "namespace erl reprnativedec\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner,\n"
+            "  3: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativedec_outer_wire_record\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativedec_outer_wire_map\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativedec_outer_wire_struct\\(">>)),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativedec_types,
+    Desc = {struct, {ref, Mod, <<"Outer">>}},
+    Wire = #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}, <<"n">> => 7},
+    {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
+    Bin = iolist_to_binary(Io),
+    {ok, WireBack, <<>>} = thrift_runtime_binary:decode(Desc, Bin),
+    %% record: tuple, absent optionals as undefined
+    {ok, Rec, <<>>} = Mod:decode_reprnativedec_outer_wire_record(Bin),
+    ?assertEqual({reprnativedec_outer, <<"o-1">>, {reprnativedec_inner, <<"v">>}, 7}, Rec),
+    {ok, RecNoN, <<>>} = Mod:decode_reprnativedec_outer_wire_record(iolist_to_binary(element(2, thrift_runtime_binary:encode(Desc, maps:remove(<<"n">>, Wire))))),
+    ?assertEqual({reprnativedec_outer, <<"o-1">>, {reprnativedec_inner, <<"v">>}, undefined}, RecNoN),
+    %% map: atom keys, present only
+    {ok, MapBack, <<>>} = Mod:decode_reprnativedec_outer_wire_map(Bin),
+    ?assertEqual(#{id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}, MapBack),
+    %% struct: atom map plus the identity tag
+    {ok, StructBack, <<>>} = Mod:decode_reprnativedec_outer_wire_struct(Bin),
+    ?assertEqual(#{'__struct__' => reprnativedec_outer, id => <<"o-1">>, inner => #{'__struct__' => reprnativedec_inner, s => <<"v">>}, n => 7}, StructBack),
+    %% truncated input asks for more, exactly like the wire decoder
+    ?assertEqual(more, Mod:decode_reprnativedec_outer_wire_record(binary:part(Bin, 0, byte_size(Bin) - 1))),
+    ?assertEqual(WireBack, thrift_runtime_record:to_wire(Desc, Rec)),
     ok.
 
 %% RPC params/result hooks: the generated service info carries
