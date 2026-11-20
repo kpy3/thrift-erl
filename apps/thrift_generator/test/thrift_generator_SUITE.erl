@@ -52,6 +52,7 @@
     onepass_cells_exist/1,
     repr_native_binary_encoders/1,
     repr_native_binary_decoders/1,
+    repr_native_native_and_index/1,
     repr_wide_struct/1,
     compact_enum_literals/1,
     compact_static_headers/1,
@@ -94,6 +95,7 @@ all() ->
         onepass_cells_exist,
         repr_native_binary_encoders,
         repr_native_binary_decoders,
+        repr_native_native_and_index,
         repr_wide_struct,
         compact_enum_literals,
         compact_static_headers,
@@ -1085,6 +1087,60 @@ repr_native_binary_decoders(Config) ->
     %% truncated input asks for more, exactly like the wire decoder
     ?assertEqual(more, Mod:decode_reprnativedec_outer_wire_record(binary:part(Bin, 0, byte_size(Bin) - 1))),
     ?assertEqual(WireBack, thrift_runtime_record:to_wire(Desc, Rec)),
+    ok.
+
+%% The repr index hands out the per-repr encoder/decoder pair by
+%% struct name; the native decoder builds the EEP-79 record at the STOP
+%% byte with literal field atoms (OTP 29+).
+
+repr_native_native_and_index(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativenative.thrift",
+        <<
+            "namespace erl reprnativenative\n"
+            "struct Item {\n"
+            "  1: required string s,\n"
+            "  2: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    ?assertMatch({match, _}, re:run(Src, <<"binary_repr_codec\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativenative_item_wire_native\\(">>)),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativenative_types,
+    {ok, {EncRec, DecRec}} = Mod:binary_repr_codec(<<"Item">>, record),
+    ?assertEqual(encode_reprnativenative_item_wire_from_record, EncRec),
+    ?assertEqual(decode_reprnativenative_item_wire_record, DecRec),
+    {ok, {_EncMap, DecStruct}} = Mod:binary_repr_codec(<<"Item">>, struct),
+    ?assertEqual(decode_reprnativenative_item_wire_struct, DecStruct),
+    %% the native pair exists on every OTP: the OTP-28 unsupported_repr
+    %% gate lives in the facade, not the index
+    {ok, {_, DecNative0}} = Mod:binary_repr_codec(<<"Item">>, native),
+    ?assertEqual(decode_reprnativenative_item_wire_native, DecNative0),
+    ?assertEqual(error, Mod:binary_repr_codec(<<"Nope">>, record)),
+    case thrift_runtime_native:supported() of
+        true ->
+            Desc = {struct, {ref, Mod, <<"Item">>}},
+            Wire = #{<<"s">> => <<"v">>, <<"n">> => 1},
+            {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
+            Bin = iolist_to_binary(Io),
+            {ok, Native, <<>>} = Mod:decode_reprnativenative_item_wire_native(Bin),
+            ?assert(thrift_runtime_native:is_native(Native)),
+            ?assertEqual(Wire, thrift_runtime_record:to_wire(Desc, Native)),
+            ?assertEqual(Wire, thrift_runtime_record:to_wire(Desc, Native));
+        false ->
+            ok
+    end,
     ok.
 
 %% RPC params/result hooks: the generated service info carries

@@ -52,6 +52,7 @@ everywhere else in the emitter.
 """.
 
 -export([module_forms/2, repr_encode_export_entries/2]).
+-export([repr_index_entries/1]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -1082,7 +1083,66 @@ repr_decode_name(Decode, Flavor) ->
 repr_decode_forms(Structs, Ctx, Enums) ->
     Convertible = repr_convertible_structs(Structs),
     lists:append([repr_decode_struct_forms(S, Ctx, Enums) || S <- Convertible]) ++
-        repr_decode_module_containers(Convertible, Ctx, Enums).
+        repr_decode_module_containers(Convertible, Ctx, Enums) ++
+        case Convertible of
+            [] -> [];
+            _ -> repr_index_forms(Convertible, Ctx)
+        end.
+
+%% The repr codec index: per struct and representation, the
+%% {Encode, Decode} pair of the one-pass functions. Sum unions, empty
+%% unions and native-mode structs answer `error` (their values take
+%% the descriptor path). `native` pairs the map-family encoder with
+%% the native decoder (native input values convert via
+%% thrift_runtime_native:fields/1 at the facade).
+
+repr_index_forms(Convertible, Ctx) ->
+    Clauses = lists:append([repr_index_clauses(S, Ctx) || S <- Convertible]) ++
+        [clause([v("_"), v("_")], none, [at(error)])],
+    [
+        {attribute, ?ANNO, spec,
+            {{binary_repr_codec, 2}, [
+                {type, ?ANNO, 'fun', [
+                    {type, ?ANNO, product, [
+                        {type, ?ANNO, binary, [{integer, ?ANNO, 0}, {integer, ?ANNO, 8}]},
+                        {type, ?ANNO, union, [
+                            {atom, ?ANNO, record}, {atom, ?ANNO, map},
+                            {atom, ?ANNO, struct}, {atom, ?ANNO, native}
+                        ]}
+                    ]},
+                    {type, ?ANNO, union, [
+                        {type, ?ANNO, tuple, [
+                            {atom, ?ANNO, ok},
+                            {type, ?ANNO, tuple, [{type, ?ANNO, atom, []}, {type, ?ANNO, atom, []}]}
+                        ]},
+                        {atom, ?ANNO, error}
+                    ]}
+                ]}
+            ]}},
+        {function, ?ANNO, binary_repr_codec, 2, Clauses}
+    ].
+
+repr_index_clauses(S, Ctx) ->
+    {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
+    MapPair = tuple_t([at(ok), tuple_t([at(repr_encode_name(Encode, map)), at(repr_decode_name(Decode, map))])]),
+    StructPair = tuple_t([at(ok), tuple_t([at(repr_encode_name(Encode, map)), at(repr_decode_name(Decode, struct))])]),
+    case thrift_generator_emitter:has_record(S) of
+        true ->
+            [
+                clause([bin_lit(S#tg_struct.name), at(record)], none, [
+                    tuple_t([at(ok), tuple_t([at(repr_encode_name(Encode, record)), at(repr_decode_name(Decode, record))])])
+                ]),
+                clause([bin_lit(S#tg_struct.name), at(native)], none, [
+                    tuple_t([at(ok), tuple_t([at(repr_encode_name(Encode, map)), at(repr_decode_name(Decode, native))])])
+                ])
+            ];
+        false ->
+            []
+    end ++
+        [
+            clause([bin_lit(S#tg_struct.name), at(map)], none, [MapPair]),
+            clause([bin_lit(S#tg_struct.name), at(struct)], none, [StructPair])
+        ].
 
 repr_decode_struct_forms(S, Ctx, Enums) ->
     {_Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
@@ -1092,17 +1152,21 @@ repr_decode_struct_forms(S, Ctx, Enums) ->
     Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
     MapName = repr_decode_name(Decode, map),
     StructName = repr_decode_name(Decode, struct),
-    MapForms = repr_decode_one(MapName, Fields, FieldTypes, Bits, map, undefined, Ctx, Enums),
-    StructForms = repr_decode_one(StructName, Fields, FieldTypes, Bits, struct, Tag, Ctx, Enums),
+    ModAtom = types_module_atom(Ctx#ectx.current),
+    MapForms = repr_decode_one(MapName, Fields, FieldTypes, Bits, map, undefined, ModAtom, Ctx, Enums),
+    StructForms = repr_decode_one(StructName, Fields, FieldTypes, Bits, struct, Tag, ModAtom, Ctx, Enums),
     case thrift_generator_emitter:has_record(S) of
         true ->
             RecName = repr_decode_name(Decode, record),
-            repr_decode_one(RecName, Fields, FieldTypes, Bits, record, Tag, Ctx, Enums) ++ MapForms ++ StructForms;
+            NativeName = repr_decode_name(Decode, native),
+            repr_decode_one(RecName, Fields, FieldTypes, Bits, record, Tag, ModAtom, Ctx, Enums) ++
+                repr_decode_one(NativeName, Fields, FieldTypes, Bits, native, Tag, ModAtom, Ctx, Enums) ++
+                MapForms ++ StructForms;
         false ->
             MapForms ++ StructForms
     end.
 
-repr_decode_one(Name, Fields, FieldTypes, Bits, Flavor, Tag, Ctx, Enums) ->
+repr_decode_one(Name, Fields, FieldTypes, Bits, Flavor, Tag, ModAtom, Ctx, Enums) ->
     FieldsName = atom_concat(Name, <<"_fields">>),
     K = length(FieldTypes),
     [
@@ -1112,7 +1176,7 @@ repr_decode_one(Name, Fields, FieldTypes, Bits, Flavor, Tag, Ctx, Enums) ->
             ])
         ]},
         {function, ?ANNO, FieldsName, 3,
-            repr_decode_clauses(Fields, FieldTypes, Bits, FieldsName, Flavor, Tag, K, Ctx, Enums)}
+            repr_decode_clauses(Fields, FieldTypes, Bits, FieldsName, Flavor, Tag, ModAtom, K, Ctx, Enums)}
     ].
 
 repr_acc_init(record, Tag, K) ->
@@ -1120,15 +1184,20 @@ repr_acc_init(record, Tag, K) ->
 repr_acc_init(_Flavor, _Tag, _K) ->
     map_empty().
 
-repr_decode_clauses(Fields, FieldTypes, Bits, FieldsName, Flavor, Tag, K, Ctx, Enums) ->
+repr_decode_clauses(Fields, FieldTypes, Bits, FieldsName, Flavor, Tag, ModAtom, K, Ctx, Enums) ->
+    StopAccPat =
+        case Fields =:= [] andalso Flavor =:= native of
+            true -> v("_Acc");
+            false -> v("Acc")
+        end,
     StopClauses =
         case Bits of
             [] ->
                 [
                     clause(
-                        [bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]), v("_Req"), v("Acc")],
+                        [bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]), v("_Req"), StopAccPat],
                         none,
-                        [ok3(repr_stop_result(Flavor, Tag, K, v("Acc")), v("Rest"))]
+                        [ok3(repr_stop_expr(Flavor, Tag, Fields, ModAtom, K, v("Acc")), v("Rest"))]
                     )
                 ];
             _ ->
@@ -1140,7 +1209,7 @@ repr_decode_clauses(Fields, FieldTypes, Bits, FieldsName, Flavor, Tag, K, Ctx, E
                             v("Acc")
                         ],
                         none,
-                        [ok3(repr_stop_result(Flavor, Tag, K, v("Acc")), v("Rest"))]
+                        [ok3(repr_stop_expr(Flavor, Tag, Fields, ModAtom, K, v("Acc")), v("Rest"))]
                     ),
                     clause(
                         [bin_pat([{i(0), default, default}, {v("_Rest"), default, [binary]}]), v("Req"), v("_Acc")],
@@ -1168,6 +1237,23 @@ repr_decode_clauses(Fields, FieldTypes, Bits, FieldsName, Flavor, Tag, K, Ctx, E
 %% setelement accumulation: the STOP result is the accumulator itself
 %% for record (the tuple is updated in place), a tag put for struct,
 %% the map as-is for map.
+
+repr_stop_expr(native, Tag, Fields, ModAtom, _K, Acc) ->
+    %% Every declared field, in declaration order, missing as
+    %% undefined — the create/3 contract of thrift_runtime_native.
+    remote(thrift_runtime_native, create, [
+        at(ModAtom),
+        at(Tag),
+        list_lit([
+            tuple_t([
+                at(field_atom(F#tg_field.name)),
+                remote(maps, get, [i(N), Acc, at(undefined)])
+            ])
+         || {F, N} <- lists:zip(Fields, lists:seq(1, length(Fields)))
+        ])
+    ]);
+repr_stop_expr(Flavor, Tag, _Fields, _ModAtom, K, Acc) ->
+    repr_stop_result(Flavor, Tag, K, Acc).
 
 repr_stop_result(record, _Tag, _K, Acc) ->
     Acc;
@@ -1213,6 +1299,10 @@ repr_field_clause_one(F, T, N, Bits, FieldsName, Flavor, Ctx, Enums) ->
 
 repr_acc_put(record, _F, N, V) ->
     remote(erlang, setelement, [i(N + 1), v("Acc"), V]);
+repr_acc_put(native, _F, N, V) ->
+    %% Position-keyed like the record accumulator: the native STOP
+    %% rebuilds the field list in declaration order from positions.
+    map_put(v("Acc"), i(N), V);
 repr_acc_put(_Flavor, F, _N, V) ->
     map_put(v("Acc"), at(field_atom(F#tg_field.name)), V).
 
@@ -1224,7 +1314,7 @@ repr_acc_put(_Flavor, F, _N, V) ->
 
 repr_field_decode({struct, {ref, TypesMod, Local}}, Bin, Flavor, Ctx, _Enums, _Suffix) ->
     NestedFlavor =
-        case Flavor =:= record andalso not nested_has_record(TypesMod, Local, Ctx) of
+        case (Flavor =:= record orelse Flavor =:= native) andalso not nested_has_record(TypesMod, Local, Ctx) of
             true -> map;
             false -> Flavor
         end,
@@ -1282,7 +1372,8 @@ repr_decode_module_containers(Convertible, Ctx, Enums) ->
     Containers = repr_containers(WireTypes),
     lists:append([repr_decode_container_forms(C, record, Ctx, Enums) || C <- Containers]) ++
         lists:append([repr_decode_container_forms(C, map, Ctx, Enums) || C <- Containers]) ++
-        lists:append([repr_decode_container_forms(C, struct, Ctx, Enums) || C <- Containers]).
+        lists:append([repr_decode_container_forms(C, struct, Ctx, Enums) || C <- Containers]) ++
+        lists:append([repr_decode_container_forms(C, native, Ctx, Enums) || C <- Containers]).
 
 repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= list; Kind =:= set ->
     Wire = wire_byte(thrift_generator_codec_common:elem_type(T)),
@@ -1410,6 +1501,13 @@ repr_encode_name(Encode, Flavor) ->
 %% helper its fields use (map containers encode through a _pairs/2
 %% helper, list/set through _elems/1).
 
+-spec repr_index_entries(#tg_module{}) -> [{atom(), arity()}].
+repr_index_entries(Mod) ->
+    case repr_convertible_structs(Mod#tg_module.structs) of
+        [] -> [];
+        _ -> [{binary_repr_codec, 2}]
+    end.
+
 -spec repr_encode_export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
 repr_encode_export_entries(Mod, Ctx) ->
     Convertible = repr_convertible_structs(Mod#tg_module.structs),
@@ -1431,7 +1529,7 @@ repr_encode_export_entries(Mod, Ctx) ->
                 {repr_decode_name(Decode, struct), 1}
             ],
             Dec = case thrift_generator_emitter:has_record(S) of
-                true -> [{repr_decode_name(Decode, record), 1} | DecEntries];
+                true -> [{repr_decode_name(Decode, record), 1}, {repr_decode_name(Decode, native), 1} | DecEntries];
                 false -> DecEntries
             end,
             Enc ++ Dec
@@ -1452,8 +1550,10 @@ repr_encode_export_entries(Mod, Ctx) ->
             {RecD, RecDAux} = repr_decode_container_names(C, Enums, record),
             {MapD, MapDAux} = repr_decode_container_names(C, Enums, map),
             {StructD, StructDAux} = repr_decode_container_names(C, Enums, struct),
+            {NativeD, NativeDAux} = repr_decode_container_names(C, Enums, native),
             [{RecD, 1}, {RecDAux, dec_aux_arity(C)}, {MapD, 1}, {MapDAux, dec_aux_arity(C)},
-                {StructD, 1}, {StructDAux, dec_aux_arity(C)}]
+                {StructD, 1}, {StructDAux, dec_aux_arity(C)},
+                {NativeD, 1}, {NativeDAux, dec_aux_arity(C)}]
         end
      || C <- repr_containers(WireTypes)
     ]),
