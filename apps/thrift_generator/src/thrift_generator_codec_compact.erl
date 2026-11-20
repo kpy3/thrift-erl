@@ -97,6 +97,7 @@ everywhere else in the emitter.
     bin_seg/3,
     bin_pat/1,
     bin_lit/1,
+    literal/1,
     name_lit/1,
     ok_t/1,
     ok3/2,
@@ -299,13 +300,27 @@ chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
     atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
-chain_fns(_Chain, [], _Ctx, _Enums, _N) ->
+chain_fns(Chain, FieldTypes, Ctx, Enums, N) ->
+    chain_fns(Chain, FieldTypes, Ctx, Enums, N, 0).
+
+chain_fns(_Chain, [], _Ctx, _Enums, _N, _StaticLast) ->
     [];
-chain_fns(Chain, [{F, T}], Ctx, Enums, N) ->
-    [chain_fn(Chain, N, F, T, stop, Ctx, Enums)];
-chain_fns(Chain, [{F, T} | Rest], Ctx, Enums, N) ->
-    [chain_fn(Chain, N, F, T, {next, chain_fn_name(Chain, N + 1)}, Ctx, Enums)] ++
-        chain_fns(Chain, Rest, Ctx, Enums, N + 1).
+chain_fns(Chain, [{F, T}], Ctx, Enums, N, StaticLast) ->
+    [chain_fn(Chain, N, F, T, stop, Ctx, Enums, StaticLast)];
+chain_fns(Chain, [{F, T} | Rest], Ctx, Enums, N, StaticLast) ->
+    [chain_fn(Chain, N, F, T, {next, chain_fn_name(Chain, N + 1)}, Ctx, Enums, StaticLast)] ++
+        chain_fns(Chain, Rest, Ctx, Enums, N + 1, next_static_last(F)).
+
+%% The last-written id the NEXT chain function provably starts with:
+%% exactly the current field's id when it is required (always written);
+%% anything after an optional field is dynamic.
+
+-spec next_static_last(#tg_field{}) -> non_neg_integer() | unknown.
+next_static_last(F) ->
+    case F#tg_field.required of
+        required -> F#tg_field.id;
+        _ -> unknown
+    end.
 
 %% The two next steps of one field: (present-continuation, absent-continuation).
 
@@ -322,17 +337,19 @@ next_calls({next, Name}, Id) ->
     wire_type(),
     {next, atom()} | stop,
     #ectx{} | undefined,
-    thrift_generator_codec_common:registry()
+    thrift_generator_codec_common:registry(),
+    non_neg_integer() | unknown
 ) ->
     erl_syntax:forms().
-chain_fn(Chain, N, F, {base, bool}, NextStep, _Ctx, _Enums) ->
-    bool_chain_fn(Chain, N, F, NextStep);
-chain_fn(Chain, N, F, {base, uuid}, NextStep, _Ctx, _Enums) ->
+chain_fn(Chain, N, F, {base, bool}, NextStep, _Ctx, _Enums, StaticLast) ->
+    bool_chain_fn(Chain, N, F, NextStep, StaticLast);
+chain_fn(Chain, N, F, {base, uuid}, NextStep, _Ctx, _Enums, _StaticLast) ->
     chain_fn_uuid(Chain, N, F, NextStep);
-chain_fn(Chain, N, F, {base, _} = T, NextStep, _Ctx, _Enums) ->
-    base_chain_fn(Chain, N, F, T, NextStep);
-chain_fn(Chain, N, F, T, NextStep, Ctx, Enums) ->
-    Header = enc_header_call(F#tg_field.id, nibble(T)),
+chain_fn(Chain, N, F, {base, _} = T, NextStep, _Ctx, _Enums, StaticLast) ->
+    base_chain_fn(Chain, N, F, T, NextStep, StaticLast);
+chain_fn(Chain, N, F, T, NextStep, Ctx, Enums, StaticLast) ->
+    Header = enc_header_call(F#tg_field.id, nibble(T), StaticLast),
+    LastPattern = last_pattern(NextStep, StaticLast),
     {Present, Absent} = next_calls(NextStep, F#tg_field.id),
     Body =
         'case'(v("Value"), [
@@ -351,7 +368,7 @@ chain_fn(Chain, N, F, T, NextStep, Ctx, Enums) ->
             ]),
             clause([v("_")], none, [Absent])
         ]),
-    {function, ?ANNO, chain_fn_name(Chain, N), 2, [clause([v("Value"), v("LastId")], none, [Body])]}.
+    chain_form(Chain, N, LastPattern, Body).
 
 %% A uuid field's encode is the constant `type_not_supported' error —
 %% the link returns it as soon as the field is present (the generic
@@ -380,33 +397,54 @@ chain_fn_uuid(Chain, N, F, NextStep) ->
             ]),
             clause([v("_")], none, [Absent])
         ]),
-    {function, ?ANNO, chain_fn_name(Chain, N), 2, [clause([v("Value"), LastPattern], none, [Body])]}.
+    chain_form(Chain, N, LastPattern, Body).
 
 %% A boolean field's value rides in the header nibble: no payload, the
 %% header helper takes the nibble from the value, and a non-boolean
 %% value fails before the rest of the struct is encoded — the generic
 %% engine's bool_nibble check rendered as case clauses.
 
--spec bool_chain_fn(atom(), pos_integer(), #tg_field{}, {next, atom()} | stop) -> erl_syntax:forms().
-bool_chain_fn(Chain, N, F, NextStep) ->
+-spec bool_chain_fn(
+    atom(), pos_integer(), #tg_field{}, {next, atom()} | stop, non_neg_integer() | unknown
+) ->
+    erl_syntax:forms().
+bool_chain_fn(Chain, N, F, NextStep, StaticLast) ->
     {Present, Absent} = next_calls(NextStep, F#tg_field.id),
+    LastPattern = last_pattern(NextStep, StaticLast),
     Body =
         'case'(v("Value"), [
             clause([map_exact(name_lit(F#tg_field.name), v("V"))], none, [
                 'case'(v("V"), [
-                    clause([at(true)], none, [nibble_next(Present, F#tg_field.id, 16#01)]),
-                    clause([at(false)], none, [nibble_next(Present, F#tg_field.id, 16#02)]),
+                    clause([at(true)], none, [nibble_next(Present, F#tg_field.id, 16#01, StaticLast)]),
+                    clause([at(false)], none, [nibble_next(Present, F#tg_field.id, 16#02, StaticLast)]),
                     clause([v("_")], none, [err_encode(mismatch(v("V")))])
                 ])
             ]),
             clause([v("_")], none, [Absent])
         ]),
-    {function, ?ANNO, chain_fn_name(Chain, N), 2, [clause([v("Value"), v("LastId")], none, [Body])]}.
+    chain_form(Chain, N, LastPattern, Body).
 
--spec nibble_next(ast(), integer(), non_neg_integer()) -> ast().
-nibble_next(Next, Id, Nibble) ->
+%% One chain link's function form, shared by the base/bool/uuid/generic
+%% variants (identical by construction, so elvis sees it once).
+
+-spec chain_form(atom(), pos_integer(), ast(), ast()) -> erl_syntax:forms().
+chain_form(Chain, N, LastPattern, Body) ->
+    {function, ?ANNO, chain_fn_name(Chain, N), 2, [clause([v("Value"), LastPattern], none, [Body])]}.
+
+%% The closing link of a chain with a generation-time header never
+%% reads the delta base: bind it underscored there (generated modules
+%% compile with warnings_as_errors).
+
+-spec last_pattern({next, atom()} | stop, non_neg_integer() | unknown) -> ast().
+last_pattern(stop, StaticLast) when StaticLast =/= unknown ->
+    v("_LastId");
+last_pattern(_, _) ->
+    v("LastId").
+
+-spec nibble_next(ast(), integer(), non_neg_integer(), non_neg_integer() | unknown) -> ast().
+nibble_next(Next, Id, Nibble, StaticLast) ->
     'case'(Next, [
-        ok_bind_clause(v("Rest"), ok_t(cons(enc_header_call(Id, Nibble), v("Rest")))),
+        ok_bind_clause(v("Rest"), ok_t(cons(enc_header_call(Id, Nibble, StaticLast), v("Rest")))),
         error_clause()
     ]).
 
@@ -417,10 +455,13 @@ nibble_next(Next, Id, Nibble) ->
 %% reports the same type_mismatch error the generic engine raises, before
 %% the rest of the struct is encoded.
 
--spec base_chain_fn(atom(), pos_integer(), #tg_field{}, wire_type(), {next, atom()} | stop) ->
+-spec base_chain_fn(
+    atom(), pos_integer(), #tg_field{}, wire_type(), {next, atom()} | stop, non_neg_integer() | unknown
+) ->
     erl_syntax:forms().
-base_chain_fn(Chain, N, F, {base, B} = T, NextStep) ->
-    Header = enc_header_call(F#tg_field.id, nibble(T)),
+base_chain_fn(Chain, N, F, {base, B} = T, NextStep, StaticLast) ->
+    Header = enc_header_call(F#tg_field.id, nibble(T), StaticLast),
+    LastPattern = last_pattern(NextStep, StaticLast),
     {Present, Absent} = next_calls(NextStep, F#tg_field.id),
     Name = name_lit(F#tg_field.name),
     Body =
@@ -431,7 +472,7 @@ base_chain_fn(Chain, N, F, {base, B} = T, NextStep) ->
                     clause([v("_")], none, [Absent])
                 ]
         ),
-    {function, ?ANNO, chain_fn_name(Chain, N), 2, [clause([v("Value"), v("LastId")], none, [Body])]}.
+    chain_form(Chain, N, LastPattern, Body).
 
 -spec base_field_clauses(atom(), ast(), ast(), ast()) -> [ast()].
 base_field_clauses(B, Name, Header, Present) ->
@@ -499,9 +540,25 @@ base_present_clause(MapPat, Guard, Header, Payload, Present) ->
         ])
     ]).
 
--spec enc_header_call(integer(), non_neg_integer()) -> ast().
-enc_header_call(Id, Nibble) ->
-    call_local(enc_header, [i(Id), v("LastId"), i(Nibble)]).
+%% The header bytes a chain link pays per written field. When the
+%% previous link is required (or the chain opens), the delta base is a
+%% generation-time constant and the whole header is emitted as bytes —
+%% the same one- or two-part form `enc_header/3' computes at runtime.
+
+-spec enc_header_call(integer(), non_neg_integer(), non_neg_integer() | unknown) -> ast().
+enc_header_call(Id, Nibble, unknown) ->
+    call_local(enc_header, [i(Id), v("LastId"), i(Nibble)]);
+enc_header_call(Id, Nibble, StaticLast) ->
+    Delta = Id - StaticLast,
+    case Delta > 0 andalso Delta < 16 of
+        true ->
+            bin_lit(<<((Delta bsl 4) bor Nibble)>>);
+        false ->
+            %% The runtime enc_header/3 false branch returns
+            %% `[<<Nibble>>, enc_varint_z(Id)]' — keep that exact term
+            %% shape (a list whose second element is the varint list).
+            list_lit([bin_lit(<<Nibble>>), literal(zigzag_varint_iodata(Id))])
+    end.
 
 -spec chain_fn_name(atom(), pos_integer()) -> atom().
 chain_fn_name(Chain, N) ->
@@ -816,7 +873,14 @@ encode_compact_expr({enum, Desc}, V, _Ctx, _Enums) ->
     'case'(
         V,
         [
-            clause([at(Atom)], none, [ok_t(call_local(enc_varint_z, [i(Value)]))])
+            %% The zigzag-varint of a value known at generation time is a
+            %% constant: emit its bytes once instead of recomputing them
+            %% per call (the dynamic-integer clause below keeps the
+            %% runtime helper for values outside the declared enum). The
+            %% literal keeps the generic engine's iodata term shape — a
+            %% proper list of single-byte binaries — because map pairs
+            %% sort by the encoded-key term.
+            clause([at(Atom)], none, [ok_t(literal(zigzag_varint_iodata(Value)))])
          || {Value, Atom} <- Desc
         ] ++
             [
@@ -840,6 +904,22 @@ encode_compact_expr({map, _, _} = T, V, _Ctx, Enums) ->
 -spec encode_base_expr(atom(), ast()) -> ast().
 encode_base_expr(B, V) ->
     encode_compact_expr({base, B}, V, undefined, #{}).
+
+%% The wire bytes of a zigzag-varint for an integer known at generation
+%% time, in the same iodata term shape `enc_varint_z/1' returns at
+%% runtime (a proper list of single-byte binaries — map pairs sort by
+%% the encoded-key term, see helper_forms(enc_varint)).
+
+-spec zigzag_varint_iodata(integer()) -> [binary(), ...].
+zigzag_varint_iodata(V) ->
+    Z = 16#FFFFFFFFFFFFFFFF band ((V bsl 1) bxor (V bsr 63)),
+    uleb128(Z).
+
+-spec uleb128(non_neg_integer()) -> [binary(), ...].
+uleb128(Z) when Z < 16#80 ->
+    [<<Z>>];
+uleb128(Z) ->
+    [<<((Z band 127) bor 128)>> | uleb128(Z bsr 7)].
 
 -spec struct_encode_call(module(), binary(), ast(), #ectx{}) -> ast().
 struct_encode_call(TypesMod, Local, V, Ctx) ->

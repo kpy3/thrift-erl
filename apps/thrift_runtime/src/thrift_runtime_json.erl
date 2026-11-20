@@ -1438,8 +1438,16 @@ tag({j_base, bool}) ->
     <<"tf">>;
 tag({j_base, double}) ->
     <<"dbl">>;
-tag({j_base, B}) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
-    atom_to_binary(B, utf8);
+%% Compile-time tags: atom_to_binary would rebuild these on every
+%% collection header of the generic engine.
+tag({j_base, i8}) ->
+    <<"i8">>;
+tag({j_base, i16}) ->
+    <<"i16">>;
+tag({j_base, i32}) ->
+    <<"i32">>;
+tag({j_base, i64}) ->
+    <<"i64">>;
 tag({j_base, S}) when S =:= string; S =:= binary ->
     <<"str">>;
 tag({j_enum, _Desc}) ->

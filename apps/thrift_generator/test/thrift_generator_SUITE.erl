@@ -50,6 +50,8 @@
     json_fast_path_helpers/1,
     repr_direct_converters/1,
     repr_wide_struct/1,
+    compact_enum_literals/1,
+    compact_static_headers/1,
     rpc_specialized_codecs/1,
     rpc_loopback_hooks/1,
     rpc_loopback_fallback/1,
@@ -87,6 +89,8 @@ all() ->
         json_fast_path_helpers,
         repr_direct_converters,
         repr_wide_struct,
+        compact_enum_literals,
+        compact_static_headers,
         rpc_specialized_codecs,
         rpc_loopback_hooks,
         rpc_loopback_fallback,
@@ -446,8 +450,9 @@ base_fields_guarded_encode(Config) ->
         <<"3:16\\/big-signed>>,\\s*<<\"\\\\001\">>">>,
         %% binary: double payload right after the header literal
         <<"4:16\\/big-signed>>,\\s*<<\\(erlang:float\\(V\\)\\):64\\/big-float>>">>,
-        %% compact: varint payload call right after the header call
-        <<"enc_header\\(1, LastId, 5\\),\\s*enc_varint_z\\(V\\)">>,
+        %% compact: varint payload call right after the static header
+        %% literal (chain-opening field, LastId = 0, Delta = 1)
+        <<"<<\"\\\\025\">>,\\s*enc_varint_z\\(V\\)">>,
         %% compact: double payload right after the header call
         <<"enc_header\\(4, LastId, 7\\),\\s*<<\\(erlang:float\\(V\\)\\):64\\/little-float>>">>
     ],
@@ -800,6 +805,99 @@ repr_wide_struct(Config) ->
     ?assert(byte_size(ReprSrc) < 500000),
     [{ok, reprwide_types, _}, {ok, reprwide_types_repr, _}] =
         thrift_generator_emitter:compile_sources(Model),
+    ok.
+
+%% Compact enum encode: the zigzag-varint of an enum value the
+%% generator knows is computed at emission and emitted as a byte
+%% literal, not recomputed per call. zigzag(1) = 2, zigzag(-2) = 3.
+%% (The pins match erl_prettypr's concrete layout.)
+
+compact_enum_literals(Config) ->
+    Path = write_snippet(
+        Config,
+        "enumlit.thrift",
+        <<
+            "namespace erl enumlit\n"
+            "enum Color {\n"
+            "  RED = 1,\n"
+            "  BLUE = -2\n"
+            "}\n"
+            "struct Paint {\n"
+            "  1: optional Color c,\n"
+            "  2: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"'RED' ->">>), "RED clause"),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"{ok, [<<\"\\002\">>]">>), "zigzag(1) literal"),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"{ok, [<<\"\\003\">>]">>), "zigzag(-2) literal"),
+    %% known values never reach the runtime varint call
+    ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(1\\)">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(-2\\)">>, [])),
+    ?assertMatch([{ok, _, _}, {ok, _, _}], lists:sort(thrift_generator_emitter:compile_sources(Model))),
+    ok.
+
+%% Compact field headers: when the previous field is required (or the
+%% field opens the chain), LastId is known at generation and the header
+%% is emitted as bytes instead of a runtime enc_header call — Delta = 1
+%% with the i32 nibble 5 is <<21>>; Delta = 18 after required field 2
+%% is the two-part [<<5>>, <<40>>] (zigzag(20)); a negative Delta after
+%% out-of-order ids is [<<5>>, <<6>>] (the same two-part the runtime
+%% enc_header produces). After an optional field LastId stays dynamic
+%% and the runtime call remains. (Pins match the concrete layout.)
+
+compact_static_headers(Config) ->
+    Path = write_snippet(
+        Config,
+        "statichead.thrift",
+        <<
+            "namespace erl statichead\n"
+            "struct R {\n"
+            "  1: required i32 a,\n"
+            "  2: required i32 b,\n"
+            "  20: required i32 e,\n"
+            "  3: optional i32 c,\n"
+            "  4: optional i32 d\n"
+            "}\n"
+            "struct B {\n"
+            "  1: required bool flag,\n"
+            "  2: required list<i32> nums,\n"
+            "  5: required i32 x,\n"
+            "  6: optional i32 y\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    %% static headers for fields 1, 2, 20, 3 — no runtime enc_header call
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(1,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(2,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(20,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(3,">>, [])),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\025\">>">>), "Delta=1 header <<21>>"),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"[<<\"\\005\">>, [<<\"(\">>]]">>), "Delta=18 two-part header"),
+    ?assertNotEqual(
+        nomatch, binary:match(Src, <<"[<<\"\\005\">>, [<<\"\\006\">>]]">>), "negative Delta two-part header"
+    ),
+    %% field 4 follows an optional field: LastId is dynamic there
+    ?assertMatch({match, _}, re:run(Src, <<"enc_header\\(4, LastId, 5\\)">>, [])),
+    %% struct B: bool and container predecessors are required too, so
+    %% every link is static — the bool value nibbles are the literals
+    %% <<17>>/<<18>>, the list link emits <<25>> (Delta = 1, nibble 9),
+    %% and the closing link never reads the delta base at all
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(1,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(2,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(5,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(6,">>, [])),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\021\">>">>)),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\022\">>">>)),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\031\">>">>)),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"encode_statichead_b_compact_fields_f4(Value, _LastId)">>)),
+    ?assertMatch([{ok, _, _}, {ok, _, _}], lists:sort(thrift_generator_emitter:compile_sources(Model))),
     ok.
 
 %% RPC params/result hooks: the generated service info carries
