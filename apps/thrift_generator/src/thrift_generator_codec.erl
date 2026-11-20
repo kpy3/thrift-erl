@@ -51,7 +51,7 @@ options and guards have no convenient `erl_syntax` constructors — so
 everywhere else in the emitter.
 """.
 
--export([module_forms/2]).
+-export([module_forms/2, repr_encode_export_entries/2]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -88,6 +88,12 @@ everywhere else in the emitter.
     bin_seg/3,
     bin_pat/1,
     bin_lit/1,
+    list_lit/1,
+    cons/2,
+    nil/0,
+    err_encode/1,
+    mismatch/1,
+    at/1,
     name_lit/1,
     ok_t/1,
     ok3/2,
@@ -147,7 +153,8 @@ module_forms(Mod, Ctx) ->
     struct_blocks(Mod#tg_module.structs, <<"wire codecs">>, Ctx, Enums) ++
         helper_forms(WireTypes, Ctx, Enums) ++
         thrift_generator_codec_common:codec_index_forms(wire, Mod, Ctx) ++
-        struct_blocks(ServiceStructs, <<"wire codecs">>, Ctx, Enums).
+        struct_blocks(ServiceStructs, <<"wire codecs">>, Ctx, Enums) ++
+        repr_encode_forms(Mod#tg_module.structs, Ctx, Enums).
 
 -spec struct_blocks([#tg_struct{}], binary(), #ectx{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
@@ -1056,6 +1063,590 @@ bits(i64) -> 64.
 -spec len_pat() -> ast().
 len_pat() ->
     bin_pat([{v("Len"), i(32), [big, signed]}, {v("_"), default, [binary]}]).
+
+%%--------------------------------------------------------------------
+%% Repr-native encoder naming and exports
+%%--------------------------------------------------------------------
+
+%% The repr-native encoder names: the wire encode name suffixed with
+%% the input representation. Shared between the emission below and the
+%% types-module export list so both always agree.
+
+-spec repr_encode_name(atom(), record | map) -> atom().
+repr_encode_name(Encode, Flavor) ->
+    B = atom_to_binary(Encode, utf8),
+    Suffix =
+        case Flavor of
+            record -> <<"_from_record">>;
+            map -> <<"_from_map">>
+        end,
+    binary_to_atom(<<B/binary, Suffix/binary>>, utf8).
+
+%% Export entries of the repr-native encoders: per record-mode struct
+%% the from_record/from_map pair, plus both flavors of every container
+%% helper its fields use (map containers encode through a _pairs/2
+%% helper, list/set through _elems/1).
+
+-spec repr_encode_export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
+repr_encode_export_entries(Mod, Ctx) ->
+    Convertible = repr_convertible_structs(Mod#tg_module.structs),
+    WireTypes = [
+        wtype(F#tg_field.type, Ctx)
+     || S <- Convertible,
+        F <- S#tg_struct.fields
+    ],
+    StructPairs = [
+        begin
+            {Encode, _Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
+            Entries = [{repr_encode_name(Encode, map), 1}],
+            case thrift_generator_emitter:has_record(S) of
+                true -> [{repr_encode_name(Encode, record), 1} | Entries];
+                false -> Entries
+            end
+        end
+     || S <- Convertible
+    ],
+    Enums = thrift_generator_codec_common:enum_registry(WireTypes),
+    ContainerEntries = lists:append([
+        begin
+            {Rec, RecElems} = repr_container_names(C, Enums, record),
+            {Map, MapElems} = repr_container_names(C, Enums, map),
+            [{Rec, 1}, {Map, 1} | repr_container_aux_entries(C, RecElems, MapElems)]
+        end
+     || C <- repr_containers(WireTypes)
+    ]),
+    lists:append(StructPairs) ++ ContainerEntries.
+
+repr_containers(WireTypes) ->
+    lists:usort(lists:append([thrift_generator_codec_common:containers(T) || T <- WireTypes])).
+
+%% The pairs helper of a map container takes the accumulator (arity 2);
+%% the elems helper of a list/set container does not (arity 1).
+
+-spec repr_container_aux_entries(wire_type(), atom(), atom()) -> [{atom(), arity()}].
+repr_container_aux_entries({map, _, _}, RecPairs, MapPairs) ->
+    [{RecPairs, 2}, {MapPairs, 2}];
+repr_container_aux_entries(_C, RecElems, MapElems) ->
+    [{RecElems, 1}, {MapElems, 1}].
+
+-spec repr_container_names(wire_type(), thrift_generator_codec_common:registry(), record | map) -> {atom(), atom()}.
+repr_container_names(T, Enums, Flavor) ->
+    Enc = enc_name(T, Enums),
+    Suffix =
+        case Flavor of
+            record -> <<"_from_record">>;
+            map -> <<"_from_map">>
+        end,
+    Base = atom_to_binary(Enc, utf8),
+    AuxSuffix =
+        case T of
+            {map, _, _} -> <<"_pairs">>;
+            _ -> <<"_elems">>
+        end,
+    {binary_to_atom(<<Base/binary, Suffix/binary>>, utf8),
+        binary_to_atom(<<Base/binary, AuxSuffix/binary, Suffix/binary>>, utf8)}.
+
+%%--------------------------------------------------------------------
+%% Repr-native encoders
+%%--------------------------------------------------------------------
+
+%% One-pass encoders reading the target representation directly: the
+%% record tuple by position, the map by field name — no wire-map
+%% materialization between the caller and the wire bytes. Appended
+%% after the wire sections: every existing function keeps its BEAM
+%% layout position. Only record-mode structs with at least one field
+%% get a family (empty unions never reach a chain; their wire entry
+%% errors first, and emitting one would leave it unreachable).
+
+-spec repr_encode_forms([#tg_struct{}], #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
+repr_encode_forms(Structs, Ctx, Enums) ->
+    %% Every struct with fields gets the from_map encoder (its values
+    %% are maps in map mode and map-repr inputs in record mode);
+    %% from_record exists only for record-mode structs. Sum unions and
+    %% empty unions stay on the wire path. Container helpers are
+    %% module-level: the same container type used by several structs
+    %% must be emitted exactly once.
+    Convertible = repr_convertible_structs(Structs),
+    lists:append([repr_encode_struct_forms(S, Ctx, Enums) || S <- Convertible]) ++
+        repr_encode_module_containers(Convertible, Ctx, Enums).
+
+repr_convertible_structs(Structs) ->
+    %% Empty structs get entry-only encoders (the chain closes with the
+    %% stop byte immediately); nested references from other structs'
+    %% chains reach them, so they must exist.
+    [S || S <- Structs, S#tg_struct.kind =:= struct].
+
+repr_encode_struct_forms(S, Ctx, Enums) ->
+    {Encode, _Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
+    FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
+    MapName = repr_encode_name(Encode, map),
+    MapForms =
+        repr_encode_entry(S, MapName, undefined, FieldTypes, map, Ctx, Enums) ++
+            repr_encode_chain(S, MapName, FieldTypes, map, Ctx, Enums),
+    case thrift_generator_emitter:has_record(S) of
+        true ->
+            Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
+            RecName = repr_encode_name(Encode, record),
+            repr_encode_entry(S, RecName, Tag, FieldTypes, record, Ctx, Enums) ++
+                repr_encode_chain(S, RecName, FieldTypes, record, Ctx, Enums) ++
+                MapForms;
+        false ->
+            MapForms
+    end.
+
+repr_encode_module_containers(Convertible, Ctx, Enums) ->
+    WireTypes = lists:append([
+        [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields]
+     || S <- Convertible
+    ]),
+    repr_encode_containers(WireTypes, Ctx, Enums).
+
+%% Entry functions: the record family matches the whole tuple once and
+%% hands the field values to the chain; the map family guards is_map.
+%% A value of no accepted shape answers the unwrapped
+%% {error, {value_does_not_match_type, V}} — the term the conversion
+%% layer raises for it today (the wire family's wrapped codec error
+%% stays on the wire path only).
+
+repr_encode_entry(S, Name, Tag, FieldTypes, Flavor, _Ctx, _Enums) ->
+    K = length(FieldTypes),
+    Chain = atom_concat(Name, <<"_fields">>),
+    Vars = [v("F" ++ integer_to_list(I)) || I <- lists:seq(1, K)],
+    EntryCall =
+        case FieldTypes of
+            [] ->
+                %% Zero fields: the stop byte closes the struct.
+                ok_t(list_lit([i(0)]));
+            _ ->
+                case Flavor of
+                    record ->
+                        call_local(chain_fn_name(Chain, 1), Vars);
+                    map ->
+                        call_local(chain_fn_name(Chain, 1), [v("Value")])
+                end
+        end,
+    CheckBody =
+        case S#tg_struct.kind of
+            union when Flavor =:= record ->
+                repr_union_check_record(Vars, EntryCall);
+            union ->
+                union_check(S#tg_struct.fields, EntryCall);
+            _ ->
+                EntryCall
+        end,
+    HeadPat =
+        case Flavor of
+            record -> tuple_t([at(Tag) | [v("F" ++ integer_to_list(I)) || I <- lists:seq(1, K)]]);
+            map -> v("Value")
+        end,
+    Guard =
+        case Flavor of
+            record -> none;
+            map -> [remote(erlang, is_map, [v("Value")])]
+        end,
+    [
+        {function, ?ANNO, Name, 1, [
+            clause([HeadPat], Guard, [CheckBody]),
+            clause([v("Value")], none, [repr_mismatch_error(v("Value"))])
+        ]}
+    ].
+
+repr_mismatch_error(V) ->
+    {tuple, ?ANNO, [{atom, ?ANNO, error}, tuple_t([at(value_does_not_match_type), V])]}.
+
+repr_union_check_record(Vars, Call) ->
+    Counts = [
+        'case'(Var, [
+            clause([at(undefined)], none, [i(0)]),
+            clause([v("_")], none, [i(1)])
+        ])
+     || Var <- Vars
+    ],
+    Sum = lists:foldl(fun(C, Acc) -> {op, ?ANNO, '+', Acc, C} end, hd(Counts), tl(Counts)),
+    'case'(Sum, [
+        clause([i(1)], none, [Call]),
+        clause([i(0)], none, [err_encode(at(union_empty))]),
+        clause([v("_")], none, [err_encode(at(union_multiple))])
+    ]).
+
+%% Chains: one function per field in declaration order, mirroring the
+%% wire chain's call shape (each step calls the next — no nested
+%% trees). Record chains carry the remaining field values; map chains
+%% carry the map and read each field with binary-name-first lookup.
+
+repr_encode_chain(S, Name, FieldTypes, Flavor, Ctx, Enums) ->
+    Chain = atom_concat(Name, <<"_fields">>),
+    K = length(FieldTypes),
+    Pairs = lists:zip(lists:seq(1, K), lists:zip(S#tg_struct.fields, FieldTypes)),
+    repr_chain_fns(Chain, Pairs, K, Flavor, Ctx, Enums).
+
+repr_chain_fns(_Chain, [], _K, _Flavor, _Ctx, _Enums) ->
+    [];
+repr_chain_fns(Chain, [{N, {F, T}}], K, Flavor, Ctx, Enums) ->
+    [repr_chain_fn(Chain, N, F, T, K, ok_t(list_lit([i(0)])), Flavor, Ctx, Enums)];
+repr_chain_fns(Chain, [{N, {F, T}} | Rest], K, Flavor, Ctx, Enums) ->
+    NextArgs =
+        case Flavor of
+            record -> [v("F" ++ integer_to_list(I)) || I <- lists:seq(N + 1, K)];
+            map -> [v("Value")]
+        end,
+    Next = call_local(chain_fn_name(Chain, N + 1), NextArgs),
+    [repr_chain_fn(Chain, N, F, T, K, Next, Flavor, Ctx, Enums)] ++
+        repr_chain_fns(Chain, Rest, K, Flavor, Ctx, Enums).
+
+repr_chain_fn(Chain, N, F, T, K, Next, Flavor, Ctx, Enums) ->
+    Header = header_bin(wire_byte(T), F#tg_field.id),
+    Val =
+        case Flavor of
+            record -> v("F" ++ integer_to_list(N));
+            map -> v("V")
+        end,
+    Body =
+        case Flavor of
+            record ->
+                repr_record_field_body(F, T, Val, Header, Next, Ctx, Enums);
+            map ->
+                'case'(remote(maps, find, [name_lit(F#tg_field.name), v("Value")]), [
+                    clause([tuple_t([at(ok), Val])], none, [
+                        repr_field_step(T, Val, Header, Next, Flavor, Ctx, Enums)
+                    ]),
+                    clause([at(error)], none, [
+                        'case'(remote(maps, find, [at(field_atom(F#tg_field.name)), v("Value")]), [
+                            clause([tuple_t([at(ok), Val])], none, [
+                                repr_field_step(T, Val, Header, Next, Flavor, Ctx, Enums)
+                            ]),
+                            clause([at(error)], none, [Next])
+                        ])
+                    ])
+                ])
+        end,
+    Args =
+        case Flavor of
+            record -> [v("F" ++ integer_to_list(I)) || I <- lists:seq(N, K)];
+            map -> [v("Value")]
+        end,
+    {function, ?ANNO, chain_fn_name(Chain, N), length(Args), [clause(Args, none, [Body])]}.
+
+%% Record fields: skip undefined, then per-type guarded clauses for
+%% base types (payload straight into the chunk, mirroring the wire
+%% chain's base fast path) or a {ok, E} step for the rest.
+
+repr_record_field_body(_F, {base, B}, Val, Header, Next, _Ctx, _Enums) ->
+    %% The base clauses end with the mismatch clause — a bound record
+    %% field is either undefined, valid, or an error; there is no
+    %% absent-shape fallthrough like the wire chain's missing key.
+    'case'(Val, repr_base_clauses(B, Header, Next));
+repr_record_field_body(_F, T, Val, Header, Next, Ctx, Enums) ->
+    'case'(Val, [
+        clause([at(undefined)], none, [Next]),
+        clause([v("_V")], none, [repr_field_step(T, v("_V"), Header, Next, record, Ctx, Enums)])
+    ]).
+
+repr_field_step(T, Val, Header, Next, Flavor, Ctx, Enums) ->
+    'case'(repr_field_encode(T, Val, Flavor, Ctx, Enums, ""), [
+        clause([tuple_t([at(ok), v("E")])], none, [
+            'case'(Next, [
+                ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, v("E")]), v("Rest")))),
+                error_clause()
+            ])
+        ]),
+        error_clause()
+    ]).
+
+%% The per-type encode expression for one bound value: base clauses
+%% inline, enums reuse the wire shape, structs recurse into the same
+%% repr's encoder, containers into the repr container helper.
+
+repr_field_encode({base, B}, Val, _Flavor, _Ctx, _Enums, Suffix) ->
+    'case'(Val, repr_base_value_clauses(B, Suffix));
+repr_field_encode({enum, Desc}, Val, _Flavor, Ctx, Enums, Suffix) ->
+    encode_wire_expr({enum, Desc}, Val, Ctx, Enums, Suffix);
+repr_field_encode({struct, {ref, TypesMod, Local}}, Val, Flavor, Ctx, _Enums, _Suffix) ->
+    %% A map-mode nested struct is a map in every representation (the
+    %% conversion engine never builds a record for it), so the record
+    %% chain reads it with the map encoder.
+    NestedFlavor =
+        case Flavor =:= record andalso not nested_has_record(TypesMod, Local, Ctx) of
+            true -> map;
+            false -> Flavor
+        end,
+    repr_struct_encode_call(TypesMod, Local, Val, NestedFlavor, Ctx);
+repr_field_encode(T, Val, Flavor, _Ctx, Enums, _Suffix) ->
+    {Enc, _Elems} = repr_container_names(T, Enums, Flavor),
+    call_local(Enc, [Val]).
+
+nested_has_record(TypesMod, Local, Ctx) ->
+    %% Refs carry the types module atom for same-file structs and the
+    %% include-qualified module key for cross-file ones.
+    Mod =
+        case maps:get(TypesMod, Ctx#ectx.modules, undefined) of
+            undefined ->
+                case maps:get(TypesMod, Ctx#ectx.include_modules, undefined) of
+                    undefined ->
+                        lists:foldl(
+                            fun(M, Acc) ->
+                                case Acc =:= undefined andalso types_module_atom(M#tg_module.name) =:= TypesMod of
+                                    true -> M;
+                                    false -> Acc
+                                end
+                            end,
+                            undefined,
+                            maps:values(Ctx#ectx.modules)
+                        );
+                    Key ->
+                        maps:get(Key, Ctx#ectx.modules, undefined)
+                end;
+            M ->
+                M
+        end,
+    case Mod of
+        undefined ->
+            true;
+        _ ->
+            case lists:search(fun(S) -> S#tg_struct.name =:= Local end, Mod#tg_module.structs) of
+                {value, S} -> thrift_generator_emitter:has_record(S);
+                false -> true
+            end
+    end.
+
+repr_struct_encode_call(TypesMod, Local, V, Flavor, Ctx) ->
+    {Encode, _Decode} =
+        case TypesMod =:= types_module_atom(Ctx#ectx.current) of
+            true -> thrift_generator_codec_common:codec_pair(wire, Local, Ctx);
+            false -> thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx)
+        end,
+    Name = repr_encode_name(Encode, Flavor),
+    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
+        true -> call_local(Name, [V]);
+        false -> remote(TypesMod, Name, [V])
+    end.
+
+%% Base-type value clauses: the same guards and payloads the wire
+%% chain's base clauses use, but matched against a bound value.
+
+repr_base_clauses(B, Header, Next) ->
+    [clause([at(undefined)], none, [Next])] ++ repr_base_present_clauses(B, Header, Next).
+
+%% The record chain's base fast path: the guarded present clauses cons
+%% the payload straight into the chunk, exactly like the wire chain's
+%% base clauses — no {ok, E} wrapper per field.
+
+repr_base_present_clauses(B, Header, Next) ->
+    Wrap = fun(Payload) ->
+        'case'(Next, [
+            ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, Payload]), v("Rest")))),
+            error_clause()
+        ])
+    end,
+    V = v("V"),
+    Present =
+        case B of
+            bool ->
+                [
+                    clause([at(true)], none, [Wrap(bin_lit(<<1>>))]),
+                    clause([at(false)], none, [Wrap(bin_lit(<<0>>))])
+                ];
+            double ->
+                [
+                    clause(
+                        [V],
+                        [remote(erlang, is_number, [V])],
+                        [Wrap(bin_seg(remote(erlang, float, [V]), i(64), [big, float]))]
+                    )
+                ];
+            S when S =:= string; S =:= binary ->
+                [
+                    clause(
+                        [V],
+                        [remote(erlang, is_binary, [V])],
+                        [Wrap(list_lit([i32_seg(call_local(byte_size, [V])), V]))]
+                    )
+                ];
+            uuid ->
+                [
+                    clause(
+                        [V],
+                        [
+                            remote(erlang, is_binary, [V]),
+                            {op, ?ANNO, '=:=', call_local(byte_size, [V]), i(16)}
+                        ],
+                        [Wrap(V)]
+                    )
+                ];
+            _ ->
+                Bits = bits(B),
+                [
+                    clause(
+                        [V],
+                        [
+                            remote(erlang, is_integer, [V]),
+                            {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
+                            {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
+                        ],
+                        [Wrap(bin_seg(V, i(Bits), [big, signed]))]
+                    )
+                ]
+        end,
+    Present ++ [clause([v("OtherV")], none, [err_encode(mismatch(v("OtherV")))])].
+
+repr_base_value_clauses(B, Suffix) ->
+    V = v("V"),
+    Present =
+        case B of
+            bool ->
+                [
+                    clause([at(true)], none, [ok_t(bin_lit(<<1>>))]),
+                    clause([at(false)], none, [ok_t(bin_lit(<<0>>))])
+                ];
+            double ->
+                [
+                    clause(
+                        [V],
+                        [remote(erlang, is_number, [V])],
+                        [ok_t(bin_seg(remote(erlang, float, [V]), i(64), [big, float]))]
+                    )
+                ];
+            S when S =:= string; S =:= binary ->
+                [
+                    clause(
+                        [V],
+                        [remote(erlang, is_binary, [V])],
+                        [ok_t(list_lit([i32_seg(call_local(byte_size, [V])), V]))]
+                    )
+                ];
+            uuid ->
+                [
+                    clause(
+                        [V],
+                        [
+                            remote(erlang, is_binary, [V]),
+                            {op, ?ANNO, '=:=', call_local(byte_size, [V]), i(16)}
+                        ],
+                        [ok_t(V)]
+                    )
+                ];
+            _ ->
+                Bits = bits(B),
+                [
+                    clause(
+                        [V],
+                        [
+                            remote(erlang, is_integer, [V]),
+                            {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
+                            {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
+                        ],
+                        [ok_t(bin_seg(V, i(Bits), [big, signed]))]
+                    )
+                ]
+        end,
+    Present ++ [clause([v("OtherV" ++ Suffix)], none, [err_encode(mismatch(v("OtherV" ++ Suffix)))])].
+
+%% Repr container helpers: the wire container form with the element
+%% encode expression replaced by the same-repr field encode.
+
+repr_encode_containers(FieldTypes, Ctx, Enums) ->
+    Containers = lists:usort(lists:append([thrift_generator_codec_common:containers(T) || T <- FieldTypes])),
+    lists:append([repr_container_forms(C, record, Ctx, Enums) || C <- Containers]) ++
+        lists:append([repr_container_forms(C, map, Ctx, Enums) || C <- Containers]).
+
+repr_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= list; Kind =:= set ->
+    Wire = wire_byte(thrift_generator_codec_common:elem_type(T)),
+    {Enc, EncElems} = repr_container_names(T, Enums, Flavor),
+    Elem = thrift_generator_codec_common:elem_type(T),
+    [
+        {function, ?ANNO, Enc, 1, [
+            clause([v("Values")], [remote(erlang, is_list, [v("Values")])], [
+                'case'(call_local(EncElems, [v("Values")]), [
+                    clause([tuple_t([at(ok), v("Es")])], none, [
+                        ok_t(
+                            list_lit([
+                                list_lit([
+                                    bin_seg(i(Wire), i(8), [big, unsigned]),
+                                    i32_seg(call_local(length, [v("Values")]))
+                                ]),
+                                v("Es")
+                            ])
+                        )
+                    ]),
+                    error_clause()
+                ])
+            ]),
+            mismatch_fn_tail()
+        ]},
+        {function, ?ANNO, EncElems, 1, [
+            clause([nil()], none, [ok_t(nil())]),
+            clause([cons(v("V"), v("Rest"))], none, [
+                'case'(repr_field_encode(Elem, v("V"), Flavor, Ctx, Enums, ""), [
+                    clause([tuple_t([at(ok), v("E")])], none, [
+                        'case'(call_local(EncElems, [v("Rest")]), [
+                            ok_bind_clause(v("RestIo"), ok_t(cons(v("E"), v("RestIo")))),
+                            error_clause()
+                        ])
+                    ]),
+                    error_clause()
+                ])
+            ])
+        ]}
+    ];
+repr_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
+    KeyWire = wire_byte(KType),
+    ValWire = wire_byte(VType),
+    {Enc, EncPairs} = repr_container_names(T, Enums, Flavor),
+    SortFun =
+        {'fun', ?ANNO,
+            {clauses, [
+                clause([tuple_pat([v("KE"), v("_")]), tuple_pat([v("KE1"), v("_")])], none, [
+                    {op, ?ANNO, '=<', v("KE"), v("KE1")}
+                ])
+            ]}},
+    [
+        {function, ?ANNO, Enc, 1, [
+            clause([v("Value")], [remote(erlang, is_map, [v("Value")])], [
+                'case'(call_local(EncPairs, [remote(maps, to_list, [v("Value")]), nil()]), [
+                    clause([tuple_t([at(ok), v("Pairs")])], none, [
+                        {match, ?ANNO, v("Sorted"), remote(lists, sort, [SortFun, v("Pairs")])},
+                        %% The encoded-key term shape matches the wire
+                        %% helper's, so the sort order (map pairs sort
+                        %% by the encoded-key term) is identical.
+                        ok_t(
+                            list_lit([
+                                list_lit([
+                                    {bin, ?ANNO, [
+                                        {bin_element, ?ANNO, i(KeyWire), i(8), [big, unsigned]},
+                                        {bin_element, ?ANNO, i(ValWire), i(8), [big, unsigned]}
+                                    ]},
+                                    i32_seg(call_local(length, [v("Sorted")]))
+                                ]),
+                                v("Sorted")
+                            ])
+                        )
+                    ]),
+                    error_clause()
+                ])
+            ]),
+            mismatch_fn_tail()
+        ]},
+        {function, ?ANNO, EncPairs, 2, [
+            clause([nil(), v("Acc")], none, [ok_t(remote(lists, reverse, [v("Acc")]))]),
+            clause([cons(tuple_pat([v("K"), v("V")]), v("Rest")), v("Acc")], none, [
+                'case'(repr_field_encode(KType, v("K"), Flavor, Ctx, Enums, "K"), [
+                    clause([tuple_t([at(ok), v("KE")])], none, [
+                        'case'(repr_field_encode(VType, v("V"), Flavor, Ctx, Enums, "V"), [
+                            clause([tuple_t([at(ok), v("VE")])], none, [
+                                call_local(EncPairs, [v("Rest"), cons(tuple_t([v("KE"), v("VE")]), v("Acc"))])
+                            ]),
+                            error_clause()
+                        ])
+                    ]),
+                    error_clause()
+                ])
+            ])
+        ]}
+    ].
+
+-spec field_atom(binary()) -> atom().
+field_atom(Name) ->
+    binary_to_atom(Name, utf8).
 
 -spec header_bin(non_neg_integer(), integer()) -> ast().
 header_bin(Wire, Id) ->

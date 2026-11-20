@@ -50,6 +50,7 @@
     json_fast_path_helpers/1,
     repr_direct_converters/1,
     onepass_cells_exist/1,
+    repr_native_binary_encoders/1,
     repr_wide_struct/1,
     compact_enum_literals/1,
     compact_static_headers/1,
@@ -90,6 +91,7 @@ all() ->
         json_fast_path_helpers,
         repr_direct_converters,
         onepass_cells_exist,
+        repr_native_binary_encoders,
         repr_wide_struct,
         compact_enum_literals,
         compact_static_headers,
@@ -945,6 +947,84 @@ onepass_cells_exist(Config) ->
     ?assertMatch(
         [{<<"Outer">>, record, onepass, decode} | _],
         [K || K = {_, record, onepass, decode} <- CellKeys]
+    ),
+    ok.
+
+%% Repr-native binary encoders read the record tuple or the map
+%% directly: no wire-map materialization. Bytes must equal the
+%% wire-map encode for every accepted input shape; wrong shapes answer
+%% the same unwrapped {error, {value_does_not_match_type, V}} the
+%% conversion layer raises today.
+
+repr_native_binary_encoders(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativeenc.thrift",
+        <<
+            "namespace erl reprnativeenc\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner,\n"
+            "  3: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    ?assertMatch({match, _}, re:run(Src, <<"encode_reprnativeenc_outer_wire_from_record\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"encode_reprnativeenc_outer_wire_from_map\\(">>)),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"{reprnativeenc_outer,">>)),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativeenc_types,
+    Name = <<"Outer">>,
+    Desc = {struct, {ref, Mod, Name}},
+    Wire = #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}, <<"n">> => 7},
+    {ok, ExpectedIo} = thrift_runtime_binary:encode(Desc, Wire),
+    Expected = iolist_to_binary(ExpectedIo),
+    %% record input
+    {ok, RecIo} = Mod:encode_reprnativeenc_outer_wire_from_record(
+        {reprnativeenc_outer, <<"o-1">>, {reprnativeenc_inner, <<"v">>}, 7}
+    ),
+    ?assertEqual(Expected, iolist_to_binary(RecIo)),
+    %% atom-keyed map input: the absent optional key is skipped, so
+    %% the bytes equal the wire encode of the map WITHOUT field 3
+    {ok, MapIo} = Mod:encode_reprnativeenc_outer_wire_from_map(#{id => <<"o-1">>, inner => #{s => <<"v">>}}),
+    {ok, NoNOk} = thrift_runtime_binary:encode(Desc, maps:remove(<<"n">>, Wire)),
+    ?assertEqual(iolist_to_binary(NoNOk), iolist_to_binary(MapIo)),
+    %% binary-keyed map input accepted with identical bytes
+    {ok, BinMapIo} = Mod:encode_reprnativeenc_outer_wire_from_map(Wire),
+    ?assertEqual(Expected, iolist_to_binary(BinMapIo)),
+    %% __struct__ map input: tag dropped, declared fields encoded
+    {ok, StructIo} = Mod:encode_reprnativeenc_outer_wire_from_map(
+        #{'__struct__' => reprnativeenc_outer, id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}
+    ),
+    ?assertEqual(Expected, iolist_to_binary(StructIo)),
+    %% wrong tag: unwrapped conversion-style error
+    ?assertEqual(
+        {error, {value_does_not_match_type, {wrong_tag, <<"o-1">>, {reprnativeenc_inner, <<"v">>}, 7}}},
+        Mod:encode_reprnativeenc_outer_wire_from_record({wrong_tag, <<"o-1">>, {reprnativeenc_inner, <<"v">>}, 7})
+    ),
+    %% nested value in the wrong shape: unwrapped error with the nested value
+    ?assertEqual(
+        {error, {value_does_not_match_type, #{<<"s">> => <<"v">>}}},
+        Mod:encode_reprnativeenc_outer_wire_from_record(
+            {reprnativeenc_outer, <<"o-1">>, #{<<"s">> => <<"v">>}, 7}
+        )
+    ),
+    %% non-tuple/non-map input: unwrapped error
+    ?assertEqual(
+        {error, {value_does_not_match_type, not_a_value}},
+        Mod:encode_reprnativeenc_outer_wire_from_record(not_a_value)
     ),
     ok.
 
