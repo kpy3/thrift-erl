@@ -15,29 +15,39 @@
 -module(thrift_bench_regression).
 
 -moduledoc """
-Paired historical benchmark for generated codecs. `generate` runs in each
-checkout and writes generated beams; `compare` proves wire and round-trip
-equality, then alternates baseline/current measurements. Both sides use the
-same function atoms in distinct modules. Same-module and cross-module direct
-rows isolate emitted code and form the regression gate; public rows expose
-dispatch costs for diagnosis. Public rows have distinct top-level module/cache
-keys, so they are unsuitable for a 1% hard gate. Direct targets are external
-funs created before timing, not dynamic module lookups on every iteration.
+Paired historical benchmark for generated codecs and representation
+conversion. `generate` runs in each checkout and writes generated beams;
+`compare` proves wire and round-trip equality, then alternates
+baseline/current measurements. Both sides use the same function atoms in
+distinct modules. Same-module and cross-module direct rows isolate emitted
+code and form the regression gate; public rows expose dispatch costs for
+diagnosis. Public rows have distinct top-level module/cache keys, so they
+are unsuitable for a 1% hard gate. Direct targets are external funs created
+before timing, not dynamic module lookups on every iteration.
+
+Conversion rows (`conversion` entry) measure `thrift_runtime_record`
+`to_wire`/`from_wire` on the generated modules of each side: the protocol
+slot carries the input shape (`to_wire`) or target representation
+(`from_wire`) — `record`, `map`, `struct`, `sum` or `native` (OTP 29+
+only). They gate like direct rows.
 
 The reported ratio is current throughput divided by baseline throughput.
 Environment knobs: `THRIFT_BENCH_ROUNDS` (31), `THRIFT_BENCH_SAMPLE_MS`
 (250), `THRIFT_BENCH_THRESHOLD` (0.99), `THRIFT_BENCH_PROTOCOL` and
-`THRIFT_BENCH_ENTRY` optionally select one protocol and `public`/`direct`.
-Use `scripts/bench-regression`, which supplies generation and cleanup.
+`THRIFT_BENCH_ENTRY` optionally select one protocol and
+`public`/`direct`/`conversion`; `THRIFT_BENCH_REPR` selects one conversion
+representation. Use `scripts/bench-regression`, which supplies generation
+and cleanup.
 """.
 
 -export([main/1, median/1, evaluate/2]).
--export([repeat/3, encode/1, decode/1, call/1]).
+-export([repeat/3, encode/1, decode/1, call/1, to_wire/1, from_wire/1]).
 -export_type([sample/0, evaluation/0]).
 
 -type protocol_name() :: binary | compact | json.
--type entry() :: public | direct.
--type operation() :: encode | decode.
+-type repr_name() :: record | map | struct | sum | native.
+-type entry() :: public | direct | conversion.
+-type operation() :: encode | decode | to_wire | from_wire.
 -type sample() :: {BaseUs :: pos_integer(), HeadUs :: pos_integer(), Iterations :: pos_integer()}.
 -type evaluation() :: #{
     ratio := float(),
@@ -56,7 +66,7 @@ Use `scripts/bench-regression`, which supplies generation and cleanup.
     head_module := module()
 }.
 -type case_spec() :: #{
-    key := {binary(), protocol_name(), entry(), operation()},
+    key := {binary(), protocol_name() | repr_name(), entry(), operation()},
     base := {atom(), term()},
     head := {atom(), term()},
     n := non_neg_integer()
@@ -245,7 +255,56 @@ check_spec(Spec) ->
         fun(Protocol) -> check_protocol(Protocol, Spec) end,
         [binary, compact, json]
     ),
+    check_conversion(Spec),
     ok.
+
+%% Conversion parity: both sides' modules accept the same input shapes,
+%% return the very same wire map back, and agree on the converted values
+%% (native values carry their module's identity, so they compare through
+%% the to_wire round trip instead of by value).
+
+check_conversion(Spec) ->
+    Name = maps:get(struct, Spec),
+    Value = maps:get(value, Spec),
+    BaseModule = maps:get(base_module, Spec),
+    HeadModule = maps:get(head_module, Spec),
+    case repr_mode_of(HeadModule, Name) of
+        record ->
+            Reprs = [record, map, struct] ++ native_repr(),
+            lists:foreach(
+                fun(Repr) ->
+                    BaseIn = conversion_input(BaseModule, Name, Repr, to_wire, Value),
+                    HeadIn = conversion_input(HeadModule, Name, Repr, to_wire, Value),
+                    Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseIn),
+                    Value = thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadIn)
+                end,
+                Reprs
+            ),
+            lists:foreach(
+                fun(Repr) ->
+                    BaseOut = thrift_runtime_record:from_wire({struct, {ref, BaseModule, Name}}, Value, Repr),
+                    HeadOut = thrift_runtime_record:from_wire({struct, {ref, HeadModule, Name}}, Value, Repr),
+                    Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseOut),
+                    Value = thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadOut),
+                    %% Native values carry their module's identity and
+                    %% cannot compare by value; everything else must
+                    %% agree exactly.
+                    true = Repr =:= native orelse (BaseOut =:= HeadOut)
+                end,
+                Reprs
+            );
+        sum ->
+            BaseIn = conversion_input(BaseModule, Name, sum, to_wire, Value),
+            HeadIn = conversion_input(HeadModule, Name, sum, to_wire, Value),
+            Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseIn),
+            Value = thrift_runtime_record:to_wire({struct, {ref, HeadModule, Name}}, HeadIn),
+            BaseOut = thrift_runtime_record:from_wire({struct, {ref, BaseModule, Name}}, Value, record),
+            HeadOut = thrift_runtime_record:from_wire({struct, {ref, HeadModule, Name}}, Value, record),
+            true = BaseOut =:= HeadOut,
+            Value = thrift_runtime_record:to_wire({struct, {ref, BaseModule, Name}}, BaseOut);
+        _ ->
+            ok
+    end.
 
 check_protocol(Protocol, Spec) ->
     Runtime = protocol_module(Protocol),
@@ -279,14 +338,127 @@ check_protocol(Protocol, Spec) ->
     ok.
 
 cases(Specs) ->
-    [
+    Codec = [
         make_case(Spec, Protocol, Entry, Op)
      || Spec <- Specs,
         Protocol <- [binary, compact, json],
         Entry <- [public, direct],
         selected(Protocol, Entry),
         Op <- [encode, decode]
-    ].
+    ],
+    Codec ++ lists:append([conversion_cases(Spec) || Spec <- Specs]).
+
+%% Conversion cells: one per struct x representation x direction the
+%% struct's mode supports. The representation sits in the protocol slot
+%% of the key; `THRIFT_BENCH_ENTRY=conversion` selects exactly these rows
+%% (codec rows ask for `public`/`direct`), `THRIFT_BENCH_REPR` narrows to
+%% one representation. Map-mode structs have no fixture here yet.
+
+conversion_cases(Spec) ->
+    Name = maps:get(struct, Spec),
+    HeadModule = maps:get(head_module, Spec),
+    Mode = repr_mode_of(HeadModule, Name),
+    Reprs =
+        case Mode of
+            record -> [record, map, struct] ++ native_repr();
+            sum -> [];
+            _ -> []
+        end,
+    ToWire =
+        [conversion_case(Spec, Repr, to_wire) || Repr <- Reprs, selected_conversion(Repr)] ++
+            case Mode of
+                sum ->
+                    [
+                        conversion_case(Spec, sum, to_wire)
+                     || selected_conversion(sum)
+                    ];
+                _ ->
+                    []
+            end,
+    FromWire =
+        [
+            conversion_case(Spec, Repr, from_wire)
+         || Repr <- Reprs,
+            selected_conversion(Repr)
+        ] ++
+            case Mode of
+                sum -> [conversion_case(Spec, record, from_wire) || selected_conversion(record)];
+                _ -> []
+            end,
+    ToWire ++ FromWire.
+
+selected_conversion(Repr) ->
+    selected_env("THRIFT_BENCH_ENTRY", <<"conversion">>) andalso
+        selected_env("THRIFT_BENCH_REPR", atom_to_binary(Repr, utf8)).
+
+-spec repr_mode_of(module(), binary()) -> record | {map, atom | binary} | sum | native | wire.
+repr_mode_of(Module, Name) ->
+    try Module:record_fields(Name) of
+        {sum, _} -> sum;
+        {map, KeyType} -> {map, KeyType};
+        {native, _} -> native;
+        {Tag, _} when is_atom(Tag) -> record;
+        none -> wire
+    catch
+        error:undef -> wire
+    end.
+
+native_repr() ->
+    case thrift_runtime_native:supported() of
+        true -> [native];
+        false -> []
+    end.
+
+conversion_case(Spec, Repr, Op) ->
+    Name = maps:get(struct, Spec),
+    Value = maps:get(value, Spec),
+    BaseModule = maps:get(base_module, Spec),
+    HeadModule = maps:get(head_module, Spec),
+    #{
+        key => {maps:get(id, Spec), Repr, conversion, Op},
+        base => {Op, conversion_arg(BaseModule, Name, Repr, Op, Value)},
+        head => {Op, conversion_arg(HeadModule, Name, Repr, Op, Value)},
+        n => 0
+    }.
+
+conversion_arg(Module, Name, Repr, to_wire, Value) ->
+    {Module, Name, conversion_input(Module, Name, Repr, to_wire, Value)};
+conversion_arg(Module, Name, Repr, from_wire, Value) ->
+    {Module, Name, Repr, Value}.
+
+%% Inputs are built from each side's own introspection, so a baseline
+%% module generated by v0.8.0 works unchanged. Record tuples and native
+%% records carry every declared field, missing ones as `undefined'.
+
+conversion_input(Module, Name, record, to_wire, Value) ->
+    {Tag, _FieldAtoms} = Module:record_fields(Name),
+    {_Kind, Fields} = Module:struct_info(Name),
+    list_to_tuple([Tag | [maps:get(NameBin, Value, undefined) || {_, _, _, NameBin, _} <- Fields]]);
+conversion_input(Module, Name, map, to_wire, Value) ->
+    atom_map_input(Module, Name, Value);
+conversion_input(Module, Name, struct, to_wire, Value) ->
+    {Tag, _FieldAtoms} = Module:record_fields(Name),
+    (atom_map_input(Module, Name, Value))#{'__struct__' => Tag};
+conversion_input(Module, Name, native, to_wire, Value) ->
+    {Tag, FieldAtoms} = Module:record_fields(Name),
+    {_Kind, Fields} = Module:struct_info(Name),
+    thrift_runtime_native:create(Module, Tag, [
+        {Atom, maps:get(NameBin, Value, undefined)}
+     || {{_, _, _, NameBin, _}, Atom} <- lists:zip(Fields, FieldAtoms)
+    ]);
+conversion_input(Module, Name, sum, to_wire, Value) ->
+    {sum, _FieldAtoms} = Module:record_fields(Name),
+    [NameBin] = maps:keys(Value),
+    {binary_to_atom(NameBin, utf8), maps:get(NameBin, Value)}.
+
+atom_map_input(Module, Name, Value) ->
+    {_Tag, FieldAtoms} = Module:record_fields(Name),
+    {_Kind, Fields} = Module:struct_info(Name),
+    maps:from_list([
+        {Atom, maps:get(NameBin, Value)}
+     || {{_, _, _, NameBin, _}, Atom} <- lists:zip(Fields, FieldAtoms),
+        maps:is_key(NameBin, Value)
+    ]).
 
 selected(Protocol, Entry) ->
     selected_env("THRIFT_BENCH_PROTOCOL", atom_to_binary(Protocol, utf8)) andalso
@@ -357,6 +529,11 @@ encode({Protocol, Module, Name, Value}) -> Protocol:encode({struct, {ref, Module
 decode({Protocol, Module, Name, Wire}) -> Protocol:decode({struct, {ref, Module, Name}}, Wire).
 call({Function, Arg}) when is_function(Function, 1) -> Function(Arg).
 
+to_wire({Module, Name, Value}) ->
+    thrift_runtime_record:to_wire({struct, {ref, Module, Name}}, Value).
+from_wire({Module, Name, Repr, Value}) ->
+    thrift_runtime_record:from_wire({struct, {ref, Module, Name}}, Value, Repr).
+
 function_ref(Module, Function) -> erlang:make_fun(Module, Function, 1).
 
 -spec case_key(case_spec()) -> {binary(), protocol_name(), entry(), operation()}.
@@ -407,7 +584,7 @@ report(C, Samples0, Threshold) ->
         pass := Pass,
         inconclusive := Inconclusive
     } = Evaluation,
-    Gate = Entry =:= direct,
+    Gate = Entry =:= direct orelse Entry =:= conversion,
     io:format(
         "~ts ~p ~p ~p base=~.1f head=~.1f ratio=~.4f ci95=[~.4f,~.4f] delta=~.2f% pass=~p inc=~p gate=~p~n",
         [

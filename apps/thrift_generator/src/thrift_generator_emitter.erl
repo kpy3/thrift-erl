@@ -49,7 +49,10 @@ the descriptor terms, which keeps the emitter declarative.
     section_label/1,
     struct_type/1,
     sum_mode/1,
-    type_desc/2
+    type_desc/2,
+    field_atom/1,
+    record_tag_of/2,
+    types_module_atom/1
 ]).
 
 -export_type([compiled/0, source/0]).
@@ -167,7 +170,7 @@ module_sources(Mod, Ctx) ->
     [
         {TypesMod, types_forms(Mod, Ctx), types_hrl_forms(Mod, Ctx)}
         | lists:append(ServiceForms)
-    ].
+    ] ++ thrift_generator_emitter_repr:source_forms(Mod, Ctx).
 
 %%--------------------------------------------------------------------
 %% <mod>_types.erl

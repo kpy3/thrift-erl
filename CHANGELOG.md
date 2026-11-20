@@ -62,6 +62,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Note: fully plain decoded strings are now zero-copy slices,
   so a decoded value may retain the underlying input buffer (slices of
   64 bytes or less are still copied to the heap).
+- Record-mode structs (and record-mode unions) generate a companion
+  `<mod>_types_repr.erl` with direct representation converters
+  `repr_to_wire_<name>/1` / `repr_from_wire_<name>/2` (literal field
+  atoms and binary field names) registered in its `repr_index/1`;
+  `thrift_runtime_record` probes it instead of walking descriptors. The
+  converters live outside the types module so its codec sections stay
+  byte-identical — generated-code layout is a measured variable. Paired
+  conversion benchmark against `v0.8.0` (48 cells: struct x
+  representation x direction, 31 rounds): all cells pass the 0.99 gate;
+  `from_wire` gains reach +113..+152% for the atom-keyed `map`/`struct`
+  targets, +67..+97% for `native`, +25..+55% for `record`, and
+  `to_wire` gains +2..+59% with the top end on deeply nested values
+  (CrossModule). Conversion results and error terms are unchanged for
+  well-formed values; on malformed inputs the direct converters are
+  deliberately stricter than the descriptor engine (a tuple of the wrong
+  arity is rejected instead of being silently truncated, and a malformed
+  container raises instead of passing through untouched).
+- `scripts/bench-regression` measures representation conversion as
+  first-class cells: `THRIFT_BENCH_ENTRY=conversion` selects them,
+  `THRIFT_BENCH_REPR` narrows to one representation; native cells run
+  only on OTP 29+.
 
 ### Runtime (`thrift_runtime`)
 
@@ -78,6 +99,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `decode_varint/1`, `zigzag_varint/1`, `decode_zigzag/1` — for callers that
   need the shared routines. Generated compact codecs do not pay a remote call
   per primitive.
+
+- `thrift_runtime_record` dispatches record-mode structs through the
+  generated `<mod>_types_repr` module's `repr_index/1` converters: the
+  index is probed once per struct and the `{ReprModule, ToWire, FromWire}`
+  triple is cached in `persistent_term` (the same contract as the codec
+  dispatch), so `to_wire`/`from_wire` no longer re-resolve
+  `record_fields`/`struct_info` or mint field atoms on every conversion.
+  Native input values keep their identity-checked descriptor path; sum
+  unions, map-mode and native-mode structs and hand-written modules have
+  no converters and keep the descriptor engine. Conversion results and
+  error terms are unchanged for well-formed values (malformed inputs
+  meet deliberately stricter direct converters — see the generator
+  notes).
 
 ## [0.8.0] — 2026-10-27
 
@@ -129,6 +163,7 @@ The wire format, error semantics and the public API are unchanged: the
 PropEr equivalence batteries (specialized vs generic, byte for byte on
 all three protocols) and the golden interop suite guard every step.
 The full gate is green on both OTP 28 and 29.
+
 
 ### Runtime (`thrift_runtime`)
 

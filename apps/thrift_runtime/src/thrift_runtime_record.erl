@@ -43,6 +43,14 @@ keys (already the wire shape) or an Elixir-style tagged map
 Field atoms are only ever taken from generated definitions or minted
 from IDL-controlled field names — never from wire data.
 
+Generated `<mod>_types_repr' modules carry direct per-struct converters
+registered in their `repr_index/1': the hot paths of `to_wire/2' and
+`from_wire/3' probe that index once per struct and then call the cached
+functions with their literal field atoms, skipping the descriptor walk
+entirely. Structs without a converter (sum unions, map-mode and
+native-mode structs, hand-written modules) have no repr module and keep
+the descriptor engine below.
+
 A struct value that matches no representation (neither the declared
 record tag nor a map) raises `value_does_not_match_type`; the facade
 turns it into the tagged `{error, {value_does_not_match_type, Value}}`
@@ -293,13 +301,7 @@ to_wire({struct, {ref, Module, Name}}, Value) ->
         true ->
             native_to_wire(Module, Name, Value);
         false ->
-            case struct_mode(Module, Name) of
-                {record, Tag, FieldAtoms} -> record_to_wire(Module, Name, Tag, FieldAtoms, Value);
-                {map, KeyType} -> map_mode_to_wire(Module, Name, KeyType, Value);
-                {sum, _FieldAtoms} -> sum_to_wire(struct_fields(Module, Name), Value);
-                {native, _Tag} -> native_map_to_wire(Module, Name, Value);
-                wire -> Value
-            end
+            to_wire_ref(Module, Name, Value)
     end;
 to_wire({struct, {_Kind, _Fields}}, Value) ->
     %% Inline descriptors carry no identity: the value is already in
@@ -332,6 +334,31 @@ to_wire({map, KeyType, ValType}, Map) when is_map(Map) ->
 to_wire(_Type, Value) ->
     Value.
 
+%% The generated-converter arm of to_wire/2 (kept shallow for elvis).
+
+-spec to_wire_ref(module(), binary(), term()) -> term().
+to_wire_ref(Module, Name, Value) ->
+    case repr_funs(Module, Name) of
+        {ReprModule, ToWire, _} ->
+            try
+                ReprModule:ToWire(Value)
+            catch
+                error:undef:Stack ->
+                    repr_undef(Module, Name, ReprModule, ToWire, 1, Stack, fun() ->
+                        to_wire({struct, {ref, Module, Name}}, Value)
+                    end)
+            end;
+        false ->
+            to_wire_descriptor(Module, Name, Value);
+        cold ->
+            case repr_probe(Module, Name) of
+                {_ReprModule, _ToWire, _FromWire} ->
+                    to_wire({struct, {ref, Module, Name}}, Value);
+                false ->
+                    to_wire_descriptor(Module, Name, Value)
+            end
+    end.
+
 -doc "Converts a wire value to the struct's default representation.".
 -spec from_wire(type_desc(), term()) -> term().
 from_wire(Desc, Value) ->
@@ -339,10 +366,62 @@ from_wire(Desc, Value) ->
 
 -doc "Converts a wire value to the given representation.".
 -spec from_wire(type_desc(), term(), thrift_runtime:repr()) -> term().
+%% The generated `repr_index' converters own the {ref, _Module, _Name}
+%% map-input path when present; every other target keeps the descriptor
+%% engine below.
+from_wire({struct, {ref, Module, Name}}, Value, Repr) when is_map(Value) ->
+    case repr_funs(Module, Name) of
+        {ReprModule, _, FromWire} ->
+            try
+                ReprModule:FromWire(Repr, Value)
+            catch
+                error:undef:Stack ->
+                    repr_undef(Module, Name, ReprModule, FromWire, 2, Stack, fun() ->
+                        from_wire({struct, {ref, Module, Name}}, Value, Repr)
+                    end)
+            end;
+        false ->
+            from_wire_descriptor(Module, Name, Value, Repr);
+        cold ->
+            case repr_probe(Module, Name) of
+                {_ReprModule, _ToWire, _FromWire} ->
+                    from_wire({struct, {ref, Module, Name}}, Value, Repr);
+                false ->
+                    from_wire_descriptor(Module, Name, Value, Repr)
+            end
+    end;
+from_wire({struct, {_Kind, _Fields}}, Value, _Repr) ->
+    Value;
+from_wire({list, Elem}, Values, Repr) when is_list(Values) ->
+    [from_wire(Elem, V, Repr) || V <- Values];
+from_wire({set, Elem}, Values, Repr) when is_list(Values) ->
+    [from_wire(Elem, V, Repr) || V <- Values];
+from_wire({set, Elem, list}, Values, Repr) when is_list(Values) ->
+    [from_wire(Elem, V, Repr) || V <- Values];
+from_wire({set, Elem, ordset}, Values, Repr) when is_list(Values) ->
+    ordsets:from_list([from_wire(Elem, V, Repr) || V <- Values]);
+from_wire({set, Elem, sets}, Values, Repr) when is_list(Values) ->
+    sets:from_list([from_wire(Elem, V, Repr) || V <- Values]);
+from_wire({map, KeyType, ValType}, Map, Repr) when is_map(Map) ->
+    maps:fold(
+        fun(K, V, Acc) ->
+            Acc#{from_wire(KeyType, K, Repr) => from_wire(ValType, V, Repr)}
+        end,
+        #{},
+        Map
+    );
+from_wire(_Type, Value, _Repr) ->
+    Value.
+
+%% The descriptor-driven from_wire for targets without a generated
+%% converter: hand-written modules, sum unions, map-mode and native-mode
+%% structs. Semantics must stay identical to the generated converters.
+
 %% Native records keep the representation uniform all the way down: a
 %% wire-passthrough target has no identity to stamp, so its value stays
 %% the wire map.
-from_wire({struct, {ref, Module, Name}}, Value, native) when is_map(Value) ->
+-spec from_wire_descriptor(module(), binary(), map(), thrift_runtime:repr()) -> term().
+from_wire_descriptor(Module, Name, Value, native) ->
     case struct_mode(Module, Name) of
         wire ->
             Value;
@@ -361,7 +440,7 @@ from_wire({struct, {ref, Module, Name}}, Value, native) when is_map(Value) ->
             ],
             thrift_runtime_native:create(Module, native_tag(Module, Name), FieldValues)
     end;
-from_wire({struct, {ref, Module, Name}}, Value, Repr) when is_map(Value) ->
+from_wire_descriptor(Module, Name, Value, Repr) ->
     case struct_mode(Module, Name) of
         {record, Tag, _FieldAtoms} ->
             case Repr of
@@ -388,29 +467,114 @@ from_wire({struct, {ref, Module, Name}}, Value, Repr) when is_map(Value) ->
             end;
         wire ->
             Value
-    end;
-from_wire({struct, {_Kind, _Fields}}, Value, _Repr) ->
-    Value;
-from_wire({list, Elem}, Values, Repr) when is_list(Values) ->
-    [from_wire(Elem, V, Repr) || V <- Values];
-from_wire({set, Elem}, Values, Repr) when is_list(Values) ->
-    [from_wire(Elem, V, Repr) || V <- Values];
-from_wire({set, Elem, list}, Values, Repr) when is_list(Values) ->
-    [from_wire(Elem, V, Repr) || V <- Values];
-from_wire({set, Elem, ordset}, Values, Repr) when is_list(Values) ->
-    ordsets:from_list([from_wire(Elem, V, Repr) || V <- Values]);
-from_wire({set, Elem, sets}, Values, Repr) when is_list(Values) ->
-    sets:from_list([from_wire(Elem, V, Repr) || V <- Values]);
-from_wire({map, KeyType, ValType}, Map, Repr) when is_map(Map) ->
-    maps:fold(
-        fun(K, V, Acc) ->
-            Acc#{from_wire(KeyType, K, Repr) => from_wire(ValType, V, Repr)}
+    end.
+
+%% The descriptor-driven to_wire for targets without a generated
+%% converter (see from_wire_descriptor/4).
+
+-spec to_wire_descriptor(module(), binary(), term()) -> term().
+to_wire_descriptor(Module, Name, Value) ->
+    case struct_mode(Module, Name) of
+        {record, Tag, FieldAtoms} -> record_to_wire(Module, Name, Tag, FieldAtoms, Value);
+        {map, KeyType} -> map_mode_to_wire(Module, Name, KeyType, Value);
+        {sum, _FieldAtoms} -> sum_to_wire(struct_fields(Module, Name), Value);
+        {native, _Tag} -> native_map_to_wire(Module, Name, Value);
+        wire -> Value
+    end.
+
+%%--------------------------------------------------------------------
+%% Generated converter dispatch
+%%--------------------------------------------------------------------
+
+%% The same dispatch contract the codec indexes use
+%% (thrift_runtime_protocol): the hot path reads this module's own
+%% persistent_term key, the cold probe asks the generated
+%% `<types>_repr' module's `repr_index/1' once per struct name and
+%% caches the verdict — the `{ReprModule, ToWire, FromWire}' triple for
+%% record-mode structs, `false' for everything without a converter
+%% (hand-written modules, sum unions, map-mode and native-mode structs).
+%% A reload that drops a converter surfaces as undef on the call:
+%% repr_stale/2 drops the entry and the caller re-enters, landing on the
+%% descriptor path.
+
+-spec repr_funs(module(), binary()) -> {module(), atom(), atom()} | false | cold.
+repr_funs(Module, Name) ->
+    case persistent_term:get({?MODULE, repr_mfa, Module}, probe) of
+        #{Name := Entry} -> Entry;
+        _ -> cold
+    end.
+
+-spec repr_probe(module(), binary()) -> {module(), atom(), atom()} | false.
+repr_probe(Module, Name) ->
+    ReprModule = repr_module(Module),
+    Entry =
+        case code:ensure_loaded(ReprModule) of
+            {module, ReprModule} ->
+                case erlang:function_exported(ReprModule, repr_index, 1) of
+                    true ->
+                        case ReprModule:repr_index(Name) of
+                            {ok, {ToWire, FromWire}} when is_atom(ToWire), is_atom(FromWire) ->
+                                {ReprModule, ToWire, FromWire};
+                            error ->
+                                false
+                        end;
+                    false ->
+                        false
+                end;
+            {error, _} ->
+                false
         end,
-        #{},
-        Map
-    );
-from_wire(_Type, Value, _Repr) ->
-    Value.
+    repr_cache(Module, Name, Entry),
+    Entry.
+
+%% The repr module of a types module: `<mod>_types_repr'. The name is
+%% derived from an already-loaded generated module, so the atom is
+%% IDL-controlled, never wire data. A cached `false' verdict is not
+%% invalidated when a repr module appears later — same documented
+%% no-hot-swap trade-off as the codec dispatch.
+
+-spec repr_module(module()) -> module().
+repr_module(Module) ->
+    binary_to_atom(<<(atom_to_binary(Module, utf8))/binary, "_repr">>, utf8).
+
+%% Merges one probed name into the per-module map; last write wins, so
+%% a racing writer can drop this entry — that only costs a re-probe.
+
+-spec repr_cache(module(), binary(), {module(), atom(), atom()} | false) -> ok.
+repr_cache(Module, Name, Entry) ->
+    Key = {?MODULE, repr_mfa, Module},
+    case persistent_term:get(Key, probe) of
+        Cached when is_map(Cached) ->
+            persistent_term:put(Key, Cached#{Name => Entry});
+        _ ->
+            persistent_term:put(Key, #{Name => Entry})
+    end.
+
+-spec repr_stale(module(), binary()) -> ok.
+repr_stale(Module, Name) ->
+    Key = {?MODULE, repr_mfa, Module},
+    case persistent_term:get(Key, probe) of
+        Cached when is_map(Cached) ->
+            persistent_term:put(Key, maps:remove(Name, Cached));
+        _ ->
+            ok
+    end.
+
+%% An undef on a cached converter call means either a genuinely missing
+%% function inside it (re-raise — the converter is broken, not stale) or
+%% a reload that dropped it (invalidate and re-enter on the descriptor
+%% path).
+
+-spec repr_undef(module(), binary(), module(), atom(), arity(), erlang:stacktrace(), fun(() -> term())) ->
+    term().
+repr_undef(Module, Name, ReprModule, Fun, Arity, Stack, Retry) ->
+    case erlang:function_exported(ReprModule, Fun, Arity) of
+        true ->
+            erlang:raise(error, undef, Stack);
+        false ->
+            repr_stale(Module, Name),
+            Retry()
+    end.
 
 %%--------------------------------------------------------------------
 %% Struct mode resolution
