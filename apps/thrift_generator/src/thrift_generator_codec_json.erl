@@ -1844,7 +1844,10 @@ helper_forms(json_scan_number) ->
                             [
                                 clause([v("_Match")], none, [
                                     'case'(
-                                        call_local(json_classify_number, [v("Token"), v("Rest"), v("Float"), v("Last")]),
+                                        call_local(
+                                            json_classify_number,
+                                            [v("Token"), v("Rest"), v("Float"), v("Last")]
+                                        ),
                                         [
                                             ok_bind_clause(v("Number"), ok3(v("Number"), v("Rest"))),
                                             other_tail()

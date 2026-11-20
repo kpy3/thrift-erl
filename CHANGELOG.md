@@ -54,10 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strings encode untouched (a single plain byte returns directly, without
   the scan loop), and number tokens are sliced with the float marker
   tracked in arguments instead of `lists:last`/`lists:any` over a reversed
-  accumulator. Paired benchmark against `v0.8.0`: all 72 cells (including the
-  new XtructLong 2 KB-string cell) pass the 0.99 gate; direct JSON gains reach
-  +438%/+148% (long-string encode/decode), +52%/+19% (number-heavy
-  CrossModule), +43%/+8% (SomeUnion). Wire bytes and error terms are
+  accumulator. Paired benchmark against `v0.8.0` (31 rounds, borderline
+  cells re-measured at 121 rounds): all 72 cells (including the new
+  XtructLong 2 KB-string cell) pass the 0.99 gate; direct JSON gains reach
+  +398%/+192% (long-string encode/decode), +37%/+17% (number-heavy
+  CrossModule), +42%/+10% (SomeUnion). Wire bytes and error terms are
   unchanged.
 
 ### Runtime (`thrift_runtime`)
