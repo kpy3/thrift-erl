@@ -83,6 +83,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first-class cells: `THRIFT_BENCH_ENTRY=conversion` selects them,
   `THRIFT_BENCH_REPR` narrows to one representation; native cells run
   only on OTP 29+.
+- Compact codecs compute enum payloads and statically-known field
+  headers at generation: an enum value the generator knows emits its
+  zigzag-varint bytes as a literal (in the generic engine's iodata term
+  shape — map pairs sort by the encoded-key term), and a field whose
+  predecessor is required gets its one- or two-part header emitted as
+  bytes instead of a runtime `enc_header` call. Wire bytes are
+  unchanged; the dynamic paths remain for values and delta bases the
+  generator cannot prove. Paired benchmark against `v0.8.0`: direct
+  compact encode gains reach +4% (Xtruct), +9% (Insanity), +12%
+  (SomeUnion) and +36% (nested CrossModule); the full 120-cell matrix
+  shows no confirmed regression above the 1% budget.
 
 ### Runtime (`thrift_runtime`)
 
@@ -112,6 +123,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error terms are unchanged for well-formed values (malformed inputs
   meet deliberately stricter direct converters — see the generator
   notes).
+- The generic JSON engine answers its `i8`/`i16`/`i32`/`i64` type tags
+  as compile-time binaries instead of rebuilding them with
+  `atom_to_binary` on every collection header.
 
 ## [0.8.0] — 2026-10-27
 
