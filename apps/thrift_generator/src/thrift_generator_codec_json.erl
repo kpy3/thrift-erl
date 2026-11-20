@@ -414,7 +414,9 @@ chain_fn(Chain, N, F, {base, B} = T, NextStep, _Ctx, _Enums) when
             S when S =:= string; S =:= binary ->
                 [
                     clause([map_exact(Name, v("V"))], [remote(erlang, is_binary, [v("V")])], [
-                        present_call(NextStep, Prefix, list_lit([i(34), call_local(json_escape, [v("V"), v("V")]), i(34)]))
+                        present_call(
+                            NextStep, Prefix, list_lit([i(34), call_local(json_escape, [v("V"), v("V")]), i(34)])
+                        )
                     ]),
                     clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])
                 ];
@@ -1691,8 +1693,7 @@ helper_forms(json_scan_string_plain) ->
             clause(
                 [
                     v("Orig"),
-                    {match, ?ANNO, v("Bin"),
-                        bin_pat([{i(34), default, default}, {v("Rest"), default, [binary]}])}
+                    {match, ?ANNO, v("Bin"), bin_pat([{i(34), default, default}, {v("Rest"), default, [binary]}])}
                 ],
                 none,
                 [ok3(slice_prefix(v("Orig"), v("Bin")), v("Rest"))]
@@ -1700,8 +1701,7 @@ helper_forms(json_scan_string_plain) ->
             clause(
                 [
                     v("Orig"),
-                    {match, ?ANNO, v("Bin"),
-                        bin_pat([{i(92), default, default}, {v("_Rest0"), default, [binary]}])}
+                    {match, ?ANNO, v("Bin"), bin_pat([{i(92), default, default}, {v("_Rest0"), default, [binary]}])}
                 ],
                 none,
                 [call_local(json_scan_string_body, [v("Bin"), list_lit([slice_prefix(v("Orig"), v("Bin"))])])]
@@ -1884,8 +1884,8 @@ helper_forms(json_take_number) ->
                     v("_L")
                 ],
                 [
-                    {op, ?ANNO, 'orelse', {op, ?ANNO, 'orelse', {op, ?ANNO, '=:=', v("C"), i(46)},
-                        {op, ?ANNO, '=:=', v("C"), i(101)}},
+                    {op, ?ANNO, 'orelse',
+                        {op, ?ANNO, 'orelse', {op, ?ANNO, '=:=', v("C"), i(46)}, {op, ?ANNO, '=:=', v("C"), i(101)}},
                         {op, ?ANNO, '=:=', v("C"), i(69)}}
                 ],
                 [call_local(json_take_number, [v("Orig"), v("Rest"), at(true), v("C")])]
@@ -1944,6 +1944,17 @@ helper_forms(json_escape) ->
     %% whole binary while the first argument is consumed.
     [
         {function, ?ANNO, json_escape, 2, [
+            %% One plain byte returns directly: short flag-like strings
+            %% skip the scan loop entirely (Insanity carries 100 of them).
+            clause(
+                [bin_pat([{v("C"), i(8), [big, unsigned]}]), v("Orig")],
+                [
+                    {op, ?ANNO, 'andalso',
+                        {op, ?ANNO, 'andalso', {op, ?ANNO, '=/=', v("C"), i(34)}, {op, ?ANNO, '=/=', v("C"), i(92)}},
+                        {op, ?ANNO, '>=', v("C"), i(16#20)}}
+                ],
+                [v("Orig")]
+            ),
             clause(
                 [
                     bin_pat([{v("C"), i(8), [big, unsigned]}, {v("Rest"), default, [binary]}]),
@@ -1951,8 +1962,7 @@ helper_forms(json_escape) ->
                 ],
                 [
                     {op, ?ANNO, 'andalso',
-                        {op, ?ANNO, 'andalso', {op, ?ANNO, '=/=', v("C"), i(34)},
-                            {op, ?ANNO, '=/=', v("C"), i(92)}},
+                        {op, ?ANNO, 'andalso', {op, ?ANNO, '=/=', v("C"), i(34)}, {op, ?ANNO, '=/=', v("C"), i(92)}},
                         {op, ?ANNO, '>=', v("C"), i(16#20)}}
                 ],
                 [call_local(json_escape, [v("Rest"), v("Orig")])]

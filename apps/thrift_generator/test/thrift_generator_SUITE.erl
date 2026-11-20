@@ -647,6 +647,8 @@ json_fast_path_helpers(Config) ->
     %% forwarder call, plain prefixes returned as-is)
     ?assertMatch({match, _}, re:run(Src, <<"json_escape\\(Rest, Orig\\)">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"json_escape_needed">>, [])),
+    %% single-byte plain strings return immediately, without the scan loop
+    ?assertMatch({match, _}, re:run(Src, <<"json_escape\\(<<C:8/big-unsigned>>, Orig\\)">>, [])),
     %% the list-based number classification is gone
     ?assertEqual(nomatch, re:run(Src, <<"lists:last">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"lists:any">>, [])),

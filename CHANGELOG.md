@@ -51,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkout, with the same per-cell 0.99 gate as `scripts/bench-regression`.
 - JSON string/number helpers scan in one pass without per-byte list
   accumulation: plain string runs decode to a zero-copy slice and escape-free
-  strings encode untouched, and number tokens are sliced with the float marker
+  strings encode untouched (a single plain byte returns directly, without
+  the scan loop), and number tokens are sliced with the float marker
   tracked in arguments instead of `lists:last`/`lists:any` over a reversed
   accumulator. Paired benchmark against `v0.8.0`: all 72 cells (including the
   new XtructLong 2 KB-string cell) pass the 0.99 gate; direct JSON gains reach
