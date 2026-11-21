@@ -1693,7 +1693,14 @@ repr_encode_entry(S, Name, Tag, FieldTypes, Flavor, _Ctx, _Enums) ->
             union ->
                 union_check(S#tg_struct.fields, EntryCall);
             _ ->
-                EntryCall
+                %% The wire entry refuses missing required fields before
+                %% encoding anything; the repr entries must answer the
+                %% same error term, reading presence from the target
+                %% representation directly.
+                case Flavor of
+                    record -> repr_required_check_record(S#tg_struct.fields, Vars, EntryCall);
+                    map -> repr_required_check_map(S#tg_struct.fields, EntryCall)
+                end
         end,
     HeadPat =
         case Flavor of
@@ -1714,6 +1721,69 @@ repr_encode_entry(S, Name, Tag, FieldTypes, Flavor, _Ctx, _Enums) ->
 
 repr_mismatch_error(V) ->
     {tuple, ?ANNO, [{atom, ?ANNO, error}, tuple_t([at(value_does_not_match_type), V])]}.
+
+%% Required presence for the repr entries: same error term and name
+%% order as the wire `required_check/2', but presence reads the target
+%% representation — a record position is present when it is not
+%% `undefined'; a map key counts under its binary or atom spelling (the
+%% map chain looks binary names up first, atom ones second).
+
+repr_required_check_record(Fields, Vars, Call) ->
+    Required = [F || F <- Fields, F#tg_field.required =:= required],
+    case Required of
+        [] ->
+            Call;
+        _ ->
+            Pairs = lists:zip(Required, required_vars(Fields, Required, Vars)),
+            Guards = [{op, ?ANNO, '=/=', Var, at(undefined)} || {_F, Var} <- Pairs],
+            Missing = missing_required_lc([
+                tuple_t([name_lit(F#tg_field.name), {op, ?ANNO, '=/=', Var, at(undefined)}])
+             || {F, Var} <- Pairs
+            ]),
+            'case'(at(true), [
+                clause([v("_")], Guards, [Call]),
+                clause([v("_")], none, [err_encode(tuple_t([at(missing_required_fields), Missing]))])
+            ])
+    end.
+
+required_vars(Fields, Required, Vars) ->
+    Positions = [lists:keyfind(F#tg_field.id, 1, [{G#tg_field.id, I} || {I, G} <- lists:zip(lists:seq(1, length(Fields)), Fields)]) || F <- Required],
+    [lists:nth(I, Vars) || {_, I} <- Positions].
+
+repr_required_check_map(Fields, Call) ->
+    Required = [F || F <- Fields, F#tg_field.required =:= required],
+    case Required of
+        [] ->
+            Call;
+        _ ->
+            Presence = [
+                tuple_t([name_lit(F#tg_field.name), map_key_present(F, v("Value"))])
+             || F <- Required
+            ],
+            AllPresent = lists:foldr(
+                fun(F, Acc) -> {op, ?ANNO, 'andalso', map_key_present(F, v("Value")), Acc} end,
+                at(true),
+                Required
+            ),
+            Missing = missing_required_lc(Presence),
+            'case'(AllPresent, [
+                clause([at(true)], none, [Call]),
+                clause([v("_")], none, [err_encode(tuple_t([at(missing_required_fields), Missing]))])
+            ])
+    end.
+
+map_key_present(F, Map) ->
+    {op, ?ANNO, 'orelse',
+        remote(maps, is_key, [name_lit(F#tg_field.name), Map]),
+        remote(maps, is_key, [at(field_atom(F#tg_field.name)), Map])}.
+
+missing_required_lc(PresenceTuples) ->
+    %% The filter is a bare expression: raw-AST qualifiers carry no
+    %% `{filter, _}' wrapper (that shape is erl_syntax-only).
+    lc(v("N"), [
+        {generate, ?ANNO, tuple_pat([v("N"), v("P")]), list_lit(PresenceTuples)},
+        {op, ?ANNO, 'not', v("P")}
+    ]).
 
 repr_union_check_record(Vars, Call) ->
     Counts = [
