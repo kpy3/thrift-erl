@@ -44,12 +44,13 @@ Field atoms are only ever taken from generated definitions or minted
 from IDL-controlled field names — never from wire data.
 
 Generated `<mod>_types_repr' modules carry direct per-struct converters
-registered in their `repr_index/1': the hot paths of `to_wire/2' and
+registered in their `repr_index/1': tuple-record `to_wire/2' and
 `from_wire/3' probe that index once per struct and then call the cached
-functions with their literal field atoms, skipping the descriptor walk
-entirely. Structs without a converter (sum unions, map-mode and
-native-mode structs, hand-written modules) have no repr module and keep
-the descriptor engine below.
+functions with their literal field atoms, skipping the descriptor walk.
+Map-shaped `to_wire/2' keeps the descriptor's maps:from_list path, which
+is faster than the generated per-field map_put chain. Structs without a
+converter (sum unions, map-mode and native-mode structs, hand-written
+modules) have no repr module and keep the descriptor engine below.
 
 A struct value that matches no representation (neither the declared
 record tag nor a map) raises `value_does_not_match_type`; the facade
@@ -335,8 +336,12 @@ to_wire(_Type, Value) ->
     Value.
 
 %% The generated-converter arm of to_wire/2 (kept shallow for elvis).
+%% Map-shaped inputs keep the descriptor's maps:from_list construction:
+%% the generated per-field map_put chain is slower on this path.
 
 -spec to_wire_ref(module(), binary(), term()) -> term().
+to_wire_ref(Module, Name, Value) when is_map(Value) ->
+    to_wire_descriptor(Module, Name, Value);
 to_wire_ref(Module, Name, Value) ->
     case repr_funs(Module, Name) of
         {ReprModule, ToWire, _} ->

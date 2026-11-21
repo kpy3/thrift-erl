@@ -824,10 +824,11 @@ Record-mode structs also generate a companion `<mod>_types_repr.erl`
 with direct representation converters `repr_to_wire_<name>/1` /
 `repr_from_wire_<name>/2` (literal field atoms, no descriptor walk)
 registered in its `repr_index/1`; `thrift_runtime_record` dispatches
-through it for `to_wire`/`from_wire`. The converters live outside the
-types module on purpose — generated-code layout is a measured
-performance variable. Sum unions, map-mode and native-mode structs get
-no converters and keep the descriptor engine.
+through it for tuple-record `to_wire` and `from_wire`. Map-shaped
+`to_wire` keeps the descriptor's faster `maps:from_list` path. The
+converters live outside the types module on purpose — generated-code
+layout is a measured performance variable. Sum unions, map-mode and
+native-mode structs get no converters and keep the descriptor engine.
 
 ## Performance
 

@@ -48,8 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct representation converters (`repr_index/1`, literal atoms; the
   types module stays byte-identical — layout is a measured variable):
   `from_wire` +113..+152% (map/struct), +67..+97% (native), +25..+55%
-  (record), `to_wire` up to +59% on nested values. Malformed inputs
-  meet deliberately stricter converters.
+  (record), tuple `to_wire` up to +59% on nested values; map-shaped
+  `to_wire` keeps the faster descriptor `maps:from_list` path.
+  Malformed inputs meet deliberately stricter converters.
 - Compact enum payloads and statically-known field headers are computed
   at generation (iodata term shape preserved — map key order depends on
   it): direct compact encode +2.5..+36% (CrossModule +36%).

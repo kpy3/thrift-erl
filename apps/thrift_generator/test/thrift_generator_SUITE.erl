@@ -723,8 +723,12 @@ repr_direct_converters(Config) ->
     CacheKey = {thrift_runtime_record, repr_mfa, reprdirect_types},
     _ = persistent_term:erase(CacheKey),
     Outer = {struct, {ref, reprdirect_types, <<"Outer">>}},
-    %% tuple record input, nested tuple converted too
     Wire = #{<<"s">> => <<"a">>, <<"n">> => 3, <<"inner">> => #{<<"s">> => <<"b">>}},
+    %% map-shaped inputs keep the descriptor's maps:from_list path: it is
+    %% faster than the generated map_put chain and must not probe repr_index
+    ?assertEqual(Wire, thrift_runtime_record:to_wire(Outer, Wire)),
+    ?assertEqual(undefined, persistent_term:get(CacheKey, undefined)),
+    %% tuple record input, nested tuple converted too
     ?assertEqual(
         Wire,
         thrift_runtime_record:to_wire(Outer, {reprdirect_outer, <<"a">>, 3, {reprdirect_inner, <<"b">>}, undefined})
