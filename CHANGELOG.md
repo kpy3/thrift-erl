@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries, exactly like the two-pass path). Through the
   `thrift_runtime` facade the
   measured medians against the explicit two-pass baseline are
-  +85/+96% (record encode/decode), +61/+101% (map), +59/+79% (struct)
-  and +33% (native decode, OTP 29+); bytes, error terms and APIs are
+  +81/+93% (record encode/decode), +58/+97% (map), +56/+77% (struct)
+  and +31% (native decode, OTP 29+); bytes, error terms and APIs are
   unchanged.
 - `scripts/bench-regression`: paired historical benchmark of generated
   code against a git ref (defaults to `v0.8.0`), per-cell 0.99 gate,
