@@ -145,7 +145,17 @@ compare() ->
     Rounds = max(3, env_int("THRIFT_BENCH_ROUNDS", 31)),
     SampleMs = max(1, env_int("THRIFT_BENCH_SAMPLE_MS", 250)),
     Threshold = env_float("THRIFT_BENCH_THRESHOLD", 0.99),
-    Cases = [calibrate(C, SampleMs) || C <- cases(Specs)],
+    Cases0 = [calibrate(C, SampleMs) || C <- cases(Specs)],
+    %% A knob-filtered group (e.g. THRIFT_BENCH_ENTRY=direct with only
+    %% one protocol) can select no cells at all in this VM.
+    Cases =
+        case Cases0 of
+            [] ->
+                io:format("no cells selected for this group~n"),
+                [];
+            _ ->
+                Cases0
+        end,
     io:format("paired benchmark: ~p cells, ~p rounds, target ~p ms/side~n", [length(Cases), Rounds, SampleMs]),
     Results = lists:foldl(
         fun(Round, Acc) ->
