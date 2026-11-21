@@ -865,6 +865,17 @@ rounds with the same 0.99 gate. `THRIFT_BENCH_FUNCTION` selects one
 function. It is the acceptance check for RPC-path optimizations, which
 codec-level numbers alone cannot prove.
 
+Binary-protocol calls through the `thrift_runtime` facade take a
+one-pass path when the target module was generated with repr-native
+codecs (the default): `encode/2,3,4` reads a tuple-with-tag record, an
+atom- or binary-keyed map (or a native record, OTP 29+) straight to
+wire bytes, and `decode/3,4` builds the requested representation
+directly, with no intermediate wire map. Any value the fast path cannot
+represent — mixed nesting, malformed shapes — retries the two-pass
+path and answers identically, byte for byte and error for error; a
+PropEr property pins that parity on well-formed, corrupted and
+mixed inputs across all four representations.
+
 Our codec compiles type descriptors once — referenced structs in a shared
 `persistent_term` cache, inline descriptors in a per-process memo — so
 nested schemas are never re-resolved per wire occurrence. The emitter

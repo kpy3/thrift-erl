@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Generator (`thrift_generator`)
 
+- Repr-native one-pass binary codecs: generated types modules encode
+  tuple records and maps directly to wire bytes and decode wire bytes
+  straight into record/map/struct/native values, skipping the
+  intermediate wire map; tagged unions join the family with the
+  exactly-one-field checks. Through the `thrift_runtime` facade the
+  measured medians against the explicit two-pass baseline are
+  +85/+96% (record encode/decode), +61/+101% (map), +59/+79% (struct)
+  and +33% (native decode, OTP 29+); bytes, error terms and APIs are
+  unchanged.
 - `scripts/bench-regression`: paired historical benchmark of generated
   code against a git ref (defaults to `v0.8.0`), per-cell 0.99 gate,
   direct/public entries, cross-module and representation-conversion
@@ -47,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Runtime (`thrift_runtime`)
 
+- `encode/2,3,4` and `decode/3,4` route binary-protocol struct calls
+  through the generated repr-native codecs (persistent_term-cached
+  probe, the same pattern as the codec dispatch); any fast-path failure
+  retries the two-pass path, so mixed nesting and every error term
+  answer exactly as before. Native values take the fast path on OTP 29+
+  only.
 - `thrift_runtime_client`/`thrift_runtime_connection` use the
   `codecs` hooks for RPC params/results, skipping descriptor
   interpretation; missing hooks or stale codecs fall back to the
