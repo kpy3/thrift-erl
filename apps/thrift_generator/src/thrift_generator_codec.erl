@@ -1097,8 +1097,9 @@ repr_decode_forms(Structs, Ctx, Enums) ->
 %% thrift_runtime_native:fields/1 at the facade).
 
 repr_index_forms(Convertible, Ctx) ->
-    Clauses = lists:append([repr_index_clauses(S, Ctx) || S <- Convertible]) ++
-        [clause([v("_"), v("_")], none, [at(error)])],
+    Clauses =
+        lists:append([repr_index_clauses(S, Ctx) || S <- Convertible]) ++
+            [clause([v("_"), v("_")], none, [at(error)])],
     [
         {attribute, ?ANNO, spec,
             {{binary_repr_codec, 2}, [
@@ -1106,8 +1107,10 @@ repr_index_forms(Convertible, Ctx) ->
                     {type, ?ANNO, product, [
                         {type, ?ANNO, binary, [{integer, ?ANNO, 0}, {integer, ?ANNO, 8}]},
                         {type, ?ANNO, union, [
-                            {atom, ?ANNO, record}, {atom, ?ANNO, map},
-                            {atom, ?ANNO, struct}, {atom, ?ANNO, native}
+                            {atom, ?ANNO, record},
+                            {atom, ?ANNO, map},
+                            {atom, ?ANNO, struct},
+                            {atom, ?ANNO, native}
                         ]}
                     ]},
                     {type, ?ANNO, union, [
@@ -1130,7 +1133,9 @@ repr_index_clauses(S, Ctx) ->
         true ->
             [
                 clause([bin_lit(S#tg_struct.name), at(record)], none, [
-                    tuple_t([at(ok), tuple_t([at(repr_encode_name(Encode, record)), at(repr_decode_name(Decode, record))])])
+                    tuple_t([
+                        at(ok), tuple_t([at(repr_encode_name(Encode, record)), at(repr_decode_name(Decode, record))])
+                    ])
                 ]),
                 clause([bin_lit(S#tg_struct.name), at(native)], none, [
                     tuple_t([at(ok), tuple_t([at(repr_encode_name(Encode, map)), at(repr_decode_name(Decode, native))])])
@@ -1382,8 +1387,10 @@ repr_decode_container_names(T, Enums, Flavor) ->
             {map, _, _} -> <<"_pairs">>;
             _ -> <<"_elems">>
         end,
-    {binary_to_atom(<<Base/binary, Suffix/binary>>, utf8),
-        binary_to_atom(<<Base/binary, AuxSuffix/binary, Suffix/binary>>, utf8)}.
+    {
+        binary_to_atom(<<Base/binary, Suffix/binary>>, utf8),
+        binary_to_atom(<<Base/binary, AuxSuffix/binary, Suffix/binary>>, utf8)
+    }.
 
 repr_decode_module_containers(Convertible, Ctx, Enums) ->
     WireTypes = lists:append([
@@ -1403,12 +1410,24 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
     [
         {function, ?ANNO, Dec, 1, [
             clause(
-                [bin_pat([{i(Wire), i(8), [big, unsigned]}, {v("Size"), i(32), [big, signed]}, {v("_Rest"), default, [binary]}])],
+                [
+                    bin_pat([
+                        {i(Wire), i(8), [big, unsigned]},
+                        {v("Size"), i(32), [big, signed]},
+                        {v("_Rest"), default, [binary]}
+                    ])
+                ],
                 [{op, ?ANNO, '<', v("Size"), i(0)}],
                 [err_decode(at(bad_sequence_size))]
             ),
             clause(
-                [bin_pat([{i(Wire), i(8), [big, unsigned]}, {v("Size"), i(32), [big, signed]}, {v("Rest"), default, [binary]}])],
+                [
+                    bin_pat([
+                        {i(Wire), i(8), [big, unsigned]},
+                        {v("Size"), i(32), [big, signed]},
+                        {v("Rest"), default, [binary]}
+                    ])
+                ],
                 none,
                 %% The elems tail carries the consumed rest out itself;
                 %% `more` and `{error, _}` propagate unchanged.
@@ -1420,7 +1439,9 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
             clause([v("Rest"), i(0), v("Acc")], none, [ok3(remote(lists, reverse, [v("Acc")]), v("Rest"))]),
             clause(
                 [
-                    bin_pat([{v("_"), default, default}, {v("_"), i(32), [big, signed]}, {v("_Rest"), default, [binary]}]),
+                    bin_pat([
+                        {v("_"), default, default}, {v("_"), i(32), [big, signed]}, {v("_Rest"), default, [binary]}
+                    ]),
                     v("Size"),
                     v("_Acc")
                 ],
@@ -1429,11 +1450,15 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
             ),
             clause([v("Rest"), v("Size"), v("Acc")], none, [
                 'case'(repr_field_decode(Elem, v("Rest"), Flavor, Ctx, Enums, "E"), [
-                    ok3_bind_clause(v("V"), v("Rest1"), call_local(DecElems, [
+                    ok3_bind_clause(
+                        v("V"),
                         v("Rest1"),
-                        {op, ?ANNO, '-', v("Size"), i(1)},
-                        cons(v("V"), v("Acc"))
-                    ])),
+                        call_local(DecElems, [
+                            v("Rest1"),
+                            {op, ?ANNO, '-', v("Size"), i(1)},
+                            cons(v("V"), v("Acc"))
+                        ])
+                    ),
                     clause([at(more)], none, [at(more)]),
                     error_clause()
                 ])
@@ -1447,12 +1472,26 @@ repr_decode_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
     [
         {function, ?ANNO, Dec, 1, [
             clause(
-                [bin_pat([{v("_"), default, default}, {v("_"), default, default}, {v("Size"), i(32), [big, signed]}, {v("_"), default, [binary]}])],
+                [
+                    bin_pat([
+                        {v("_"), default, default},
+                        {v("_"), default, default},
+                        {v("Size"), i(32), [big, signed]},
+                        {v("_"), default, [binary]}
+                    ])
+                ],
                 [{op, ?ANNO, '<', v("Size"), i(0)}],
                 [err_decode(at(bad_map_size))]
             ),
             clause(
-                [bin_pat([{i(KWire), i(8), [big, unsigned]}, {i(VWire), i(8), [big, unsigned]}, {v("Size"), i(32), [big, signed]}, {v("Rest"), default, [binary]}])],
+                [
+                    bin_pat([
+                        {i(KWire), i(8), [big, unsigned]},
+                        {i(VWire), i(8), [big, unsigned]},
+                        {v("Size"), i(32), [big, signed]},
+                        {v("Rest"), default, [binary]}
+                    ])
+                ],
                 none,
                 [call_local(DecPairs, [v("Rest"), v("Size"), map_empty()])]
             ),
@@ -1462,7 +1501,9 @@ repr_decode_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
             clause([v("Rest"), i(0), v("Acc")], none, [ok3(v("Acc"), v("Rest"))]),
             clause(
                 [
-                    bin_pat([{v("_"), default, default}, {v("_"), i(32), [big, signed]}, {v("_Rest"), default, [binary]}]),
+                    bin_pat([
+                        {v("_"), default, default}, {v("_"), i(32), [big, signed]}, {v("_Rest"), default, [binary]}
+                    ]),
                     v("Size"),
                     v("_Acc")
                 ],
@@ -1471,7 +1512,9 @@ repr_decode_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
             ),
             clause([v("Rest"), v("Size"), v("Acc")], none, [
                 'case'(repr_field_decode(KType, v("Rest"), Flavor, Ctx, Enums, "K"), [
-                    ok3_bind_clause(v("K"), v("Rest1"),
+                    ok3_bind_clause(
+                        v("K"),
+                        v("Rest1"),
                         'case'(repr_field_decode(VType, v("Rest1"), Flavor, Ctx, Enums, "V"), [
                             ok3_bind_clause(
                                 v("V"),
@@ -1535,18 +1578,20 @@ repr_encode_export_entries(Mod, Ctx) ->
         begin
             {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
             EncEntries = [{repr_encode_name(Encode, map), 1}],
-            Enc = case thrift_generator_emitter:has_record(S) of
-                true -> [{repr_encode_name(Encode, record), 1} | EncEntries];
-                false -> EncEntries
-            end,
+            Enc =
+                case thrift_generator_emitter:has_record(S) of
+                    true -> [{repr_encode_name(Encode, record), 1} | EncEntries];
+                    false -> EncEntries
+                end,
             DecEntries = [
                 {repr_decode_name(Decode, map), 1},
                 {repr_decode_name(Decode, struct), 1}
             ],
-            Dec = case thrift_generator_emitter:has_record(S) of
-                true -> [{repr_decode_name(Decode, record), 1}, {repr_decode_name(Decode, native), 1} | DecEntries];
-                false -> DecEntries
-            end,
+            Dec =
+                case thrift_generator_emitter:has_record(S) of
+                    true -> [{repr_decode_name(Decode, record), 1}, {repr_decode_name(Decode, native), 1} | DecEntries];
+                    false -> DecEntries
+                end,
             Enc ++ Dec
         end
      || S <- Convertible
@@ -1566,9 +1611,16 @@ repr_encode_export_entries(Mod, Ctx) ->
             {MapD, MapDAux} = repr_decode_container_names(C, Enums, map),
             {StructD, StructDAux} = repr_decode_container_names(C, Enums, struct),
             {NativeD, NativeDAux} = repr_decode_container_names(C, Enums, native),
-            [{RecD, 1}, {RecDAux, dec_aux_arity(C)}, {MapD, 1}, {MapDAux, dec_aux_arity(C)},
-                {StructD, 1}, {StructDAux, dec_aux_arity(C)},
-                {NativeD, 1}, {NativeDAux, dec_aux_arity(C)}]
+            [
+                {RecD, 1},
+                {RecDAux, dec_aux_arity(C)},
+                {MapD, 1},
+                {MapDAux, dec_aux_arity(C)},
+                {StructD, 1},
+                {StructDAux, dec_aux_arity(C)},
+                {NativeD, 1},
+                {NativeDAux, dec_aux_arity(C)}
+            ]
         end
      || C <- repr_containers(WireTypes)
     ]),
@@ -1604,8 +1656,10 @@ repr_container_names(T, Enums, Flavor) ->
             {map, _, _} -> <<"_pairs">>;
             _ -> <<"_elems">>
         end,
-    {binary_to_atom(<<Base/binary, Suffix/binary>>, utf8),
-        binary_to_atom(<<Base/binary, AuxSuffix/binary, Suffix/binary>>, utf8)}.
+    {
+        binary_to_atom(<<Base/binary, Suffix/binary>>, utf8),
+        binary_to_atom(<<Base/binary, AuxSuffix/binary, Suffix/binary>>, utf8)
+    }.
 
 %%--------------------------------------------------------------------
 %% Repr-native encoders
@@ -1747,7 +1801,13 @@ repr_required_check_record(Fields, Vars, Call) ->
     end.
 
 required_vars(Fields, Required, Vars) ->
-    Positions = [lists:keyfind(F#tg_field.id, 1, [{G#tg_field.id, I} || {I, G} <- lists:zip(lists:seq(1, length(Fields)), Fields)]) || F <- Required],
+    Positions = [
+        lists:keyfind(F#tg_field.id, 1, [
+            {G#tg_field.id, I}
+         || {I, G} <- lists:zip(lists:seq(1, length(Fields)), Fields)
+        ])
+     || F <- Required
+    ],
     [lists:nth(I, Vars) || {_, I} <- Positions].
 
 repr_required_check_map(Fields, Call) ->
@@ -1773,8 +1833,7 @@ repr_required_check_map(Fields, Call) ->
     end.
 
 map_key_present(F, Map) ->
-    {op, ?ANNO, 'orelse',
-        remote(maps, is_key, [name_lit(F#tg_field.name), Map]),
+    {op, ?ANNO, 'orelse', remote(maps, is_key, [name_lit(F#tg_field.name), Map]),
         remote(maps, is_key, [at(field_atom(F#tg_field.name)), Map])}.
 
 missing_required_lc(PresenceTuples) ->

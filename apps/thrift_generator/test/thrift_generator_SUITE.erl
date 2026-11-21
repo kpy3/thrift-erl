@@ -1078,14 +1078,24 @@ repr_native_binary_decoders(Config) ->
     %% record: tuple, absent optionals as undefined
     {ok, Rec, <<>>} = Mod:decode_reprnativedec_outer_wire_record(Bin),
     ?assertEqual({reprnativedec_outer, <<"o-1">>, {reprnativedec_inner, <<"v">>}, 7}, Rec),
-    {ok, RecNoN, <<>>} = Mod:decode_reprnativedec_outer_wire_record(iolist_to_binary(element(2, thrift_runtime_binary:encode(Desc, maps:remove(<<"n">>, Wire))))),
+    {ok, RecNoN, <<>>} = Mod:decode_reprnativedec_outer_wire_record(
+        iolist_to_binary(element(2, thrift_runtime_binary:encode(Desc, maps:remove(<<"n">>, Wire))))
+    ),
     ?assertEqual({reprnativedec_outer, <<"o-1">>, {reprnativedec_inner, <<"v">>}, undefined}, RecNoN),
     %% map: atom keys, present only
     {ok, MapBack, <<>>} = Mod:decode_reprnativedec_outer_wire_map(Bin),
     ?assertEqual(#{id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}, MapBack),
     %% struct: atom map plus the identity tag
     {ok, StructBack, <<>>} = Mod:decode_reprnativedec_outer_wire_struct(Bin),
-    ?assertEqual(#{'__struct__' => reprnativedec_outer, id => <<"o-1">>, inner => #{'__struct__' => reprnativedec_inner, s => <<"v">>}, n => 7}, StructBack),
+    ?assertEqual(
+        #{
+            '__struct__' => reprnativedec_outer,
+            id => <<"o-1">>,
+            inner => #{'__struct__' => reprnativedec_inner, s => <<"v">>},
+            n => 7
+        },
+        StructBack
+    ),
     %% truncated input asks for more, exactly like the wire decoder
     ?assertEqual(more, Mod:decode_reprnativedec_outer_wire_record(binary:part(Bin, 0, byte_size(Bin) - 1))),
     ?assertEqual(WireBack, thrift_runtime_record:to_wire(Desc, Rec)),
@@ -1187,7 +1197,12 @@ repr_native_facade_routing(Config) ->
     ?assertEqual(#{id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}, Map),
     {ok, Struct} = thrift_runtime:decode(Desc, Bin, struct),
     ?assertEqual(
-        #{'__struct__' => reprnativefacade_outer, id => <<"o-1">>, inner => #{'__struct__' => reprnativefacade_inner, s => <<"v">>}, n => 7},
+        #{
+            '__struct__' => reprnativefacade_outer,
+            id => <<"o-1">>,
+            inner => #{'__struct__' => reprnativefacade_inner, s => <<"v">>},
+            n => 7
+        },
         Struct
     ),
     %% decode of a record-mode struct under map mode keeps working
@@ -1228,8 +1243,8 @@ repr_native_facade_routing(Config) ->
     %% the fast path left its verdicts in the dispatch cache
     CacheKey = {thrift_runtime_binary, repr_codec_mfa, Mod},
     Cache = persistent_term:get(CacheKey),
-    ?assertMatch(#{ {<<"Outer">>, record} := {_, _} }, Cache),
-    ?assertMatch(#{ {<<"Outer">>, map} := {_, _} }, Cache),
+    ?assertMatch(#{{<<"Outer">>, record} := {_, _}}, Cache),
+    ?assertMatch(#{{<<"Outer">>, map} := {_, _}}, Cache),
     _ = persistent_term:erase(CacheKey),
     ok.
 
