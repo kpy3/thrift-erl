@@ -56,9 +56,11 @@ compare_group() {
 
 # One VM per entry group: full-suite interleaving depresses
 # untouched-code cells below the 0.99 gate (measured with an empty
-# emission diff), each group read alone measures parity. Any group
-# failing its gate stops the run.
-compare_group public
-compare_group direct
-compare_group conversion
-compare_group onepass
+# emission diff), each group read alone measures parity. Every group
+# runs; the script exits non-zero if any group failed its gate.
+STATUS=0
+compare_group public || STATUS=1
+compare_group direct || STATUS=1
+compare_group conversion || STATUS=1
+compare_group onepass || STATUS=1
+exit "$STATUS"
