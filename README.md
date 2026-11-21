@@ -933,11 +933,17 @@ every token through `io_lib`; on decode both sides scan the same text,
 so the numbers sit ahead of parity (1.1–1.5× on these payloads).
 
 The numbers above were measured on OTP 29; an OTP 28 run confirms the
-same ratios. The specialized codecs also hold their own against the
-generic interpreter inside this runtime — the same benchmark reports
-specialized vs generic ratios of 0.9–1.5× across the protocol/struct
-matrix (same-module and cross-module references call generated codecs
-directly; public ref entries read the dispatch cache without a module hop).
+same ratios. The same benchmark also reports a `facade (record repr) vs
+reference` block for the binary protocol — the application-facing
+`thrift_runtime:encode/2`/`decode/3` path over the record
+representation, which engages the repr-native one-pass codecs — where
+the decode rows run 7.9–11.5× the official runtime and the encode rows
+3.1–7.0×. The specialized codecs also hold their own against the
+generic interpreter inside this
+runtime — the same benchmark reports specialized vs generic ratios of
+0.9–1.5× across the protocol/struct matrix (same-module and
+cross-module references call generated codecs directly; public ref
+entries read the dispatch cache without a module hop).
 
 Only the speedup ratios on the same machine are meaningful; run
 `./scripts/bench` to get numbers for your hardware.
