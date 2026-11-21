@@ -215,17 +215,12 @@ repr_stale(Module, Name, Repr) ->
 decode_repr({struct, {ref, Module, Name}}, Binary, Repr) ->
     case repr_codec_cached(Module, Name, Repr) of
         {_, Decode} ->
-            try
-                Module:Decode(Binary)
-            catch
-                error:undef:Stack ->
-                    case erlang:function_exported(Module, Decode, 1) of
-                        true ->
-                            erlang:raise(error, undef, Stack);
-                        false ->
-                            repr_stale(Module, Name, Repr),
-                            miss
-                    end
+            case repr_apply(Module, Decode, Binary) of
+                {ok, Result} ->
+                    Result;
+                stale ->
+                    repr_stale(Module, Name, Repr),
+                    miss
             end;
         false ->
             miss;
@@ -239,6 +234,24 @@ decode_repr({struct, {ref, Module, Name}}, Binary, Repr) ->
     end;
 decode_repr(_Desc, _Binary, _Repr) ->
     miss.
+
+%% The generated apply shared by both directions: a stale family (module
+%% reloaded without the function) answers `stale' so the caller drops
+%% the cache entry and falls back; a genuine undef inside the function
+%% itself is re-raised with its original stacktrace.
+
+repr_apply(Module, Fun, Arg) ->
+    try
+        {ok, Module:Fun(Arg)}
+    catch
+        error:undef:Stack ->
+            case erlang:function_exported(Module, Fun, 1) of
+                true ->
+                    erlang:raise(error, undef, Stack);
+                false ->
+                    stale
+            end
+    end.
 
 %% Encodes straight from an eligible value. Eligibility mirrors the
 %% conversion layer's accepted shapes: native records (read through
@@ -315,17 +328,12 @@ repr_mode_of(Module, Name) ->
 -spec repr_encode_apply(module(), binary(), thrift_runtime:repr(), atom(), term()) ->
     {ok, iodata()} | {error, term()} | miss.
 repr_encode_apply(Module, Name, Flavor, Encode, Arg) ->
-    try
-        Module:Encode(Arg)
-    catch
-        error:undef:Stack ->
-            case erlang:function_exported(Module, Encode, 1) of
-                true ->
-                    erlang:raise(error, undef, Stack);
-                false ->
-                    repr_stale(Module, Name, Flavor),
-                    miss
-            end
+    case repr_apply(Module, Encode, Arg) of
+        {ok, Result} ->
+            Result;
+        stale ->
+            repr_stale(Module, Name, Flavor),
+            miss
     end.
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".

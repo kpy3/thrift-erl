@@ -427,10 +427,8 @@ onepass_cases(Spec) ->
     Reprs = [record, map, struct] ++ native_repr(),
     lists:append([
         begin
-            Bin =
-                case thrift_runtime_binary:encode(HeadDesc, Value) of
-                    {ok, Io} -> iolist_to_binary(Io)
-                end,
+            {ok, Io} = thrift_runtime_binary:encode(HeadDesc, Value),
+            Bin = iolist_to_binary(Io),
             EncValue =
                 case Repr of
                     struct -> struct_input(HeadModule, Name, Value);
@@ -580,7 +578,10 @@ deep_struct(Module, Name, Repr, Value) ->
 
 build_struct(Module, Name, record, Fields, Value) ->
     {Tag, _FieldAtoms} = Module:record_fields(Name),
-    list_to_tuple([Tag | [deep_field(Module, record, Type, maps:get(NameBin, Value, undefined)) || {_, _, Type, NameBin, _} <- Fields]]);
+    list_to_tuple([
+        Tag
+        | [deep_field(Module, record, Type, maps:get(NameBin, Value, undefined)) || {_, _, Type, NameBin, _} <- Fields]
+    ]);
 build_struct(Module, Name, map, Fields, Value) ->
     {_Tag, FieldAtoms} = Module:record_fields(Name),
     maps:from_list([
@@ -594,7 +595,9 @@ build_struct(Module, Name, struct, Fields, Value) ->
         {Atom, deep_field(Module, struct, Type, maps:get(NameBin, Value))}
      || {{_, _, Type, NameBin, _}, Atom} <- lists:zip(Fields, FieldAtoms),
         maps:is_key(NameBin, Value)
-    ]))#{'__struct__' => Tag};
+    ]))#{
+        '__struct__' => Tag
+    };
 build_struct(Module, Name, native, Fields, Value) ->
     {Tag, FieldAtoms} = Module:record_fields(Name),
     thrift_runtime_native:create(Module, Tag, [
