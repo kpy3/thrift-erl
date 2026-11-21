@@ -365,9 +365,26 @@ cases(Specs) ->
         selected(Protocol, Entry),
         Op <- [encode, decode]
     ],
-    Codec ++
-        lists:append([conversion_cases(Spec) || Spec <- Specs]) ++
-        lists:append([onepass_cases(Spec) || Spec <- Specs]).
+    Cells =
+        Codec ++
+            lists:append([conversion_cases(Spec) || Spec <- Specs]) ++
+            lists:append([onepass_cases(Spec) || Spec <- Specs]),
+    %% THRIFT_BENCH_ENTRY_GROUP runs one entry group per VM: the
+    %% full-suite interleaving of many hot code paths depresses
+    %% untouched-code cells below the 0.99 gate (measured -1..-5% with
+    %% an empty emission diff), while each group measured in its own
+    %% VM reads parity. The default keeps every group in one VM.
+    [C || C <- Cells, in_group(C)].
+
+in_group(C) ->
+    case os:getenv("THRIFT_BENCH_ENTRY_GROUP") of
+        false ->
+            true;
+        "all" ->
+            true;
+        Group ->
+            atom_to_list(element(3, case_key(C))) =:= Group
+    end.
 
 %% Conversion cells: one per struct x representation x direction the
 %% struct's mode supports. The representation sits in the protocol slot
@@ -650,31 +667,8 @@ make_case(Spec, Protocol, Entry, Op) ->
         key => {maps:get(id, Spec), Protocol, Entry, Op},
         base => Base,
         head => Head,
-        floor => interleaving_floor(Spec, Protocol, Entry, Op),
         n => 0
     }.
-
-%% TODO(bench): untouched-code cells the full suite depresses below the
-%% threshold while isolated high-power runs of the same cells pass —
-%% full-suite interleaving against the enlarged head modules measures
-%% -1..-5% on code the series does not touch (the emission diff is
-%% empty; e.g. Xtruct binary direct encode: -4.5% full-suite vs +2.6%
-%% isolated at 121 rounds; Insanity compact direct encode: -2.7% vs
-%% +69%). These cells stay measured and printed but do not gate.
-%% Re-baseline the ref (or split the suite) and remove the floors once
-%% the artifact has a structural fix.
-interleaving_floor(Spec, compact, direct, encode) ->
-    maps:get(id, Spec) =:= <<"Insanity">>;
-interleaving_floor(Spec, binary, direct, encode) ->
-    lists:member(maps:get(id, Spec), [<<"Xtruct">>, <<"XtructLong">>]);
-interleaving_floor(Spec, binary, direct, decode) ->
-    %% Reproduces at 121 isolated rounds too (-1.2%): the wire decode
-    %% emission is byte-identical (the series only appends to the
-    %% module), so the systematic gap is the enlarged module's code
-    %% placement on a ~226 ns operation.
-    maps:get(id, Spec) =:= <<"Xtruct">>;
-interleaving_floor(_Spec, _Protocol, _Entry, _Op) ->
-    false.
 
 args(Spec, Protocol, public, Op, Side, Arg) ->
     Module = maps:get(side_field(Side, module), Spec),
