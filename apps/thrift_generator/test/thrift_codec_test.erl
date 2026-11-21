@@ -94,7 +94,9 @@ proper_test_() ->
         {"specialized json codecs match the generic engine (PropEr)",
             {timeout, 300, fun() -> check(prop_json_matches_generic()) end}},
         {"specialized json prefixes never complete (PropEr)",
-            {timeout, 300, fun() -> check(prop_json_prefix_never_completes()) end}}
+            {timeout, 300, fun() -> check(prop_json_prefix_never_completes()) end}},
+        {"repr-native facade matches the explicit two-pass baseline (PropEr)",
+            {timeout, 300, fun() -> check(prop_repr_native_matches_two_pass()) end}}
     ].
 
 %% Silent success; on failure re-run with output so the shrunk
@@ -211,6 +213,210 @@ broken_prefixes({ok, {_Encode, Decode}}, Bytes, Broken) ->
         P <- [binary:part(Bytes, 0, N)],
         Broken(Decode(P))
     ].
+
+%%--------------------------------------------------------------------
+%% Repr-native facade parity
+%%--------------------------------------------------------------------
+
+%% The one-pass facade answers exactly what the explicit two-pass
+%% baseline (convert to wire, then the generic codec) answers — on
+%% well-formed values, on malformed shapes (wrong-typed fields, wrong
+%% tags, wrong arities, extra keys, `__struct__' maps), and on mixed
+%% nesting (a record whose nested struct field still holds a wire map),
+%% for every representation the running OTP supports. Both sides run
+%% under the same exception guard: a raise on one side only passes if
+%% the other side raises the identical class and reason.
+
+prop_repr_native_matches_two_pass() ->
+    ?FORALL(
+        {Name, Repr, Shape},
+        ?LET(
+            {Name0, Repr0},
+            {oneof(?STRUCTS), repr_gen()},
+            {Name0, Repr0, repr_shape_gen(Name0, Repr0)}
+        ),
+        repr_parity(Name, Repr, Shape)
+    ).
+
+repr_gen() ->
+    case thrift_runtime_native:supported() of
+        true -> oneof([record, map, struct, native]);
+        false -> oneof([record, map, struct])
+    end.
+
+repr_shape_gen(Name, Repr) ->
+    ?LET(W, wire_value_gen(Name), shape_gen(Name, Repr, W)).
+
+shape_gen(Name, Repr, W) ->
+    Desc = {struct, {ref, goldentest_types, Name}},
+    case safe_from_wire(Desc, W, Repr) of
+        %% native on an OTP without native records: nothing to compare.
+        skip ->
+            return(skip);
+        {ok, V} ->
+            case mixed_candidates(Name, W, V, Repr) of
+                [] ->
+                    frequency([
+                        {2, return({well, V})},
+                        {1, ?LET(Bad, corrupt_gen(V), {bad, Bad})}
+                    ]);
+                Candidates ->
+                    frequency([
+                        {6, return({well, V})},
+                        {3, ?LET(Bad, corrupt_gen(V), {bad, Bad})},
+                        {1, ?LET({Pos, FW}, oneof(Candidates), {mixed, setelement(Pos + 1, V, FW)})}
+                    ])
+            end
+    end.
+
+%% Nested-struct field positions whose wire value can stay a wire map
+%% inside an otherwise-record value — the mixed shape the two-pass
+%% baseline accepts silently.
+
+mixed_candidates(Name, W, V, record) when is_tuple(V) ->
+    case goldentest_types:struct_info(Name) of
+        {union, _Fields} ->
+            [];
+        {_Kind, Fields} ->
+            [
+                {Pos, maps:get(FName, W)}
+             || {Pos, {_Id, _Req, {struct, {ref, _, _}}, FName, _Def}} <-
+                    lists:zip(lists:seq(1, length(Fields)), Fields),
+                maps:is_key(FName, W)
+            ]
+    end;
+mixed_candidates(_Name, _W, _V, _Repr) ->
+    [].
+
+%% A shallow corruption of an otherwise well-formed value: one random
+%% wrong-typed field, tag flip, arity stretch, or key injection at the
+%% top level only — deeper nesting is covered by the wire-level battery.
+
+corrupt_gen(V) when is_tuple(V) ->
+    case tuple_size(V) of
+        N when N > 1 ->
+            frequency([
+                {2, junk_gen()},
+                {3, ?LET(J, junk_gen(), setelement(1, V, J))},
+                {2, ?LET(J, junk_gen(), list_to_tuple(tuple_to_list(V) ++ [J]))},
+                {4, ?LET({I, J}, {integer(2, N), junk_gen()}, setelement(I, V, J))}
+            ]);
+        _ ->
+            junk_gen()
+    end;
+corrupt_gen(V) when is_map(V) ->
+    frequency(
+        lists:flatten([
+            [{2, junk_gen()}],
+            [{3, ?LET(J, junk_gen(), maps:put(K, J, V))} || {K, _} <- maps:to_list(V)],
+            [
+                {1, ?LET(J, junk_gen(), maps:put('__struct__', J, V))},
+                {1, ?LET(J, junk_gen(), maps:put(<<"__struct__">>, J, V))},
+                {1, ?LET(J, junk_gen(), maps:put(extra_key, J, V))},
+                {1, ?LET(J, junk_gen(), maps:put(<<"extra_key">>, J, V))},
+                {1, ?LET(J, junk_gen(), maps:put(42, J, V))}
+            ]
+        ])
+    );
+corrupt_gen(V) when is_list(V) ->
+    frequency([
+        {2, junk_gen()},
+        {2, ?LET(J, junk_gen(), [J | V])},
+        {2, ?LET(J, junk_gen(), V ++ [J])}
+    ]);
+corrupt_gen(_V) ->
+    junk_gen().
+
+junk_gen() ->
+    oneof([
+        return(junk),
+        return(<<"junk">>),
+        return(<<0, 159, 146, 150>>),
+        return(42),
+        return(-1),
+        return(1.5),
+        return([junk]),
+        return(#{<<"k">> => 1}),
+        return({x, 1, 2})
+    ]).
+
+%% Compare the facade (one-pass with retry) against the explicit
+%% two-pass baseline on both directions; `skip' shapes are the OTP
+%% floor, not a comparison.
+
+repr_parity(_Name, _Repr, skip) ->
+    true;
+repr_parity(Name, Repr, {_, V}) ->
+    Desc = {struct, {ref, goldentest_types, Name}},
+    Facade = run_safe(fun() -> thrift_runtime:encode(Desc, V, binary) end),
+    TwoPass = run_safe(fun() -> two_pass_encode(Desc, V) end),
+    Facade =:= TwoPass andalso
+        case TwoPass of
+            {normal, {ok, Bytes}} ->
+                FacadeDec = run_safe(fun() -> thrift_runtime:decode(Desc, Bytes, Repr, binary) end),
+                TwoDec = run_safe(fun() -> two_pass_decode(Desc, Bytes, Repr) end),
+                FacadeDec =:= TwoDec;
+            _ ->
+                true
+        end.
+
+run_safe(F) ->
+    try
+        {normal, F()}
+    catch
+        Class:Reason ->
+            {raised, Class, Reason}
+    end.
+
+%% The two-pass baseline, spelled out with public building blocks:
+%% convert the repr value to the wire map, then the generic engine.
+
+two_pass_encode(Desc, V) ->
+    try thrift_runtime_record:to_wire(Desc, V) of
+        W ->
+            case thrift_runtime_binary:encode(Desc, W) of
+                {ok, IoData} -> {ok, iolist_to_binary(IoData)};
+                {error, _} = Error -> Error
+            end
+    catch
+        error:{value_does_not_match_type, Bad} ->
+            {error, {value_does_not_match_type, Bad}}
+    end.
+
+two_pass_decode(Desc, Bytes, Repr) ->
+    case thrift_runtime_binary:decode(Desc, Bytes) of
+        {ok, W, <<>>} -> from_wire_replica(Desc, W, Repr);
+        {ok, _W, _Rest} -> {error, trailing};
+        more -> {error, truncated};
+        {error, _} = Error -> Error
+    end.
+
+from_wire_replica({struct, {ref, _Module, Name}} = Desc, W, record) ->
+    case thrift_runtime_record:repr_mode(Desc) of
+        {map, _} ->
+            {error, {no_record, thrift_runtime_record:record_tag(Name)}};
+        {native, _} ->
+            {error, {no_record, thrift_runtime_record:record_tag(Name)}};
+        _Mode ->
+            from_wire_safe(Desc, W, record)
+    end;
+from_wire_replica(Desc, W, Repr) ->
+    from_wire_safe(Desc, W, Repr).
+
+from_wire_safe(Desc, W, Repr) ->
+    try thrift_runtime_record:from_wire(Desc, W, Repr) of
+        V -> {ok, V}
+    catch
+        error:{invalid_union, Map} -> {error, {invalid_union, Map}}
+    end.
+
+safe_from_wire(Desc, W, Repr) ->
+    try from_wire_replica(Desc, W, Repr) of
+        {ok, _} = Ok -> Ok
+    catch
+        _Class:_Reason ->
+            skip
+    end.
 
 %%--------------------------------------------------------------------
 %% Negative battery: exact error terms, specialized and generic
