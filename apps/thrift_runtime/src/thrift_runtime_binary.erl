@@ -272,27 +272,35 @@ encode_repr({struct, {ref, Module, Name}}, Value) ->
 encode_repr(_Desc, _Value) ->
     miss.
 
+%% Value-shape dispatch, cheapest discriminant first: maps are the common
+%% map-flavor input and answer without any module call. Tuples resolve the
+%% struct's representation mode before the native check: only native-mode
+%% structs mint native records, so a record-mode struct never needs
+%% `is_native/1' — and any misjudged shape still falls back to the
+%% two-pass path with identical results.
 repr_flavor(Module, Name, Value) ->
-    case thrift_runtime_native:is_native(Value) of
+    case is_map(Value) of
         true ->
-            try
-                {_RecModule, _RecName, FieldMap} = thrift_runtime_native:fields(Value),
-                {ok, map, FieldMap}
-            catch
-                _:_ -> miss
-            end;
+            {ok, map, Value};
         false ->
-            case is_tuple(Value) of
+            repr_flavor_nonmap(Module, Name, Value)
+    end.
+
+repr_flavor_nonmap(Module, Name, Value) ->
+    case is_tuple(Value) andalso repr_mode_of(Module, Name) =:= record of
+        true ->
+            {ok, record, Value};
+        false ->
+            case thrift_runtime_native:is_native(Value) of
                 true ->
-                    case repr_mode_of(Module, Name) of
-                        record -> {ok, record, Value};
-                        _ -> miss
+                    try
+                        {_RecModule, _RecName, FieldMap} = thrift_runtime_native:fields(Value),
+                        {ok, map, FieldMap}
+                    catch
+                        _:_ -> miss
                     end;
                 false ->
-                    case is_map(Value) of
-                        true -> {ok, map, Value};
-                        false -> miss
-                    end
+                    miss
             end
     end.
 
