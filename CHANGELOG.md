@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repr-native one-pass binary codecs: generated types modules encode
   tuple records and maps directly to wire bytes and decode wire bytes
   straight into record/map/struct/native values, skipping the
-  intermediate wire map; tagged unions join the family with the
-  exactly-one-field checks. Through the `thrift_runtime` facade the
+  intermediate wire map; tagged unions join the family with
+  encode-side exactly-one-field checks (decode accepts what the wire
+  carries, exactly like the two-pass path). Through the
+  `thrift_runtime` facade the
   measured medians against the explicit two-pass baseline are
   +85/+96% (record encode/decode), +61/+101% (map), +59/+79% (struct)
   and +33% (native decode, OTP 29+); bytes, error terms and APIs are

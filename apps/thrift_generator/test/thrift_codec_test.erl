@@ -355,10 +355,34 @@ repr_parity(Name, Repr, {_, V}) ->
             {normal, {ok, Bytes}} ->
                 FacadeDec = run_safe(fun() -> thrift_runtime:decode(Desc, Bytes, Repr, binary) end),
                 TwoDec = run_safe(fun() -> two_pass_decode(Desc, Bytes, Repr) end),
-                FacadeDec =:= TwoDec;
+                FacadeDec =:= TwoDec andalso corrupt_bytes_parity(Desc, Repr, Bytes);
             _ ->
                 true
         end.
+
+%% Decode parity on corrupted wire bytes: a bit flip at a random
+%% position or a truncated prefix. This is the class the value
+%% generator cannot reach — wrong container type bytes, duplicated
+%% fields, multi-field unions, cut-off payloads.
+
+corrupt_bytes_parity(Desc, Repr, Bytes) ->
+    Size = byte_size(Bytes),
+    ?FORALL(
+        Corrupt,
+        oneof([
+            ?LET(I, integer(0, Size - 1), flip_byte(Bytes, I)),
+            ?LET(N, integer(0, Size - 1), binary:part(Bytes, 0, N))
+        ]),
+        begin
+            Facade = run_safe(fun() -> thrift_runtime:decode(Desc, Corrupt, Repr, binary) end),
+            TwoPass = run_safe(fun() -> two_pass_decode(Desc, Corrupt, Repr) end),
+            Facade =:= TwoPass
+        end
+    ).
+
+flip_byte(Bin, I) ->
+    <<Left:I/binary, Byte, Right/binary>> = Bin,
+    <<Left/binary, (Byte bxor 255), Right/binary>>.
 
 run_safe(F) ->
     try

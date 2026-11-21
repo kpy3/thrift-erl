@@ -654,12 +654,13 @@ make_case(Spec, Protocol, Entry, Op) ->
         n => 0
     }.
 
-%% Full-suite interleaving depresses this cell below the threshold in
-%% every full run (-2.4..-2.7% across three runs) while the isolated
-%% direct/compact suite measures it +69% over the baseline. The series
-%% does not touch compact emission at all, so the depression is a
+%% TODO(bench): full-suite interleaving depresses this cell below the
+%% threshold in every full run (-2.4..-2.7% across three runs) while the
+%% isolated direct/compact suite measures it +69% over the baseline. The
+%% series does not touch compact emission at all, so the depression is a
 %% measurement-context artifact; the cell stays measured and printed
-%% but does not gate.
+%% but does not gate. Re-baseline the ref (or split the suite) and
+%% remove this floor once the artifact has a structural fix.
 interleaving_floor(Spec, compact, direct, encode) ->
     maps:get(id, Spec) =:= <<"Insanity">>;
 interleaving_floor(_Spec, _Protocol, _Entry, _Op) ->

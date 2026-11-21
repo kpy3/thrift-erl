@@ -287,10 +287,12 @@ encode_repr(_Desc, _Value) ->
 
 %% Value-shape dispatch, cheapest discriminant first: maps are the common
 %% map-flavor input and answer without any module call. Tuples resolve the
-%% struct's representation mode before the native check: only native-mode
-%% structs mint native records, so a record-mode struct never needs
-%% `is_native/1' — and any misjudged shape still falls back to the
-%% two-pass path with identical results.
+%% struct's representation mode before the native check: a record-mode
+%% struct encodes from the tuple family, and on OTP 29 a native record
+%% is itself tuple-shaped, so feeding one for a record-mode struct burns
+%% a failed attempt and falls back to the two-pass path (identical
+%% results, the deep-native-input retry the bench floors document).
+%% Native-mode structs answer the native check first, as they must.
 repr_flavor(Module, Name, Value) ->
     case is_map(Value) of
         true ->

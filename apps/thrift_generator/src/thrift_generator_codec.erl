@@ -132,7 +132,6 @@ everywhere else in the emitter.
     flavor = map :: record | map | struct | native,
     tag = undefined :: atom() | undefined,
     mod :: atom(),
-    kind :: atom(),
     ctx :: tuple(),
     enums :: map()
 }).
@@ -1090,7 +1089,11 @@ repr_decode_name(Decode, Flavor) ->
 %% Decode chains mirror the wire loop: header dispatch by field id with
 %% the wire byte in the guard, skip-by-wire for unknown ids, `more` on
 %% truncation, the same required bitmask — only the accumulator and
-%% the STOP result differ per representation.
+%% the STOP result differ per representation. Unions decode exactly
+%% like structs: the two-pass path never validates the field count on
+%% decode (the generic engine's wire map is last-write-wins and the
+%% conversion builds the value as-is), so the one-pass STOP must not
+%% either; the exactly-one rule is enforced on encode only.
 
 -spec repr_decode_forms([#tg_struct{}], #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
 repr_decode_forms(Structs, Ctx, Enums) ->
@@ -1176,7 +1179,6 @@ repr_decode_struct_forms(S, Ctx, Enums) ->
     FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
     Fields = S#tg_struct.fields,
     Bits = required_bits(Fields),
-    Kind = S#tg_struct.kind,
     Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
     StructTag =
         case thrift_generator_emitter:has_record(S) of
@@ -1188,7 +1190,7 @@ repr_decode_struct_forms(S, Ctx, Enums) ->
         end,
     ModAtom = types_module_atom(Ctx#ectx.current),
     K = length(FieldTypes),
-    Base = #rdc{mod = ModAtom, kind = Kind, ctx = Ctx, enums = Enums},
+    Base = #rdc{mod = ModAtom, ctx = Ctx, enums = Enums},
     MapForms = repr_decode_one(repr_decode_name(Decode, map), Fields, FieldTypes, Bits, K, Base#rdc{
         fields_name = atom_concat(repr_decode_name(Decode, map), <<"_fields">>),
         flavor = map,
@@ -1231,72 +1233,47 @@ repr_acc_init(_Flavor, _Tag, _K) ->
     map_empty().
 
 repr_decode_clauses(Fields, FieldTypes, Bits, R) ->
-    #rdc{fields_name = FieldsName, flavor = Flavor, tag = Tag, mod = ModAtom, kind = Kind} = R,
+    #rdc{fields_name = FieldsName, flavor = Flavor, tag = Tag, mod = ModAtom} = R,
     StopAccPat =
         case Fields =:= [] andalso Flavor =:= native of
             true -> v("_Acc");
             false -> v("Acc")
         end,
     StopClauses =
-        case Kind of
-            union ->
-                %% The Req slot carries the count of decoded known
-                %% fields: exactly one closes the union, anything else
-                %% is the same {invalid_union, WireMap} the conversion
-                %% layer raises on the two-pass path.
+        case Bits of
+            [] ->
                 [
                     clause(
-                        [bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]), i(1), StopAccPat],
+                        [
+                            bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
+                            v("_Req"),
+                            StopAccPat
+                        ],
+                        none,
+                        [ok3(repr_stop_expr(Flavor, Tag, Fields, ModAtom, v("Acc")), v("Rest"))]
+                    )
+                ];
+            _ ->
+                [
+                    clause(
+                        [
+                            bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
+                            i(full_mask(Bits)),
+                            v("Acc")
+                        ],
                         none,
                         [ok3(repr_stop_expr(Flavor, Tag, Fields, ModAtom, v("Acc")), v("Rest"))]
                     ),
                     clause(
-                        [bin_pat([{i(0), default, default}, {v("_Rest"), default, [binary]}]), v("_Count"), v("Acc")],
+                        [
+                            bin_pat([{i(0), default, default}, {v("_Rest"), default, [binary]}]),
+                            v("Req"),
+                            v("_Acc")
+                        ],
                         none,
-                        [
-                            {tuple, ?ANNO, [
-                                {atom, ?ANNO, error},
-                                tuple_t([at(invalid_union), union_wire_map(Flavor, Fields, v("Acc"))])
-                            ]}
-                        ]
+                        [err_decode(tuple_t([at(missing_required_fields), missing_names(Bits, v("Req"))]))]
                     )
-                ];
-            _ ->
-                case Bits of
-                    [] ->
-                        [
-                            clause(
-                                [
-                                    bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
-                                    v("_Req"),
-                                    StopAccPat
-                                ],
-                                none,
-                                [ok3(repr_stop_expr(Flavor, Tag, Fields, ModAtom, v("Acc")), v("Rest"))]
-                            )
-                        ];
-                    _ ->
-                        [
-                            clause(
-                                [
-                                    bin_pat([{i(0), default, default}, {v("Rest"), default, [binary]}]),
-                                    i(full_mask(Bits)),
-                                    v("Acc")
-                                ],
-                                none,
-                                [ok3(repr_stop_expr(Flavor, Tag, Fields, ModAtom, v("Acc")), v("Rest"))]
-                            ),
-                            clause(
-                                [
-                                    bin_pat([{i(0), default, default}, {v("_Rest"), default, [binary]}]),
-                                    v("Req"),
-                                    v("_Acc")
-                                ],
-                                none,
-                                [err_decode(tuple_t([at(missing_required_fields), missing_names(Bits, v("Req"))]))]
-                            )
-                        ]
-                end
+                ]
         end,
     HeaderClause =
         clause([header_pat(), v("Req"), v("Acc")], none, [
@@ -1313,35 +1290,6 @@ repr_decode_clauses(Fields, FieldTypes, Bits, R) ->
             [at(more)]
         ),
     StopClauses ++ [HeaderClause, MoreClause].
-
-%% The wire map the two-pass path would hand to the conversion layer on
-%% an invalid union: binary field names, present fields only. Record and
-%% native accumulators key fields by position, map and struct ones by
-%% field atom; both rebuild only on the error path.
-
-union_wire_map(Flavor, Fields, Acc) when Flavor =:= record; Flavor =:= native ->
-    remote(maps, from_list, [
-        {lc, ?ANNO, tuple_t([v("N"), remote(erlang, element, [{op, ?ANNO, '+', v("P"), i(1)}, Acc])]), [
-            {generate, ?ANNO, tuple_pat([v("N"), v("P")]), union_pos_entries(Fields)},
-            {op, ?ANNO, '=/=', remote(erlang, element, [{op, ?ANNO, '+', v("P"), i(1)}, Acc]), at(undefined)}
-        ]}
-    ]);
-union_wire_map(_Flavor, Fields, Acc) ->
-    remote(maps, from_list, [
-        {lc, ?ANNO, tuple_t([v("N"), remote(maps, get, [v("A"), Acc, at(undefined)])]), [
-            {generate, ?ANNO, tuple_pat([v("N"), v("A")]), union_name_atom_entries(Fields)},
-            {op, ?ANNO, '=/=', remote(maps, get, [v("A"), Acc, at(undefined)]), at(undefined)}
-        ]}
-    ]).
-
-union_pos_entries(Fields) ->
-    list_lit([
-        tuple_t([name_lit(F#tg_field.name), i(N)])
-     || {F, N} <- lists:zip(Fields, lists:seq(1, length(Fields)))
-    ]).
-
-union_name_atom_entries(Fields) ->
-    list_lit([tuple_t([name_lit(F#tg_field.name), at(field_atom(F#tg_field.name))]) || F <- Fields]).
 
 %% setelement accumulation: the STOP result is the accumulator itself
 %% for record (the tuple is updated in place), a tag put for struct,
@@ -1378,21 +1326,13 @@ repr_field_clauses(Fields, FieldTypes, Bits, R) ->
     ]).
 
 repr_field_clause_one(F, T, N, Bits, R) ->
-    #rdc{fields_name = FieldsName, flavor = Flavor, kind = Kind, ctx = Ctx, enums = Enums} = R,
+    #rdc{fields_name = FieldsName, flavor = Flavor, ctx = Ctx, enums = Enums} = R,
     Id = F#tg_field.id,
     Wire = wire_byte(T),
     ReqExpr =
-        case Kind of
-            %% The union loop counts decoded known fields; unknown ids
-            %% are skipped without a count, exactly like the two-pass
-            %% path's wire map.
-            union ->
-                {op, ?ANNO, '+', v("Req"), i(1)};
-            _ ->
-                case F#tg_field.required of
-                    required -> {op, ?ANNO, 'bor', v("Req"), i(required_bit(Id, Bits))};
-                    _ -> v("Req")
-                end
+        case F#tg_field.required of
+            required -> {op, ?ANNO, 'bor', v("Req"), i(required_bit(Id, Bits))};
+            _ -> v("Req")
         end,
     [
         clause([i(Id)], [{op, ?ANNO, '=:=', v("Type"), i(Wire)}], [
@@ -1514,10 +1454,14 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
     Elem = thrift_generator_codec_common:elem_type(T),
     [
         {function, ?ANNO, Dec, 1, [
+            %% The mismatch clauses mirror the generic engine: a
+            %% negative size errors on any type byte, a non-matching
+            %% type byte errors when the header is fully present, and
+            %% only a short binary asks for more.
             clause(
                 [
                     bin_pat([
-                        {i(Wire), i(8), [big, unsigned]},
+                        {v("_"), default, default},
                         {v("Size"), i(32), [big, signed]},
                         {v("_Rest"), default, [binary]}
                     ])
@@ -1537,6 +1481,17 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
                 %% The elems tail carries the consumed rest out itself;
                 %% `more` and `{error, _}` propagate unchanged.
                 [call_local(DecElems, [v("Rest"), v("Size"), nil()])]
+            ),
+            clause(
+                [
+                    bin_pat([
+                        {v("TypeByte"), i(8), [big, unsigned]},
+                        {v("_"), i(32), [big, signed]},
+                        {v("_"), default, [binary]}
+                    ])
+                ],
+                none,
+                [err_decode(tuple_t([at(element_type_mismatch), v("TypeByte")]))]
             ),
             clause([v("_")], none, [at(more)])
         ]},
@@ -1599,6 +1554,20 @@ repr_decode_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
                 ],
                 none,
                 [call_local(DecPairs, [v("Rest"), v("Size"), map_empty()])]
+            ),
+            %% Non-matching type bytes with the header fully present —
+            %% the generic engine's map_type_mismatch clause.
+            clause(
+                [
+                    bin_pat([
+                        {v("_"), default, default},
+                        {v("_"), default, default},
+                        {v("_"), i(32), [big, signed]},
+                        {v("_"), default, [binary]}
+                    ])
+                ],
+                none,
+                [err_decode(at(map_type_mismatch))]
             ),
             clause([v("_")], none, [at(more)])
         ]},
@@ -1733,13 +1702,13 @@ repr_dec_container_entries(C, Enums) ->
     {NativeD, NativeDAux} = repr_decode_container_names(C, Enums, native),
     [
         {RecD, 1},
-        {RecDAux, dec_aux_arity(C)},
+        {RecDAux, 3},
         {MapD, 1},
-        {MapDAux, dec_aux_arity(C)},
+        {MapDAux, 3},
         {StructD, 1},
-        {StructDAux, dec_aux_arity(C)},
+        {StructDAux, 3},
         {NativeD, 1},
-        {NativeDAux, dec_aux_arity(C)}
+        {NativeDAux, 3}
     ].
 
 repr_containers(WireTypes) ->
@@ -1754,8 +1723,8 @@ repr_container_aux_entries({map, _, _}, RecPairs, MapPairs) ->
 repr_container_aux_entries(_C, RecElems, MapElems) ->
     [{RecElems, 1}, {MapElems, 1}].
 
-dec_aux_arity({map, _, _}) -> 3;
-dec_aux_arity(_) -> 3.
+%% The decode auxiliaries all take the looping arity (size and
+%% accumulator plus the binary).
 
 -spec repr_container_names(wire_type(), thrift_generator_codec_common:registry(), record | map) -> {atom(), atom()}.
 repr_container_names(T, Enums, Flavor) ->
@@ -1804,9 +1773,10 @@ repr_convertible_structs(Structs) ->
     %% Empty structs get entry-only encoders (the chain closes with the
     %% stop byte immediately); nested references from other structs'
     %% chains reach them, so they must exist. Tagged unions join the
-    %% family too: the encode entries carry the exactly-one-field check,
-    %% the decode STOP validates the field count — sum unions, empty
-    %% unions and native-mode structs stay on the descriptor path.
+    %% family too: the encode entries carry the exactly-one-field check
+    %% (the decode side accepts whatever the wire carries, like the
+    %% two-pass path). Sum unions, empty unions and native-mode structs
+    %% stay on the descriptor path.
     [S || S <- Structs, repr_convertible(S)].
 
 repr_convertible(#tg_struct{kind = struct}) ->
