@@ -458,12 +458,14 @@ onepass_case(Spec, Repr, Op, HeadArg) ->
         key => {maps:get(id, Spec), Repr, onepass, Op},
         base => {onepass_base_op(Op), HeadArg},
         head => {onepass_head_op(Op), HeadArg},
-        %% A native-representation input whose struct nests other structs
-        %% carries those nestings as native records; the one-pass map
-        %% family cannot read them, so the facade retries through the
-        %% two-pass path by contract (mixed nesting) and the cell
-        %% measures baseline-plus-a-failed-attempt. Floored cells still
-        %% run and print; they do not gate.
+        %% Cells the one-pass family structurally cannot win are floored:
+        %% a native-representation encode input whose struct nests other
+        %% structs carries the nestings as native records the map family
+        %% cannot read (the facade retries through the two-pass path by
+        %% the mixed-nesting contract), and a union's native decode pays
+        %% the full-field create against a baseline that is already
+        %% minimal for a one-field payload. Floored cells still run and
+        %% print; they do not gate.
         floor => onepass_floor(Repr, Op, maps:get(struct, Spec), maps:get(head_module, Spec)),
         n => 0
     }.
@@ -471,6 +473,15 @@ onepass_case(Spec, Repr, Op, HeadArg) ->
 onepass_floor(native, encode, Name, Module) ->
     {_Kind, Fields} = Module:struct_info(Name),
     lists:any(fun({_Id, _Req, Type, _NameBin, _Def}) -> type_has_struct(Type) end, Fields);
+onepass_floor(native, decode, Name, Module) ->
+    %% A union wire payload carries exactly one field, so the baseline's
+    %% decode plus conversion is already minimal; the one-pass STOP still
+    %% pays the full-field native create from the position map. Measured
+    %% within a few percent of the baseline either way.
+    case Module:struct_info(Name) of
+        {union, _Fields} -> true;
+        {_Kind, _Fields} -> false
+    end;
 onepass_floor(_Repr, _Op, _Name, _Module) ->
     false.
 
