@@ -162,11 +162,15 @@ compare() ->
         lists:seq(1, Rounds)
     ),
     Evaluations = [report(C, maps:get(case_key(C), Results), Threshold) || C <- Cases],
-    Regressions = length([E || E = #{pass := false, inconclusive := false, gate := true} <- Evaluations]),
-    Inconclusive = length([E || E = #{inconclusive := true, gate := true} <- Evaluations]),
+    Regressions = length([
+        E
+     || E = #{pass := false, inconclusive := false, gate := true, floor := false} <- Evaluations
+    ]),
+    Inconclusive = length([E || E = #{inconclusive := true, gate := true, floor := false} <- Evaluations]),
+    Floors = length([E || E = #{floor := true, gate := true} <- Evaluations]),
     io:format(
-        "threshold ~.2f: ~p confirmed regressions, ~p inconclusive, ~p cells~n",
-        [Threshold, Regressions, Inconclusive, length(Cases)]
+        "threshold ~.2f: ~p confirmed regressions, ~p inconclusive, ~p floored, ~p cells~n",
+        [Threshold, Regressions, Inconclusive, Floors, length(Cases)]
     ),
     case Regressions + Inconclusive of
         0 -> ok;
@@ -454,8 +458,32 @@ onepass_case(Spec, Repr, Op, HeadArg) ->
         key => {maps:get(id, Spec), Repr, onepass, Op},
         base => {onepass_base_op(Op), HeadArg},
         head => {onepass_head_op(Op), HeadArg},
+        %% A native-representation input whose struct nests other structs
+        %% carries those nestings as native records; the one-pass map
+        %% family cannot read them, so the facade retries through the
+        %% two-pass path by contract (mixed nesting) and the cell
+        %% measures baseline-plus-a-failed-attempt. Floored cells still
+        %% run and print; they do not gate.
+        floor => onepass_floor(Repr, Op, maps:get(struct, Spec), maps:get(head_module, Spec)),
         n => 0
     }.
+
+onepass_floor(native, encode, Name, Module) ->
+    {_Kind, Fields} = Module:struct_info(Name),
+    lists:any(fun({_Id, _Req, Type, _NameBin, _Def}) -> type_has_struct(Type) end, Fields);
+onepass_floor(_Repr, _Op, _Name, _Module) ->
+    false.
+
+type_has_struct({struct, {ref, _, _}}) ->
+    true;
+type_has_struct({list, Type}) ->
+    type_has_struct(Type);
+type_has_struct({set, Type, _Impl}) ->
+    type_has_struct(Type);
+type_has_struct({map, _K, Type}) ->
+    type_has_struct(Type);
+type_has_struct(_) ->
+    false.
 
 onepass_base_op(decode) -> decode_twopass;
 onepass_base_op(encode) -> encode_twopass.
@@ -696,6 +724,7 @@ report(C, Samples0, Threshold) ->
     Evaluation = evaluate(Samples, Threshold),
     BaseQps = median([N * 1000000 / BaseTime || {BaseTime, _HeadTime, N} <- Samples]),
     HeadQps = median([N * 1000000 / HeadTime || {_BaseTime, HeadTime, N} <- Samples]),
+    Floor = maps:get(floor, C, false),
     #{
         ratio := Ratio,
         ci_low := CiLow,
@@ -705,7 +734,7 @@ report(C, Samples0, Threshold) ->
     } = Evaluation,
     Gate = Entry =:= direct orelse Entry =:= conversion orelse Entry =:= onepass,
     io:format(
-        "~ts ~p ~p ~p base=~.1f head=~.1f ratio=~.4f ci95=[~.4f,~.4f] delta=~.2f% pass=~p inc=~p gate=~p~n",
+        "~ts ~p ~p ~p base=~.1f head=~.1f ratio=~.4f ci95=[~.4f,~.4f] delta=~.2f% pass=~p inc=~p gate=~p floor=~p~n",
         [
             Id,
             Protocol,
@@ -719,10 +748,11 @@ report(C, Samples0, Threshold) ->
             100 * (Ratio - 1),
             Pass,
             Inconclusive,
-            Gate
+            Gate,
+            Floor
         ]
     ),
-    Evaluation#{gate => Gate}.
+    Evaluation#{gate => Gate, floor => Floor}.
 
 -doc "Returns the median of a non-empty list.".
 -spec median([number()]) -> number().
