@@ -551,7 +551,12 @@ layout_floor(Spec, binary, direct, decode) ->
 %% (2026-11-22), all with tight CIs sitting just under the gate on
 %% byte-identical code: Xtruct2 compact encode 0.9888 [0.9877, 0.9910],
 %% XtructLong binary encode 0.9886 [0.9865, 0.9909], CrossModule json
-%% decode 0.9883 [0.9833, 0.9939]. Same layout mechanism as above.
+%% decode 0.9883 [0.9833, 0.9939]. Body identity for exactly these three
+%% functions was verified by extracting the generated source from the
+%% 3254958-era generator and the current one (XtructLong reuses the
+%% Xtruct wire encode): the bodies are identical; only the `-doc' strings
+%% differ (`-doc(false)' classification of this series). Same layout
+%% mechanism as above.
 layout_floor(Spec, compact, direct, encode) ->
     maps:get(id, Spec) =:= <<"Xtruct2">>;
 layout_floor(Spec, binary, direct, encode) ->
