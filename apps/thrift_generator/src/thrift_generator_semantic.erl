@@ -1144,10 +1144,10 @@ validate_throws(Fields, Loc, Ctx) ->
             (#tg_field{name = Name, required = required}, C) ->
                 err(Loc, "throw field ~ts cannot be required", [Name], C);
             (#tg_field{type = {ref, Ref, _}}, C) ->
-                case resolve_type_ref(Ref, C) of
-                    {ok, {_, _, exception}} ->
+                case throws_ref_kind(Ref, #{}, C) of
+                    {ok, exception} ->
                         C;
-                    {ok, {_, _, _}} ->
+                    {ok, not_exception} ->
                         err(Loc, "throw field must be an exception, got ~ts", [Ref], C);
                     error ->
                         C
@@ -1158,6 +1158,40 @@ validate_throws(Fields, Loc, Ctx) ->
         Ctx,
         Fields
     ).
+
+%% Throws validation follows typedef aliases to their terminal definition
+%% kind. The semantic field keeps the alias; only this check resolves it.
+
+-spec throws_ref_kind(binary(), #{{binary(), binary()} => true}, #ctx{}) ->
+    {ok, exception | not_exception} | error.
+throws_ref_kind(Name, Visited, Ctx) ->
+    case resolve_type_ref(Name, Ctx) of
+        {ok, {_, _, exception}} ->
+            {ok, exception};
+        {ok, {Module, Name, typedef}} ->
+            typedef_ref_kind(Module, Name, Visited, Ctx);
+        {ok, {_, _, _}} ->
+            {ok, not_exception};
+        error ->
+            error
+    end.
+
+-spec typedef_ref_kind(binary(), binary(), #{{binary(), binary()} => true}, #ctx{}) ->
+    {ok, exception | not_exception} | error.
+typedef_ref_kind(Module, Name, Visited, Ctx) ->
+    case Visited of
+        #{{Module, Name} := true} ->
+            error;
+        _ ->
+            case maps:find(Name, maps:get(Module, Ctx#ctx.all_typedefs, #{})) of
+                {ok, {ref, Target, _}} ->
+                    throws_ref_kind(Target, Visited#{{Module, Name} => true}, Ctx#ctx{module = Module});
+                {ok, _NonRef} ->
+                    {ok, not_exception};
+                error ->
+                    error
+            end
+    end.
 
 %%--------------------------------------------------------------------
 %% Reference resolution and validation

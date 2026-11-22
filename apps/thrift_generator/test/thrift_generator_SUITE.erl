@@ -39,6 +39,7 @@
     utf8_invalid_file_rejected/1,
     same_struct_names_coexist/1,
     cross_module_typedef/1,
+    cross_module_exception_typedef/1,
     cross_module_include_qualifier/1,
     cross_module_direct_dispatch/1,
     base_fields_guarded_encode/1,
@@ -83,6 +84,7 @@ all() ->
         utf8_invalid_file_rejected,
         same_struct_names_coexist,
         cross_module_typedef,
+        cross_module_exception_typedef,
         cross_module_include_qualifier,
         cross_module_direct_dispatch,
         base_fields_guarded_encode,
@@ -309,6 +311,32 @@ cross_module_typedef(Config) ->
     {struct, Fields} = 'main_types':struct_info(<<"Outer">>),
     SeenAt = lists:keyfind(3, 1, Fields),
     ?assertEqual({base, i64}, element(3, SeenAt)),
+    ok.
+
+%% A typedef alias to a cross-module exception stays an alias in the
+%% semantic model, but the emitted throw descriptor resolves to the
+%% defining exception's types module.
+cross_module_exception_typedef(Config) ->
+    _ = write_snippet(
+        Config,
+        "throw_alias_included.thrift",
+        <<"namespace erl included\nexception E {}\n">>
+    ),
+    Root = write_snippet(
+        Config,
+        "throw_alias_root.thrift",
+        <<
+            "include \"throw_alias_included.thrift\"\n"
+            "namespace erl root\n"
+            "typedef included.E E\n"
+            "service Api { void f() throws (1: E e) }\n"
+        >>
+    ),
+    ok = generate_modules(Root),
+    ?assertMatch(
+        [{1, _, {struct, {ref, 'included_types', <<"E">>}}, <<"e">>, _}],
+        root_types:function_info(<<"f">>, exceptions)
+    ),
     ok.
 
 loader_cycle(Config) ->

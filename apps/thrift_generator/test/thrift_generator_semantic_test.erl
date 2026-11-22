@@ -29,6 +29,10 @@
     oneway_shape_error_test/0,
     throw_not_exception_error_test/0,
     throw_required_field_error_test/0,
+    throw_typedef_exception_test/0,
+    throw_typedef_struct_error_test/0,
+    throw_typedef_base_error_test/0,
+    throw_typedef_cycle_error_test/0,
     unknown_type_error_test/0,
     const_enum_ref_test/0,
     const_chain_and_cycle_test/0,
@@ -117,6 +121,46 @@ throw_required_field_error_test() ->
     ?assertMatch(
         {error, [{<<"t.thrift">>, _, <<"throw field e cannot be required">>}]},
         analyze(<<"exception E { 1: string m }\nservice S { void f() throws (1: required E e) }">>)
+    ),
+    ok.
+
+throw_typedef_exception_test() ->
+    {ok, Model} = analyze(
+        <<
+            "exception E {}\n"
+            "typedef E Alias1\n"
+            "typedef Alias1 Alias2\n"
+            "service S { void f() throws (1: Alias2 e) }"
+        >>
+    ),
+    [#tg_service{functions = [Function]}] = (model_module(Model))#tg_module.services,
+    [#tg_field{type = {ref, <<"Alias2">>, #{}}}] = Function#tg_function.throws,
+    ok.
+
+throw_typedef_struct_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"throw field must be an exception, got Alias">>}]},
+        analyze(<<"struct T { 1: i32 x }\ntypedef T Alias\nservice S { void f() throws (1: Alias e) }">>)
+    ),
+    ok.
+
+throw_typedef_base_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"throw field must be an exception, got Alias">>}]},
+        analyze(<<"typedef i32 Alias\nservice S { void f() throws (1: Alias e) }">>)
+    ),
+    ok.
+
+throw_typedef_cycle_error_test() ->
+    {error, Errors} = analyze(
+        <<"typedef A B\ntypedef B A\nservice S { void f() throws (1: A e) }">>
+    ),
+    %% The existing cycle pass reports one entry point per typedef in the
+    %% cycle; throws validation must add no error of its own.
+    ?assertEqual(2, length(Errors)),
+    ?assertEqual(
+        [<<"typedef cycle through A">>, <<"typedef cycle through B">>],
+        lists:sort([Msg || {_, _, Msg} <- Errors])
     ),
     ok.
 
