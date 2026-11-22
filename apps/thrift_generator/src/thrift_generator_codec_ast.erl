@@ -234,7 +234,7 @@ bin_pat(Segments) ->
 
 -spec bin_lit(binary()) -> ast().
 bin_lit(Bin) ->
-    {bin, ?ANNO, [{bin_element, ?ANNO, {string, ?ANNO, unicode:characters_to_list(Bin)}, default, default}]}.
+    {bin, ?ANNO, [{bin_element, ?ANNO, {string, ?ANNO, binary_to_list(Bin)}, default, default}]}.
 
 -spec name_lit(binary()) -> ast().
 name_lit(Bin) ->

@@ -836,7 +836,9 @@ compact_enum_literals(Config) ->
             "namespace erl enumlit\n"
             "enum Color {\n"
             "  RED = 1,\n"
-            "  BLUE = -2\n"
+            "  BLUE = -2,\n"
+            "  HIGH = 64,\n"
+            "  NEGATIVE = -65\n"
             "}\n"
             "struct Paint {\n"
             "  1: optional Color c,\n"
@@ -853,7 +855,23 @@ compact_enum_literals(Config) ->
     %% known values never reach the runtime varint call
     ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(1\\)">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(-2\\)">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(64\\)">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(-65\\)">>, [])),
     ?assertMatch([{ok, _, _}, {ok, _, _}], lists:sort(thrift_generator_emitter:compile_sources(Model))),
+    ok = generate_modules(Path),
+    Paint = {struct, enumlit_types:struct_info(<<"Paint">>)},
+    lists:foreach(
+        fun(Atom) ->
+            Value = #{<<"c">> => Atom},
+            {ok, GenericIo} = thrift_runtime_compact:encode(Paint, Value),
+            {ok, DirectIo} = enumlit_types:encode_enumlit_paint_compact(Value),
+            Wire = iolist_to_binary(GenericIo),
+            ?assertEqual(Wire, iolist_to_binary(DirectIo)),
+            ?assertEqual({ok, Value, <<>>}, enumlit_types:decode_enumlit_paint_compact(Wire)),
+            ?assertEqual({ok, Value, <<>>}, thrift_runtime_compact:decode(Paint, Wire))
+        end,
+        ['RED', 'BLUE', 'HIGH', 'NEGATIVE']
+    ),
     ok.
 
 %% Compact field headers: when the previous field is required (or the
@@ -884,6 +902,10 @@ compact_static_headers(Config) ->
             "  5: required i32 x,\n"
             "  6: optional i32 y\n"
             "}\n"
+            "struct High {\n"
+            "  9: required i32 high,\n"
+            "  64: required i64 wide\n"
+            "}\n"
         >>
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
@@ -913,7 +935,19 @@ compact_static_headers(Config) ->
     ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\022\">>">>)),
     ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\031\">>">>)),
     ?assertNotEqual(nomatch, binary:match(Src, <<"encode_statichead_b_compact_fields_f4(Value, _LastId)">>)),
+    %% struct High crosses both varint boundaries without a runtime fallback
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(9,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(64,">>, [])),
     ?assertMatch([{ok, _, _}, {ok, _, _}], lists:sort(thrift_generator_emitter:compile_sources(Model))),
+    ok = generate_modules(Path),
+    High = {struct, statichead_types:struct_info(<<"High">>)},
+    HighValue = #{<<"high">> => 7, <<"wide">> => 1000000},
+    {ok, HighGenericIo} = thrift_runtime_compact:encode(High, HighValue),
+    {ok, HighDirectIo} = statichead_types:encode_statichead_high_compact(HighValue),
+    HighWire = iolist_to_binary(HighGenericIo),
+    ?assertEqual(HighWire, iolist_to_binary(HighDirectIo)),
+    ?assertEqual({ok, HighValue, <<>>}, statichead_types:decode_statichead_high_compact(HighWire)),
+    ?assertEqual({ok, HighValue, <<>>}, thrift_runtime_compact:decode(High, HighWire)),
     ok.
 
 %% Facade-level one-pass measurement cells exist: the bench harness
