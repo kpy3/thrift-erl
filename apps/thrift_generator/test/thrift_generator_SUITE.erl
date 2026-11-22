@@ -32,6 +32,8 @@
     semantic_pipeline/1,
     loader_cycle/1,
     loader_shared_namespace_modules/1,
+    loader_shared_namespace_module_key_normalization/1,
+    loader_shared_namespace_module_key_collision_after_normalization/1,
     loader_unresolved_duplicate_module/1,
     loader_missing_include/1,
     loader_namespace_prefix/1,
@@ -78,6 +80,8 @@ all() ->
         semantic_pipeline,
         loader_cycle,
         loader_shared_namespace_modules,
+        loader_shared_namespace_module_key_normalization,
+        loader_shared_namespace_module_key_collision_after_normalization,
         loader_unresolved_duplicate_module,
         loader_missing_include,
         loader_namespace_prefix,
@@ -1503,6 +1507,68 @@ loader_shared_namespace_modules(Config) ->
 %% When even file basenames cannot make module keys unique, the original
 %% duplicate error remains — silently choosing either file would make
 %% cross-file references ambiguous.
+%% Collision-fallback module keys use the same atom-safe normalization as
+%% identifier prefixes, scoped to the basename candidate: hyphens/spaces
+%% collapse, a leading digit is guarded, and the shared identifier prefix
+%% remains untouched.
+loader_shared_namespace_module_key_normalization(Config) ->
+    Content = <<"namespace erl shared\nstruct Thing { 1: i32 value }\n">>,
+    First = write_nested_snippet(Config, "normal_a/hy-phen.thrift", Content),
+    Second = write_nested_snippet(Config, "normal_b/space name.thrift", Content),
+    Third = write_nested_snippet(Config, "normal_c/2fast.thrift", Content),
+    Root = write_snippet(
+        Config,
+        "normalized_root.thrift",
+        <<
+            "include \"normal_a/hy-phen.thrift\"\n"
+            "include \"normal_b/space name.thrift\"\n"
+            "include \"normal_c/2fast.thrift\"\n"
+            "namespace erl root\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Root),
+    ?assertEqual(<<"hy-phen">>, thrift_generator_loader:include_qualifier(First)),
+    ?assertEqual(<<"space name">>, thrift_generator_loader:include_qualifier(Second)),
+    ?assertEqual(<<"2fast">>, thrift_generator_loader:include_qualifier(Third)),
+    ?assertEqual(
+        [<<"root">>, <<"hy_phen">>, <<"space_name">>, <<"_2fast">>],
+        [E#tg_loaded.name || E <- Loaded]
+    ),
+    ?assertEqual(
+        [<<"root">>, <<"shared">>, <<"shared">>, <<"shared">>],
+        [E#tg_loaded.prefix || E <- Loaded]
+    ),
+    ok = generate_modules(Root),
+    ?assertMatch({file, _}, code:is_loaded(hy_phen_types)),
+    ?assertMatch({file, _}, code:is_loaded(space_name_types)),
+    ?assertMatch({file, _}, code:is_loaded('_2fast_types')),
+    ?assertEqual({shared_thing, [value]}, hy_phen_types:record_fields(<<"Thing">>)),
+    ok.
+
+%% Normalization may itself collide. That stays conservative: the original
+%% namespace collision is rejected rather than inventing a second naming
+%% scheme or choosing an arbitrary winner.
+loader_shared_namespace_module_key_collision_after_normalization(Config) ->
+    Content = <<"namespace erl shared\nstruct Thing { 1: i32 value }\n">>,
+    First = write_nested_snippet(Config, "normalized_collision_a/a-b.thrift", Content),
+    Second = write_nested_snippet(Config, "normalized_collision_b/a b.thrift", Content),
+    Root = write_snippet(
+        Config,
+        "normalized_collision_root.thrift",
+        <<
+            "include \"normalized_collision_a/a-b.thrift\"\n"
+            "include \"normalized_collision_b/a b.thrift\"\n"
+            "namespace erl root\n"
+        >>
+    ),
+    FirstAbs = unicode:characters_to_binary(filename:absname(First)),
+    SecondAbs = unicode:characters_to_binary(filename:absname(Second)),
+    ?assertMatch(
+        {error, {duplicate_module, <<"shared">>, FirstAbs, SecondAbs}},
+        thrift_generator_loader:load(Root)
+    ),
+    ok.
+
 loader_unresolved_duplicate_module(Config) ->
     Priv = proplists:get_value(priv_dir, Config),
     First = filename:join(Priv, "same_ns_a/shared.thrift"),
@@ -2042,6 +2108,12 @@ data_file(Config, Relative) ->
 
 write_snippet(Config, Name, Content) ->
     Path = filename:join(proplists:get_value(priv_dir, Config), Name),
+    ok = file:write_file(Path, Content),
+    Path.
+
+write_nested_snippet(Config, RelativePath, Content) ->
+    Path = filename:join(proplists:get_value(priv_dir, Config), RelativePath),
+    ok = filelib:ensure_dir(Path),
     ok = file:write_file(Path, Content),
     Path.
 

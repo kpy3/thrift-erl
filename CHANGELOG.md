@@ -29,9 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `throws` clauses accept typedef aliases that resolve to exceptions,
   including cross-module chains; aliases to non-exception types and
   typedef cycles remain rejected.
-- Namespace-derived module-key collisions resolve through unique file
-  basenames while identifier prefixes stay shared; unresolved basename
-  collisions keep the existing `duplicate_module` error.
+- Namespace-derived module-key collisions resolve through atom-safe
+  normalized file basenames while identifier prefixes stay shared;
+  unresolved basename collisions keep the existing `duplicate_module`
+  error.
 - `scripts/bench-regression`: paired historical benchmark of generated
   code against a git ref (defaults to `v0.8.0`), per-cell 0.99 gate,
   direct/public entries, cross-module and representation-conversion
