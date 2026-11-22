@@ -34,11 +34,13 @@
     handler_callbacks_test/0,
     source_is_readable_text_test/0,
     types_hrl_content_test/0,
-    struct_codec_test/0,
+    schema_codec_api_test/0,
+    schema_default_repr_test/0,
+    schema_convert_is_typed_test/0,
+    schema_onepass_and_fallback_test/0,
     enum_and_const_helpers_test/0,
     set_annotation_test/0,
     sum_union_test/0,
-    sum_union_shared_atoms_test/0,
     service_method_name_clash_test/0,
     namespace_set_default_test/0,
     namespace_prefix_test/0,
@@ -264,33 +266,124 @@ types_hrl_content_test() ->
     ?assertMatch({match, _}, re:run(Hrl, <<"-endif\\.">>)),
     ok.
 
-struct_codec_test() ->
+%% The type-first schema facade: canonical type atoms (the snake-cased
+%% IDL name, no namespace prefix) select the schema; encode/decode take
+%% option maps whose defaults come from the schema; convert and
+%% descriptor resolve the schema explicitly, never through a tag index.
+
+schema_codec_api_test() ->
     generate(),
     Record = {outer, {inner, <<"x">>}, 42},
-    {ok, Bin} = t_types:encode_outer(Record),
-    ?assertEqual({ok, Record}, t_types:decode_outer(Bin)),
-    %% map representation: uniform atom-keyed maps all the way down
-    ?assertEqual(
-        {ok, #{inner => #{name => <<"x">>}, count => 42}},
-        t_types:decode_outer(Bin, map)
-    ),
+    Map = #{inner => #{name => <<"x">>}, count => 42},
+    {ok, Bin} = t_types:encode(outer, Record),
+    ?assertEqual({ok, Record}, t_types:decode(outer, Bin)),
+    ?assertEqual({ok, Map}, t_types:decode(outer, Bin, #{repr => map})),
     %% struct representation: the tag survives as identity metadata
-    {ok, Struct} = t_types:decode_outer(Bin, struct),
+    {ok, Struct} = t_types:decode(outer, Bin, #{repr => struct}),
     ?assertEqual(outer, maps:get('__struct__', Struct)),
-    ?assertEqual({ok, Record}, t_types:outer_from_map(#{inner => {inner, <<"x">>}, count => 42})),
-    %% convert/2 travels between representations through the tag index
-    ?assertEqual({ok, Record}, t_types:convert(Struct, record)),
-    ?assertEqual(
-        {ok, #{inner => #{name => <<"x">>}, count => 42}},
-        t_types:convert(Record, map)
-    ),
-    ?assertMatch(#{outer := {struct, {ref, t_types, <<"Outer">>}}}, t_types:tag_index()),
-    %% strict decoding refuses trailing bytes and truncation
-    ?assertEqual({error, trailing}, t_types:decode_outer(<<Bin/binary, 0>>)),
+    %% typed conversion resolves the schema from the type atom
+    ?assertEqual({ok, Record}, t_types:convert(outer, Struct, record)),
+    ?assertEqual({ok, Map}, t_types:convert(outer, Record, map)),
+    %% descriptors are the named refs the runtime one-pass dispatch needs
+    ?assertEqual({ok, {struct, {ref, t_types, <<"Outer">>}}}, t_types:descriptor(outer)),
+    ?assertEqual({ok, {struct, {ref, t_types, <<"Inner">>}}}, t_types:descriptor(inner)),
+    %% unknown types answer everywhere the facade resolves them
+    ?assertEqual({error, {unknown_type, missing}}, t_types:descriptor(missing)),
+    ?assertEqual({error, {unknown_type, missing}}, t_types:encode(missing, #{})),
+    ?assertEqual({error, {unknown_type, missing}}, t_types:encode(missing, #{}, #{})),
+    ?assertEqual({error, {unknown_type, missing}}, t_types:decode(missing, Bin)),
+    ?assertEqual({error, {unknown_type, missing}}, t_types:decode(missing, Bin, #{})),
+    ?assertEqual({error, {unknown_type, missing}}, t_types:convert(missing, Record, record)),
+    %% the old wrappers and the tag index are gone
+    ?assertNot(erlang:function_exported(t_types, encode_outer, 1)),
+    ?assertNot(erlang:function_exported(t_types, encode_outer, 2)),
+    ?assertNot(erlang:function_exported(t_types, decode_outer, 1)),
+    ?assertNot(erlang:function_exported(t_types, decode_outer, 2)),
+    ?assertNot(erlang:function_exported(t_types, decode_outer, 3)),
+    ?assertNot(erlang:function_exported(t_types, outer_from_map, 1)),
+    ?assertNot(erlang:function_exported(t_types, convert, 2)),
+    ?assertNot(erlang:function_exported(t_types, tag_index, 0)),
+    %% the old wrappers of every other struct are gone too
+    ?assertNot(erlang:function_exported(t_types, encode_inner, 1)),
+    ?assertNot(erlang:function_exported(t_types, decode_failed, 1)),
+    ?assertNot(erlang:function_exported(t_types, failed_from_map, 1)),
+    %% whole-input decoding: trailing bytes and truncation fail
+    ?assertEqual({error, trailing}, t_types:decode(outer, <<Bin/binary, 0>>)),
     ?assertEqual(
         {error, truncated},
-        t_types:decode_outer(binary:part(Bin, 0, byte_size(Bin) - 1))
+        t_types:decode(outer, binary:part(Bin, 0, byte_size(Bin) - 1))
     ),
+    %% compact and JSON travel through the same option vocabulary
+    {ok, Compact} = t_types:encode(outer, Record, #{protocol => compact}),
+    ?assertEqual(Bin =/= Compact, true),
+    ?assertEqual({ok, Record}, t_types:decode(outer, Compact, #{protocol => compact})),
+    ?assertEqual(
+        {ok, Map},
+        t_types:decode(outer, Compact, #{protocol => compact, repr => map})
+    ),
+    {ok, Json} = t_types:encode(outer, Record, #{protocol => json}),
+    ?assertEqual({ok, Record}, t_types:decode(outer, Json, #{protocol => json})),
+    ?assertEqual({ok, Map}, t_types:decode(outer, Json, #{protocol => json, repr => map})),
+    %% strict encode checks the input map against the declared fields
+    ?assertEqual(
+        {error, {unknown_fields, [typo]}},
+        t_types:encode(outer, #{inner => {inner, <<"x">>}, count => 1, typo => 2}, #{strict => true})
+    ),
+    %% option validation errors surface through the facade
+    ?assertEqual({error, {unknown_option, repr}}, t_types:encode(outer, Record, #{repr => map})),
+    ?assertEqual({error, {unknown_option, strict}}, t_types:decode(outer, Bin, #{strict => true})),
+    %% the schema default fills an absent repr: a protocol-only options
+    %% map decodes into the struct's default representation
+    ?assertEqual({ok, Record}, t_types:decode(outer, Bin, #{protocol => binary})),
+    %% a non-map options argument answers the documented bad_option error,
+    %% it does not crash on map operations
+    ?assertEqual(
+        {error, {bad_option, {options, record, [map]}}},
+        t_types:decode(outer, Bin, record)
+    ),
+    ok.
+
+%% The schema-selected default representation: sum unions decode into
+%% their tagged tuple, map-mode structs into the atom-keyed map,
+%% record-mode structs into the record and native-mode structs into the
+%% runtime-minted native record (or the unsupported_repr error on OTP 28).
+
+schema_default_repr_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        "namespace erl t (erl.union_type = \"sum\")\n"
+        "union Value { 1: i64 int_val, 2: string str_val }\n"
+        "struct M { 1: i32 x } (erl.struct_type = \"map\")\n"
+        "struct P { 1: i32 y }\n"
+        "struct N { 1: i32 z } (erl.struct_type = \"native\")\n"
+    ),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    lists:foreach(
+        fun
+            ({ok, Name, Beam}) -> {module, Name} = code:load_binary(Name, atom_to_list(Name), Beam);
+            ({error, {Name, Errors}}) -> erlang:error({generated_module, Name, Errors})
+        end,
+        thrift_generator_emitter:compile_sources(Model)
+    ),
+    %% sum union: the tagged tuple is the default
+    {ok, ValueBin} = t_types:encode(value, {str_val, <<"hi">>}),
+    ?assertEqual({ok, {str_val, <<"hi">>}}, t_types:decode(value, ValueBin)),
+    %% map mode: the atom-keyed map is the default
+    {ok, MapBin} = t_types:encode(m, #{x => 1}),
+    ?assertEqual({ok, #{x => 1}}, t_types:decode(m, MapBin)),
+    %% record mode: the record is the default
+    {ok, RecordBin} = t_types:encode(p, {p, 5}),
+    ?assertEqual({ok, {p, 5}}, t_types:decode(p, RecordBin)),
+    %% native mode: the runtime-minted record, or unsupported on OTP 28
+    {ok, NativeBin} = t_types:encode(n, #{z => 3}),
+    case thrift_runtime_native:supported() of
+        true ->
+            {ok, Native} = t_types:decode(n, NativeBin),
+            ?assertEqual(n, records:get_name(Native)),
+            ?assertEqual({ok, NativeBin}, t_types:encode(n, Native));
+        false ->
+            ?assertEqual({error, {unsupported_repr, native}}, t_types:decode(n, NativeBin))
+    end,
     ok.
 
 enum_and_const_helpers_test() ->
@@ -351,14 +444,14 @@ set_annotation_test() ->
 
     %% Encode accepts each implementation's input shape, decode builds
     %% it back: ordsets sort and dedup, sets v2 dedup.
-    {ok, Bin} = t_types:encode_bag(#{
+    {ok, Bin} = t_types:encode(bag, #{
         plain => [9, 9, 1],
         ords => ordsets:from_list([3, 1, 2]),
         tags => sets:from_list([<<"b">>, <<"a">>]),
         nested => [ordsets:from_list([1, 2])],
         via_typedef => [7]
     }),
-    {ok, Bag} = t_types:decode_bag(Bin, map),
+    {ok, Bag} = t_types:decode(bag, Bin, #{repr => map}),
     ?assertEqual(#{plain => [9, 9, 1]}, maps:with([plain], Bag)),
     ?assertEqual([1, 2, 3], maps:get(ords, Bag)),
     ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), maps:get(tags, Bag)),
@@ -367,14 +460,14 @@ set_annotation_test() ->
 
     %% Record representation: set fields become record elements of the
     %% same shapes, and encode auto-detects them back.
-    {ok, Record} = t_types:decode_bag(Bin, record),
+    {ok, Record} = t_types:decode(bag, Bin, #{repr => record}),
     {bag, Plain, Ords, Tags, Nested, ViaTypedef} = Record,
     ?assertEqual([9, 9, 1], Plain),
     ?assertEqual([1, 2, 3], Ords),
     ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), Tags),
     ?assertEqual([[1, 2]], Nested),
     ?assertEqual([7], ViaTypedef),
-    ?assertEqual({ok, Bin}, t_types:encode_bag(Record)),
+    ?assertEqual({ok, Bin}, t_types:encode(bag, Record)),
 
     %% The wire codec itself stays list-shaped: 2-tuple descriptors and
     %% raw lists roundtrip through thrift_runtime_binary untouched.
@@ -391,9 +484,9 @@ set_annotation_test() ->
 
 %% erl.union_type = "sum" turns unions into tagged-tuple sums: no
 %% record, the exported `'Name'()` alias in the types module is the
-%% type, record_fields carries {sum, Atoms} and convert/2 indexes the
-%% union by its field atoms. The wire stays the standard single-field
-%% struct.
+%% type, record_fields carries {sum, Atoms} and the type-first convert
+%% resolves the union by its canonical type atom. The wire stays the
+%% standard single-field struct.
 
 sum_union_test() ->
     {ok, Doc} = thrift_generator:parse_string(?SUM_SNIPPET),
@@ -409,7 +502,10 @@ sum_union_test() ->
 
     ?assertEqual({sum, [int_val, str_val, nested]}, t_types:record_fields(<<"Value">>)),
     ?assertEqual({legacy, [n]}, t_types:record_fields(<<"Legacy">>)),
-    #{int_val := {struct, {ref, t_types, <<"Value">>}}} = t_types:tag_index(),
+    ?assertEqual(
+        {ok, {struct, {ref, t_types, <<"Value">>}}},
+        t_types:descriptor(value)
+    ),
 
     Sources = thrift_generator_emitter:sources(Model),
     Hrl = entry_hrl(t_types, Sources),
@@ -420,31 +516,30 @@ sum_union_test() ->
     ?assertMatch({match, _}, re:run(TypesSrc, <<"\\{int_val, integer\\(\\)\\}">>)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(value,">>)),
 
-    {ok, Bin} = t_types:encode_value({str_val, <<"hi">>}),
-    {ok, {str_val, <<"hi">>}} = t_types:decode_value(Bin),
-    {ok, NestedBin} = t_types:encode_value({nested, {inner, <<"n">>}}),
-    {ok, {nested, {inner, <<"n">>}}} = t_types:decode_value(NestedBin),
+    {ok, Bin} = t_types:encode(value, {str_val, <<"hi">>}),
+    {ok, {str_val, <<"hi">>}} = t_types:decode(value, Bin),
+    {ok, NestedBin} = t_types:encode(value, {nested, {inner, <<"n">>}}),
+    {ok, {nested, {inner, <<"n">>}}} = t_types:decode(value, NestedBin),
 
-    %% convert/2 reshapes the payload; the tagged tuple survives every
-    %% representation axis.
-    ?assertEqual({ok, {int_val, 7}}, t_types:convert({int_val, 7}, record)),
-    {ok, {nested, Payload}} = t_types:convert({nested, {inner, <<"n">>}}, map),
+    %% typed conversion reshapes the payload; the tagged tuple survives
+    %% every representation axis
+    ?assertEqual({ok, {int_val, 7}}, t_types:convert(value, {int_val, 7}, record)),
+    {ok, {nested, Payload}} = t_types:convert(value, {nested, {inner, <<"n">>}}, map),
     ?assertEqual(#{name => <<"n">>}, Payload),
 
     %% An unknown tag and a malformed wire union are tagged errors.
-    ?assertMatch({error, {value_does_not_match_type, _}}, t_types:encode_value({bogus, 1})),
-    ?assertMatch({error, {invalid_union, _}}, t_types:decode_value(<<0>>)),
+    ?assertMatch({error, {value_does_not_match_type, _}}, t_types:encode(value, {bogus, 1})),
+    ?assertMatch({error, {invalid_union, _}}, t_types:decode(value, <<0>>)),
     ok.
 
 %% Field atoms shared by several sum unions of one module are legal,
-%% common Thrift (per-resource result unions). Each union's own
-%% encode/decode stays exact; the context-free module-level convert
-%% resolves a shared atom to the LAST union declaring it, so another
-%% union's value under that atom fails the payload type check where it
-%% can be seen (struct payloads — the wire-map level does not type-check
-%% scalars).
+%% common Thrift (per-resource result unions). Each union's own encode/
+%% decode stays exact, and the typed convert resolves the schema from
+%% the type atom: the shared atom is no longer context-free — First's
+%% `n' carries an i64, Second's an Inner, and conversion type-checks the
+%% payload against the SELECTED union's field.
 
-sum_union_shared_atoms_test() ->
+schema_convert_is_typed_test() ->
     {ok, Doc} = thrift_generator:parse_string(
         "namespace erl t (erl.union_type = \"sum\")\n"
         "struct Inner { 1: string name }\n"
@@ -464,19 +559,62 @@ sum_union_shared_atoms_test() ->
     ),
 
     %% per-union codecs are exact regardless of the shared atom
-    {ok, FirstBin} = t_types:encode_t_first({n, 5}),
-    {ok, {n, 5}} = t_types:decode_t_first(FirstBin),
-    {ok, SecondBin} = t_types:encode_t_second({n, {t_inner, <<"x">>}}),
-    {ok, {n, {t_inner, <<"x">>}}} = t_types:decode_t_second(SecondBin),
+    {ok, FirstBin} = t_types:encode(first, {n, 5}),
+    {ok, {n, 5}} = t_types:decode(first, FirstBin),
+    {ok, SecondBin} = t_types:encode(second, {n, {t_inner, <<"x">>}}),
+    {ok, {n, {t_inner, <<"x">>}}} = t_types:decode(second, SecondBin),
 
-    %% the shared atom indexes the last-declared union
-    #{n := {struct, {ref, t_types, <<"Second">>}}, s := {struct, {ref, t_types, <<"First">>}}} =
-        t_types:tag_index(),
-    {ok, {n, {t_inner, <<"x">>}}} = t_types:convert({n, {t_inner, <<"x">>}}, record),
-    {ok, {s, {t_inner, <<"x">>}}} = t_types:convert({s, {t_inner, <<"x">>}}, record),
-    %% an i64 payload under the struct-typed winner is a loud misuse,
+    %% the typed convert picks each union's own schema: First's i64
+    %% payload converts under `first', Second's Inner payload under
+    %% `second' — no last-declaration-wins tag index
+    {ok, {n, 5}} = t_types:convert(first, {n, 5}, map),
+    {ok, {n, {t_inner, <<"x">>}}} = t_types:convert(second, {n, {t_inner, <<"x">>}}, record),
+    %% the payload reshapes per the selected union's field type
+    {ok, {n, #{name := <<"x">>}}} = t_types:convert(second, {n, {t_inner, <<"x">>}}, map),
+    %% an i64 payload under Second's struct-typed field is a loud misuse,
     %% not a silent conversion
-    ?assertError({value_does_not_match_type, _}, t_types:convert({n, 5}, record)),
+    ?assertError({value_does_not_match_type, _}, t_types:convert(second, {n, 5}, record)),
+    ok.
+
+%% The facade keeps the binary named-ref fast path: a generated encode
+%% or decode reaches `thrift_runtime_binary's one-pass repr dispatch for
+%% the literal ref descriptor — its persistent_term codec cache goes
+%% cold -> populated with the struct's {Encode, Decode} pair — and the
+%% cached one-pass functions agree with the facade answers. Mixed-
+%% nesting values (a map-nested child inside a record parent) miss the
+%% one-pass family and fall back to the two-pass path with identical
+%% bytes and identical decode results.
+
+schema_onepass_and_fallback_test() ->
+    generate(),
+    Record = {outer, {inner, <<"x">>}, 42},
+    Desc = {struct, {ref, t_types, <<"Outer">>}},
+    CacheKey = {thrift_runtime_binary, repr_codec_mfa, t_types},
+    %% encode: the facade engages the one-pass dispatch — after a cold
+    %% cache the repr codec probe cached Outer's {Name, repr} pair, and
+    %% the cached one-pass encoder produces the identical bytes
+    true = persistent_term:erase(CacheKey),
+    {ok, Bin} = t_types:encode(outer, Record),
+    {Encode, _} = maps:get({<<"Outer">>, record}, persistent_term:get(CacheKey)),
+    {ok, EncodeIo} = t_types:Encode(Record),
+    ?assertEqual(Bin, iolist_to_binary(EncodeIo)),
+    %% decode: same engagement on the way back
+    true = persistent_term:erase(CacheKey),
+    {ok, Record} = t_types:decode(outer, Bin),
+    {_, Decode} = maps:get({<<"Outer">>, record}, persistent_term:get(CacheKey)),
+    ?assertEqual({ok, Record, <<>>}, t_types:Decode(Bin)),
+    %% mixed nesting: the one-pass encoder answers a miss and the
+    %% two-pass fallback produces identical bytes; the decode side is
+    %% identical too, and strict whole-input behavior is preserved
+    Mixed = {outer, #{name => <<"x">>}, 42},
+    ?assertEqual({ok, Bin}, t_types:encode(outer, Mixed)),
+    ?assertEqual(thrift_runtime:encode(Desc, Mixed), t_types:encode(outer, Mixed)),
+    ?assertEqual({ok, Record}, t_types:decode(outer, Bin)),
+    ?assertEqual({error, trailing}, t_types:decode(outer, <<Bin/binary, 0>>)),
+    ?assertEqual(
+        {error, truncated},
+        t_types:decode(outer, binary:part(Bin, 0, byte_size(Bin) - 1))
+    ),
     ok.
 
 %% Same-named methods across two services of one file are legal Thrift
@@ -547,29 +685,29 @@ native_representation_test() ->
     ?assertEqual({native, oops}, t_types:record_fields(<<"Oops">>)),
     ?assertEqual({v, [n]}, t_types:record_fields(<<"V">>)),
     ?assertEqual(false, erlang:function_exported(t_types, p_from_map, 1)),
-    #{p := _} = t_types:tag_index(),
+    ?assertEqual({ok, {struct, {ref, t_types, <<"P">>}}}, t_types:descriptor(p)),
 
     Hrl = entry_hrl(t_types, thrift_generator_emitter:sources(Model)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(p,">>)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-type p\\(\\)">>)),
 
-    {ok, Bin} = t_types:encode_p(#{x => 7, label => <<"hi">>}),
-    {ok, #{x := 7, label := <<"hi">>}} = t_types:decode_p(Bin, map),
-    ?assertEqual({error, {no_record, p}}, t_types:decode_p(Bin, record)),
+    {ok, Bin} = t_types:encode(p, #{x => 7, label => <<"hi">>}),
+    {ok, #{x := 7, label := <<"hi">>}} = t_types:decode(p, Bin, #{repr => map}),
+    ?assertEqual({error, {no_record, p}}, t_types:decode(p, Bin, #{repr => record})),
     case thrift_runtime_native:supported() of
         true ->
-            {ok, Native} = t_types:decode_p(Bin),
+            {ok, Native} = t_types:decode(p, Bin),
             ?assertEqual(t_types, records:get_module(Native)),
             ?assertEqual(p, records:get_name(Native)),
             ?assertEqual(7, records:get(x, Native)),
-            ?assertEqual({ok, Bin}, t_types:encode_p(Native)),
+            ?assertEqual({ok, Bin}, t_types:encode(p, Native)),
             ?assertEqual(
                 {ok, #{x => 7, label => <<"hi">>}},
-                t_types:convert(Native, map)
+                t_types:convert(p, Native, map)
             ),
-            ?assertEqual({error, {no_record, p}}, t_types:convert(Native, record));
+            ?assertEqual({error, {no_record, p}}, t_types:convert(p, Native, record));
         false ->
-            ?assertEqual({error, {unsupported_repr, native}}, t_types:decode_p(Bin))
+            ?assertEqual({error, {unsupported_repr, native}}, t_types:decode(p, Bin))
     end,
     ok.
 
@@ -652,10 +790,10 @@ option_axes_test() ->
     TypesSrc = entry_source(t_types, thrift_generator_emitter:sources(Model)),
     ?assertMatch({match, _}, re:run(TypesSrc, <<"-nominal 'Stamp'\\(\\) :: integer\\(\\)\\.">>)),
 
-    {ok, Bin} = t_types:encode_t_value({n, 5}),
-    {ok, {n, 5}} = t_types:decode_t_value(Bin),
-    {ok, BagBin} = t_types:encode_t_bag(#{tags => sets:from_list([<<"a">>, <<"b">>])}),
-    {ok, #{tags := Tags}} = t_types:decode_t_bag(BagBin, map),
+    {ok, Bin} = t_types:encode(value, {n, 5}),
+    {ok, {n, 5}} = t_types:decode(value, Bin),
+    {ok, BagBin} = t_types:encode(bag, #{tags => sets:from_list([<<"a">>, <<"b">>])}),
+    {ok, #{tags := Tags}} = t_types:decode(bag, BagBin, #{repr => map}),
     ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), Tags),
     ok.
 
@@ -693,8 +831,8 @@ namespace_set_default_test() ->
     %% decode builds sets under the file default, the explicit ordset
     %% wins for its field; encode under `sets` takes a sets collection
     %% (no list coercion), list and ordset impls keep taking lists
-    {ok, Bin} = t_types:encode_t_bag(#{plain => sets:from_list([3, 1, 2]), ords => [2, 1]}),
-    {ok, #{plain := Plain, ords := Ords}} = t_types:decode_t_bag(Bin, map),
+    {ok, Bin} = t_types:encode(bag, #{plain => sets:from_list([3, 1, 2]), ords => [2, 1]}),
+    {ok, #{plain := Plain, ords := Ords}} = t_types:decode(bag, Bin, #{repr => map}),
     ?assertEqual(sets:from_list([1, 2, 3]), Plain),
     ?assertEqual([1, 2], Ords),
 
@@ -719,8 +857,8 @@ namespace_set_default_test() ->
     %% impl folds back to an element list on the wire. Decode of a
     %% missing optional field stays undefined — defaults live in the
     %% record literal, not in decode
-    {ok, Bin2} = t_types:encode_t_bag({t_bag, sets:from_list([1]), [2], undefined}),
-    {ok, #{plain := Plain2, ords := Ords2}} = t_types:decode_t_bag(Bin2, map),
+    {ok, Bin2} = t_types:encode(bag, {t_bag, sets:from_list([1]), [2], undefined}),
+    {ok, #{plain := Plain2, ords := Ords2}} = t_types:decode(bag, Bin2, #{repr => map}),
     ?assertEqual(sets:from_list([1]), Plain2),
     ?assertEqual([2], Ords2),
     ok.
@@ -763,20 +901,21 @@ namespace_prefix_test() ->
     ),
 
     %% The record contract and the codec functions carry the prefix;
-    %% struct_info stays keyed by the wire name.
+    %% struct_info stays keyed by the wire name, the canonical type atom
+    %% never does.
     ?assertEqual({demo_widgets_point, [x]}, demo_widgets_types:record_fields(<<"Point">>)),
     ?assertEqual(
         {struct, [{1, default, {base, i32}, <<"x">>, 5}]},
         demo_widgets_types:struct_info(<<"Point">>)
     ),
     Record = {demo_widgets_point, 5},
-    {ok, Bin} = demo_widgets_types:encode_demo_widgets_point(Record),
-    ?assertEqual({ok, Record}, demo_widgets_types:decode_demo_widgets_point(Bin)),
-    ?assertEqual({ok, #{x => 5}}, demo_widgets_types:decode_demo_widgets_point(Bin, map)),
-    ?assertEqual({ok, Record}, demo_widgets_types:demo_widgets_point_from_map(#{x => 5})),
-    ?assertMatch(
-        #{demo_widgets_point := {struct, {ref, demo_widgets_types, <<"Point">>}}},
-        demo_widgets_types:tag_index()
+    {ok, Bin} = demo_widgets_types:encode(point, Record),
+    ?assertEqual({ok, Record}, demo_widgets_types:decode(point, Bin)),
+    ?assertEqual({ok, #{x => 5}}, demo_widgets_types:decode(point, Bin, #{repr => map})),
+    ?assertEqual({ok, Record}, demo_widgets_types:convert(point, #{x => 5}, record)),
+    ?assertEqual(
+        {ok, {struct, {ref, demo_widgets_types, <<"Point">>}}},
+        demo_widgets_types:descriptor(point)
     ),
 
     %% Enum helpers get the prefix; member atoms and enum_info do not.
@@ -847,10 +986,11 @@ type_definitions_test() ->
     ok.
 
 %% IDL doc comments (/** */, ///) reach the generated code: as -doc on
-%% the entity's functions (struct codecs, enum helpers, the constant)
-%% and on service callbacks/methods, plus the service doc in the
-%% generated module docs; every generated function carries a built-in
-%% -doc explaining its contract.
+%% the entity's functions (enum helpers, the constant, service
+%% callbacks/methods), plus the service doc in the generated module
+%% docs; every generated function carries a built-in -doc explaining
+%% its contract. The type-first codec facade is module-level, so its
+%% docs are the built-in contracts rather than per-struct IDL text.
 
 doc_pipeline_test() ->
     {ok, Doc} = thrift_generator:parse_string(?DOC_SNIPPET),
@@ -868,34 +1008,30 @@ doc_pipeline_test() ->
     ),
     Sources = thrift_generator_emitter:sources(Model),
     TypesSrc = doc_text(entry_source(t_types, Sources)),
-    %% the IDL struct doc is prepended to every codec function's doc
+    %% the type-first facade functions carry their built-in contracts
     ?assertMatch(
         {match, _},
-        re:run(TypesSrc, <<"-doc\\(\"The request payload\\.\\\\n\\\\nEncodes ">>)
+        re:run(TypesSrc, <<"-doc\\(\"Encodes `Value` of the struct selected by `Type`">>)
     ),
     ?assertMatch(
         {match, _},
-        re:run(TypesSrc, <<"-doc\\(\"The request payload\\.\\\\n\\\\nDecodes ">>)
+        re:run(TypesSrc, <<"-doc\\(\"Decodes the whole binary into the struct's default">>)
     ),
     ?assertMatch(
         {match, _},
-        re:run(TypesSrc, <<"-doc\\(\"The request payload\\.\\\\n\\\\nBuilds the record ">>)
-    ),
-    %% the built-in arity explanations are there too
-    ?assertMatch(
-        {match, _},
-        re:run(TypesSrc, <<"in any representation with the given ">>)
+        re:run(TypesSrc, <<"into representation `repr` \\(default: the struct's schema-selected">>)
     ),
     ?assertMatch(
         {match, _},
-        re:run(TypesSrc, <<"whole binary into the given `thrift_runtime:repr\\(\\)`">>)
+        re:run(TypesSrc, <<"-doc\\(\"Reshapes a typed value \\(record, struct-map">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(TypesSrc, <<"-doc\\(\"Returns the named-ref descriptor">>)
     ),
     %% enum and constant docs
     ?assertMatch({match, _}, re:run(TypesSrc, <<"Color codes\\.\\\\n\\\\nMaps an enum member">>)),
     ?assertMatch({match, _}, re:run(TypesSrc, <<"-doc\\(\"The constant's value as declared">>)),
-    %% introspection docs
-    ?assertMatch({match, _}, re:run(TypesSrc, <<"The struct tag -> descriptor map">>)),
-    ?assertMatch({match, _}, re:run(TypesSrc, <<"Reshapes a typed value \\(record or struct">>)),
     %% client methods and handler callbacks carry the function's IDL doc
     ClientSrc = doc_text(entry_source(t_svc_client, Sources)),
     ?assertMatch({match, _}, re:run(ClientSrc, <<"Ping it\\.\\\\n\\\\nCalls ping and waits for">>)),
@@ -934,9 +1070,9 @@ entry_hrl(Module, Sources) ->
     maps:get(hrl, entry(Module, Sources)).
 
 %% erl.record_name replaces the derived record tag everywhere the tag
-%% surfaces — the hrl declaration, the type alias, record_fields/1,
-%% tag_index/0 and the codec round trip — while struct_info stays keyed
-%% by the wire name and codec function names stay derived.
+%% surfaces — the hrl declaration, the type alias, record_fields/1 and
+%% the schema codec facade — while struct_info stays keyed by the wire
+%% name and codec function names stay derived.
 
 record_name_annotation_test() ->
     {ok, Model} = analyze_model(
@@ -958,10 +1094,13 @@ record_name_annotation_test() ->
     ?assertMatch({match, _}, re:run(Hrl, <<"-record\\('BankAccount',\\{">>)),
     ?assertMatch({match, _}, re:run(Source, <<"'BankAccount'\\(\\) :: #'BankAccount'\\{\\}">>)),
     ?assertEqual({'BankAccount', [id, balance]}, t_types:record_fields(<<"BankAccount">>)),
-    ?assertEqual(#{'BankAccount' => {struct, {ref, t_types, <<"BankAccount">>}}}, t_types:tag_index()),
+    ?assertEqual(
+        {ok, {struct, {ref, t_types, <<"BankAccount">>}}},
+        t_types:descriptor(bank_account)
+    ),
     Value = {'BankAccount', <<"acc-1">>, 100},
-    {ok, Bin} = t_types:encode_bank_account(Value),
-    ?assertEqual({ok, Value}, t_types:decode_bank_account(Bin, record)),
+    {ok, Bin} = t_types:encode(bank_account, Value),
+    ?assertEqual({ok, Value}, t_types:decode(bank_account, Bin, #{repr => record})),
     ?assertEqual({struct, {ref, t_types, <<"BankAccount">>}}, t_types:function_info(<<"get">>, reply)),
     ok.
 
@@ -998,8 +1137,8 @@ enum_case_test() ->
     {struct, {struct, [{1, default, {enum, [{0, red}, {10, green}]}, <<"c">>, undefined}]}} =
         t_types:function_info(<<"get">>, params),
     Value = #{c => green},
-    {ok, Bin} = t_types:encode_s(#{c => green}),
-    ?assertEqual({ok, Value}, t_types:decode_s(Bin, map)),
+    {ok, Bin} = t_types:encode(s, #{c => green}),
+    ?assertEqual({ok, Value}, t_types:decode(s, Bin, #{repr => map})),
     ok.
 
 -spec analyze_model(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.

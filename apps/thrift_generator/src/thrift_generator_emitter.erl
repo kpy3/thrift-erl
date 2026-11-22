@@ -187,11 +187,14 @@ types_forms(Mod, Ctx) ->
             {function_info, 2},
             {service_info, 0},
             {record_fields, 1},
-            {tag_index, 0},
-            {convert, 2}
+            {encode, 2},
+            {encode, 3},
+            {decode, 2},
+            {decode, 3},
+            {convert, 3},
+            {descriptor, 1}
         ]) ++
             [thrift_generator_emitter_syntax:export_type_form(type_alias_entries(Mod))] ++
-            thrift_generator_emitter_syntax:exports_forms(struct_codec_entries(Mod)) ++
             thrift_generator_emitter_syntax:exports_forms(
                 thrift_generator_codec_common:export_entries(wire, Mod, Ctx)
             ) ++
@@ -215,11 +218,10 @@ types_forms(Mod, Ctx) ->
         function_info_forms(Mod, Ctx) ++
         service_info_forms(Mod, Ctx) ++
         record_fields_forms(Mod) ++
-        struct_codec_forms(Mod, Ctx) ++
+        schema_codec_forms(Mod, Ctx) ++
         thrift_generator_codec:module_forms(Mod, Ctx) ++
         thrift_generator_codec_compact:module_forms(Mod, Ctx) ++
         thrift_generator_codec_json:module_forms(Mod, Ctx) ++
-        tag_index_forms(Mod, Ctx) ++
         enum_helper_forms(Mod) ++
         typedef_forms(Mod, Ctx) ++
         const_forms(Mod).
@@ -455,194 +457,431 @@ scalar_const(_Const) ->
     true.
 
 %%--------------------------------------------------------------------
-%% Per-struct codec functions
+%% Type-first schema codec facade
 %%--------------------------------------------------------------------
 
--spec struct_codec_entries(#tg_module{}) -> [{atom(), arity()}].
-struct_codec_entries(Mod) ->
-    lists:append([
-        [
-            {binary_to_atom(<<"encode_", Prefix/binary>>, utf8), 1},
-            {binary_to_atom(<<"encode_", Prefix/binary>>, utf8), 2},
-            {binary_to_atom(<<"decode_", Prefix/binary>>, utf8), 1},
-            {binary_to_atom(<<"decode_", Prefix/binary>>, utf8), 2},
-            {binary_to_atom(<<"decode_", Prefix/binary>>, utf8), 3}
-        ] ++
-            case record_mode(S) of
-                true -> [{binary_to_atom(<<Prefix/binary, "_from_map">>, utf8), 1}];
-                false -> []
-            end
-     || S <- Mod#tg_module.structs,
-        Prefix <- [typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(S#tg_struct.name))]
+%% The public codec surface of a types module: one `encode', `decode'
+%% and `convert' per module, keyed by the canonical type atom — the
+%% snake-cased IDL name without the namespace prefix (the module name
+%% already namespaces). Every clause embeds the struct's named-ref
+%% descriptor literally: binary calls engage the runtime's one-pass
+%% repr codecs directly, with no map lookup by type atom. Unknown types
+%% answer `{unknown_type, Type}'; a non-map options argument answers
+%% the documented bad_option error instead of crashing on map
+%% operations.
+
+-spec schema_codec_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
+schema_codec_forms(Mod, Ctx) ->
+    Structs = Mod#tg_module.structs,
+    [thrift_generator_emitter_syntax:section_form("Schema codec facade")] ++
+        facade_encode_forms(Structs, Ctx) ++
+        facade_decode_forms(Structs, Ctx) ++
+        facade_convert_forms(Structs, Ctx) ++
+        facade_descriptor_forms(Structs, Ctx).
+
+%% The canonical type atom: the snake-cased IDL name as an atom, with no
+%% namespace prefix — `PingRequest' -> `ping_request' in any module.
+
+-spec facade_type(#tg_struct{}) -> atom().
+facade_type(S) ->
+    binary_to_atom(thrift_generator_names:snake(S#tg_struct.name), utf8).
+
+%% The schema-selected default representation of a decode without an
+%% explicit `repr' option: a sum union has no record, so its default is
+%% the tagged tuple through the `record' axis; map-mode structs default
+%% to their atom-keyed map, native-mode structs to the runtime-minted
+%% native record.
+
+-spec facade_default_repr(#tg_struct{}) -> record | native | map.
+facade_default_repr(S) ->
+    case mode(S) of
+        sum -> record;
+        record -> record;
+        native -> native;
+        map -> map
+    end.
+
+%% The result type of a default-representation decode: the definition's
+%% own alias (the record, the map shape or the sum's tuple union), with
+%% the runtime-minted native record staying opaque.
+
+-spec facade_default_type(#tg_struct{}) -> erl_syntax:syntaxTree().
+facade_default_type(S) ->
+    case native_mode(S) of
+        true -> thrift_generator_emitter_syntax:term_type();
+        false -> thrift_generator_emitter_syntax:user_type(type_alias(S#tg_struct.name))
+    end.
+
+%% A literal atom type node (`inner') for the overloaded facade specs.
+
+-spec facade_type_node(erl_anno:anno(), #tg_struct{}) -> erl_syntax:syntaxTree().
+facade_type_node(Anno, S) ->
+    {atom, Anno, facade_type(S)}.
+
+-spec is_map_guard(erl_syntax:syntaxTree()) -> [[erl_syntax:syntaxTree()]].
+is_map_guard(Var) ->
+    [[erl_syntax:application(erl_syntax:atom(is_map), [Var])]].
+
+-spec unknown_type_error(string()) -> erl_syntax:syntaxTree().
+unknown_type_error(Var) ->
+    erl_syntax:tuple([
+        erl_syntax:atom(error),
+        erl_syntax:tuple([erl_syntax:atom(unknown_type), erl_syntax:variable(Var)])
     ]).
 
--spec struct_codec_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-struct_codec_forms(Mod, Ctx) ->
-    lists:append([
-        [thrift_generator_emitter_syntax:section_form(section_label(S))] ++
-            struct_codec_one(S, Ctx)
-     || S <- Mod#tg_module.structs
+%% The Task 1 documented error for a non-map options argument.
+
+-spec bad_options_error() -> erl_syntax:syntaxTree().
+bad_options_error() ->
+    erl_syntax:tuple([
+        erl_syntax:atom(error),
+        erl_syntax:tuple([
+            erl_syntax:atom(bad_option),
+            erl_syntax:tuple([
+                erl_syntax:atom(options),
+                erl_syntax:variable("Options"),
+                erl_syntax:list([erl_syntax:atom(map)])
+            ])
+        ])
     ]).
 
--spec struct_codec_one(#tg_struct{}, #ectx{}) -> erl_syntax:forms().
-struct_codec_one(S, Ctx) ->
-    Prefix = typed_prefix(current_prefix(Ctx), thrift_generator_names:snake(S#tg_struct.name)),
-    Encode = binary_to_atom(<<"encode_", Prefix/binary>>, utf8),
-    Decode = binary_to_atom(<<"decode_", Prefix/binary>>, utf8),
-    %% A sum union has no record: its default representation is the
-    %% tagged tuple, reached through the `record' axis. Map-mode
-    %% structs default to their atom-keyed map, native-mode structs
-    %% to the runtime-minted native record.
-    DefaultRepr =
-        case mode(S) of
-            sum -> record;
-            record -> record;
-            native -> native;
-            map -> map
-        end,
-    Desc = struct_ref(S, Ctx),
-    Doc = S#tg_struct.doc,
+-spec facade_encode_forms([#tg_struct{}], #ectx{}) -> erl_syntax:forms().
+facade_encode_forms(Structs, Ctx) ->
     Anno = erl_anno:new(0),
-    ResultType = fun(Ok) ->
-        thrift_generator_emitter_syntax:ok_error_type(Anno, Ok, thrift_generator_emitter_syntax:error_term_type(Anno))
-    end,
-    EncodeSpec = fun(Arity) ->
-        {attribute, Anno, spec,
-            {{Encode, Arity}, [
+    Result = thrift_generator_emitter_syntax:ok_error_type(
+        Anno, {type, Anno, binary, []}, thrift_generator_emitter_syntax:error_term_type(Anno)
+    ),
+    Spec2 =
+        {attribute, Anno, spec, {
+            {encode, 2},
+            [
                 thrift_generator_emitter_syntax:fun_type(
-                    [value_type(S)] ++
-                        lists:duplicate(Arity - 1, thrift_generator_emitter_syntax:raw_type(term)),
-                    ResultType({type, Anno, binary, []})
+                    [facade_type_node(Anno, S), value_type(S)], Result
                 )
-            ]}}
-    end,
-    DecodeSpec = fun(Arity) ->
-        {attribute, Anno, spec,
-            {{Decode, Arity}, [
-                thrift_generator_emitter_syntax:fun_type(
-                    [thrift_generator_emitter_syntax:raw_type(binary)] ++
-                        lists:duplicate(Arity - 1, thrift_generator_emitter_syntax:raw_type(term)),
-                    ResultType(thrift_generator_emitter_syntax:term_type())
-                )
-            ]}}
-    end,
-    thrift_generator_emitter_syntax:doc_form(
-        Doc,
-        <<"Encodes `Value` in any representation with the binary protocol.">>
-    ) ++
-        [EncodeSpec(1)] ++
-        thrift_generator_emitter_syntax:fn_form(Encode, [
-            thrift_generator_emitter_syntax:fn_clause(
-                [erl_syntax:variable("Value")],
-                thrift_generator_emitter_syntax:application(thrift_runtime, encode, [
-                    thrift_generator_emitter_syntax:abstract(Desc), erl_syntax:variable("Value")
-                ])
-            )
-        ]) ++
-        thrift_generator_emitter_syntax:doc_form(
-            Doc, <<"Encodes `Value` in any representation with the given protocol.">>
-        ) ++
-        [EncodeSpec(2)] ++
-        thrift_generator_emitter_syntax:fn_form(Encode, [
-            thrift_generator_emitter_syntax:fn_clause(
-                [erl_syntax:variable("Value"), erl_syntax:variable("Protocol")],
-                thrift_generator_emitter_syntax:application(thrift_runtime, encode, [
-                    thrift_generator_emitter_syntax:abstract(Desc),
-                    erl_syntax:variable("Value"),
-                    erl_syntax:variable("Protocol")
-                ])
-            )
-        ]) ++
-        thrift_generator_emitter_syntax:doc_form(
-            Doc,
-            <<
-                "Decodes the whole binary into the struct's default"
-                " representation (record, atom-keyed map, or the sum"
-                " union's tagged tuple); trailing bytes or truncation"
-                " fail the decode."
-            >>
-        ) ++
-        [DecodeSpec(1)] ++
-        thrift_generator_emitter_syntax:fn_form(Decode, [
-            thrift_generator_emitter_syntax:fn_clause(
-                [erl_syntax:variable("Binary")],
-                thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
-                    thrift_generator_emitter_syntax:abstract(Desc),
-                    erl_syntax:variable("Binary"),
-                    thrift_generator_emitter_syntax:abstract(DefaultRepr)
-                ])
-            )
-        ]) ++
-        thrift_generator_emitter_syntax:doc_form(
-            Doc, <<"Decodes the whole binary into the given `thrift_runtime:repr()`.">>
-        ) ++
-        [DecodeSpec(2)] ++
-        thrift_generator_emitter_syntax:fn_form(Decode, [
-            thrift_generator_emitter_syntax:fn_clause(
-                [erl_syntax:variable("Binary"), erl_syntax:variable("Repr")],
-                thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
-                    thrift_generator_emitter_syntax:abstract(Desc),
-                    erl_syntax:variable("Binary"),
-                    erl_syntax:variable("Repr")
-                ])
-            )
-        ]) ++
-        thrift_generator_emitter_syntax:doc_form(
-            Doc,
-            <<
-                "Decodes the whole binary into the given representation"
-                " with the given protocol."
-            >>
-        ) ++
-        [DecodeSpec(3)] ++
-        thrift_generator_emitter_syntax:fn_form(Decode, [
-            thrift_generator_emitter_syntax:fn_clause(
+             || S <- Structs
+            ] ++
                 [
-                    erl_syntax:variable("Binary"),
-                    erl_syntax:variable("Repr"),
-                    erl_syntax:variable("Protocol")
-                ],
-                thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
-                    thrift_generator_emitter_syntax:abstract(Desc),
-                    erl_syntax:variable("Binary"),
-                    erl_syntax:variable("Repr"),
-                    erl_syntax:variable("Protocol")
+                    thrift_generator_emitter_syntax:fun_type(
+                        [{type, Anno, atom, []}, thrift_generator_emitter_syntax:raw_type(term)],
+                        Result
+                    )
+                ]
+        }},
+    Spec3 =
+        {attribute, Anno, spec, {
+            {encode, 3},
+            [
+                thrift_generator_emitter_syntax:fun_type(
+                    [facade_type_node(Anno, S), value_type(S), thrift_generator_emitter_syntax:raw_type(map)],
+                    Result
+                )
+             || S <- Structs
+            ] ++
+                [
+                    thrift_generator_emitter_syntax:fun_type(
+                        [
+                            {type, Anno, atom, []},
+                            thrift_generator_emitter_syntax:raw_type(term),
+                            thrift_generator_emitter_syntax:raw_type(term)
+                        ],
+                        Result
+                    )
+                ]
+        }},
+    thrift_generator_emitter_syntax:doc_form(
+        undefined,
+        <<
+            "Encodes `Value` of the struct selected by `Type` with the binary"
+            " protocol; `encode/3` with default options."
+        >>
+    ) ++
+        [Spec2] ++
+        thrift_generator_emitter_syntax:fn_form(encode, [
+            thrift_generator_emitter_syntax:fn_clause(
+                [erl_syntax:variable("Type"), erl_syntax:variable("Value")],
+                erl_syntax:application(erl_syntax:atom(encode), [
+                    erl_syntax:variable("Type"),
+                    erl_syntax:variable("Value"),
+                    thrift_generator_emitter_syntax:abstract(#{})
                 ])
             )
         ]) ++
-        case record_mode(S) of
-            true ->
-                FromMap = binary_to_atom(<<Prefix/binary, "_from_map">>, utf8),
-                thrift_generator_emitter_syntax:doc_form(
-                    Doc, <<"Builds the record from a map keyed by field atoms or wire names.">>
-                ) ++
+        thrift_generator_emitter_syntax:doc_form(
+            undefined,
+            <<
+                "Encodes `Value` of the struct selected by `Type`. Options: `protocol`"
+                " (default `binary`) and `strict` (default `false`); an unknown"
+                " `Type` answers `{error, {unknown_type, Type}}`."
+            >>
+        ) ++
+        [Spec3] ++
+        thrift_generator_emitter_syntax:fn_form(
+            encode,
+            [
+                erl_syntax:clause(
                     [
-                        {attribute, Anno, spec,
-                            {{FromMap, 1}, [
-                                thrift_generator_emitter_syntax:fun_type(
-                                    [thrift_generator_emitter_syntax:raw_type(map)],
-                                    thrift_generator_emitter_syntax:term_type()
-                                )
-                            ]}}
-                    ] ++
-                    thrift_generator_emitter_syntax:fn_form(FromMap, [
-                        thrift_generator_emitter_syntax:fn_clause(
-                            [erl_syntax:variable("Map")],
-                            erl_syntax:tuple([
-                                erl_syntax:atom(ok),
-                                thrift_generator_emitter_syntax:application(thrift_runtime_record, from_wire, [
-                                    thrift_generator_emitter_syntax:abstract(Desc),
-                                    thrift_generator_emitter_syntax:application(thrift_runtime_record, to_wire, [
-                                        thrift_generator_emitter_syntax:abstract(Desc), erl_syntax:variable("Map")
-                                    ]),
-                                    thrift_generator_emitter_syntax:abstract(record)
-                                ])
+                        thrift_generator_emitter_syntax:abstract(facade_type(S)),
+                        erl_syntax:variable("Value"),
+                        erl_syntax:variable("Options")
+                    ],
+                    is_map_guard(erl_syntax:variable("Options")),
+                    [
+                        thrift_generator_emitter_syntax:application(thrift_runtime, encode, [
+                            thrift_generator_emitter_syntax:abstract(struct_ref(S, Ctx)),
+                            erl_syntax:variable("Value"),
+                            erl_syntax:variable("Options")
+                        ])
+                    ]
+                )
+             || S <- Structs
+            ] ++
+                [
+                    erl_syntax:clause(
+                        [
+                            erl_syntax:variable("Type"),
+                            erl_syntax:variable("_Value"),
+                            erl_syntax:variable("Options")
+                        ],
+                        is_map_guard(erl_syntax:variable("Options")),
+                        [unknown_type_error("Type")]
+                    ),
+                    thrift_generator_emitter_syntax:fn_clause(
+                        [
+                            erl_syntax:variable("_Type"),
+                            erl_syntax:variable("_Value"),
+                            erl_syntax:variable("Options")
+                        ],
+                        bad_options_error()
+                    )
+                ]
+        ).
+
+-spec facade_decode_forms([#tg_struct{}], #ectx{}) -> erl_syntax:forms().
+facade_decode_forms(Structs, Ctx) ->
+    Anno = erl_anno:new(0),
+    Err = thrift_generator_emitter_syntax:error_term_type(Anno),
+    Result = thrift_generator_emitter_syntax:ok_error_type(
+        Anno, thrift_generator_emitter_syntax:term_type(), Err
+    ),
+    Binary = {type, Anno, binary, []},
+    Spec2 =
+        {attribute, Anno, spec, {
+            {decode, 2},
+            [
+                thrift_generator_emitter_syntax:fun_type(
+                    [facade_type_node(Anno, S), Binary],
+                    thrift_generator_emitter_syntax:ok_error_type(Anno, facade_default_type(S), Err)
+                )
+             || S <- Structs
+            ] ++
+                [
+                    thrift_generator_emitter_syntax:fun_type(
+                        [{type, Anno, atom, []}, Binary], Result
+                    )
+                ]
+        }},
+    Spec3 =
+        {attribute, Anno, spec,
+            {
+                {decode, 3},
+                [
+                    thrift_generator_emitter_syntax:fun_type(
+                        [{type, Anno, atom, []}, Binary, thrift_generator_emitter_syntax:raw_type(map)],
+                        Result
+                    ),
+                    thrift_generator_emitter_syntax:fun_type(
+                        [
+                            {type, Anno, atom, []},
+                            Binary,
+                            thrift_generator_emitter_syntax:raw_type(term)
+                        ],
+                        Result
+                    )
+                ]
+            }},
+    thrift_generator_emitter_syntax:doc_form(
+        undefined,
+        <<
+            "Decodes the whole binary into the struct's default representation;"
+            " `decode/3` with default options. Trailing bytes or truncation"
+            " fail the decode."
+        >>
+    ) ++
+        [Spec2] ++
+        thrift_generator_emitter_syntax:fn_form(decode, [
+            thrift_generator_emitter_syntax:fn_clause(
+                [erl_syntax:variable("Type"), erl_syntax:variable("Binary")],
+                erl_syntax:application(erl_syntax:atom(decode), [
+                    erl_syntax:variable("Type"),
+                    erl_syntax:variable("Binary"),
+                    thrift_generator_emitter_syntax:abstract(#{})
+                ])
+            )
+        ]) ++
+        thrift_generator_emitter_syntax:doc_form(
+            undefined,
+            <<
+                "Decodes the whole binary into representation `repr` (default: the"
+                " struct's schema-selected representation) with the given `protocol`"
+                " (default `binary`). Trailing bytes or truncation fail the decode."
+            >>
+        ) ++
+        [Spec3] ++
+        thrift_generator_emitter_syntax:fn_form(
+            decode,
+            [
+                erl_syntax:clause(
+                    [
+                        thrift_generator_emitter_syntax:abstract(facade_type(S)),
+                        erl_syntax:variable("Binary"),
+                        erl_syntax:variable("Options")
+                    ],
+                    is_map_guard(erl_syntax:variable("Options")),
+                    [
+                        thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
+                            thrift_generator_emitter_syntax:abstract(struct_ref(S, Ctx)),
+                            erl_syntax:variable("Binary"),
+                            thrift_generator_emitter_syntax:application(maps, merge, [
+                                thrift_generator_emitter_syntax:abstract(#{repr => facade_default_repr(S)}),
+                                erl_syntax:variable("Options")
                             ])
-                        )
-                    ]);
-            false ->
-                []
-        end.
+                        ])
+                    ]
+                )
+             || S <- Structs
+            ] ++
+                [
+                    erl_syntax:clause(
+                        [
+                            erl_syntax:variable("Type"),
+                            erl_syntax:variable("_Binary"),
+                            erl_syntax:variable("Options")
+                        ],
+                        is_map_guard(erl_syntax:variable("Options")),
+                        [unknown_type_error("Type")]
+                    ),
+                    thrift_generator_emitter_syntax:fn_clause(
+                        [
+                            erl_syntax:variable("_Type"),
+                            erl_syntax:variable("_Binary"),
+                            erl_syntax:variable("Options")
+                        ],
+                        bad_options_error()
+                    )
+                ]
+        ).
+
+-spec facade_convert_forms([#tg_struct{}], #ectx{}) -> erl_syntax:forms().
+facade_convert_forms(Structs, Ctx) ->
+    Anno = erl_anno:new(0),
+    Err = thrift_generator_emitter_syntax:error_term_type(Anno),
+    Result = thrift_generator_emitter_syntax:ok_error_type(
+        Anno, thrift_generator_emitter_syntax:term_type(), Err
+    ),
+    Spec =
+        {attribute, Anno, spec,
+            {
+                {convert, 3},
+                [
+                    thrift_generator_emitter_syntax:fun_type(
+                        [
+                            {type, Anno, atom, []},
+                            thrift_generator_emitter_syntax:raw_type(term),
+                            thrift_generator_emitter_syntax:remote_type(thrift_runtime, repr)
+                        ],
+                        Result
+                    )
+                ]
+            }},
+    thrift_generator_emitter_syntax:doc_form(
+        undefined,
+        <<
+            "Reshapes a typed value (record, struct-map or native record, nested"
+            " structures included) of the struct selected by `Type` into `Repr`,"
+            " without touching bytes."
+        >>
+    ) ++
+        [Spec] ++
+        thrift_generator_emitter_syntax:fn_form(
+            convert,
+            [
+                thrift_generator_emitter_syntax:fn_clause(
+                    [
+                        thrift_generator_emitter_syntax:abstract(facade_type(S)),
+                        erl_syntax:variable("Value"),
+                        erl_syntax:variable("Repr")
+                    ],
+                    thrift_generator_emitter_syntax:application(thrift_runtime, convert, [
+                        thrift_generator_emitter_syntax:abstract(struct_ref(S, Ctx)),
+                        erl_syntax:variable("Value"),
+                        erl_syntax:variable("Repr")
+                    ])
+                )
+             || S <- Structs
+            ] ++
+                [
+                    thrift_generator_emitter_syntax:fn_clause(
+                        [
+                            erl_syntax:variable("Type"),
+                            erl_syntax:variable("_Value"),
+                            erl_syntax:variable("_Repr")
+                        ],
+                        unknown_type_error("Type")
+                    )
+                ]
+        ).
+
+-spec facade_descriptor_forms([#tg_struct{}], #ectx{}) -> erl_syntax:forms().
+facade_descriptor_forms(Structs, Ctx) ->
+    Anno = erl_anno:new(0),
+    UnknownType =
+        {type, Anno, tuple, [
+            {atom, Anno, error},
+            {type, Anno, tuple, [
+                {atom, Anno, unknown_type}, {type, Anno, atom, []}
+            ]}
+        ]},
+    Result =
+        {type, Anno, union, [
+            {type, Anno, tuple, [
+                {atom, Anno, ok},
+                thrift_generator_emitter_syntax:remote_type(thrift_runtime_protocol, type_desc)
+            ]},
+            UnknownType
+        ]},
+    Spec =
+        {attribute, Anno, spec,
+            {
+                {descriptor, 1},
+                [thrift_generator_emitter_syntax:fun_type([{type, Anno, atom, []}], Result)]
+            }},
+    thrift_generator_emitter_syntax:doc_form(
+        undefined,
+        <<
+            "Returns the named-ref descriptor `thrift_runtime` consumes for `Type`,"
+            " or `{error, {unknown_type, Type}}`."
+        >>
+    ) ++
+        [Spec] ++
+        thrift_generator_emitter_syntax:fn_form(
+            descriptor,
+            [
+                thrift_generator_emitter_syntax:fn_clause(
+                    [thrift_generator_emitter_syntax:abstract(facade_type(S))],
+                    erl_syntax:tuple([
+                        erl_syntax:atom(ok),
+                        thrift_generator_emitter_syntax:abstract(struct_ref(S, Ctx))
+                    ])
+                )
+             || S <- Structs
+            ] ++
+                [
+                    thrift_generator_emitter_syntax:fn_clause(
+                        [erl_syntax:variable("Type")],
+                        unknown_type_error("Type")
+                    )
+                ]
+        ).
 -spec list_type(thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
 list_type(T, Ctx) ->
     {type, erl_anno:new(0), list, [erlang_type(T, Ctx)]}.
@@ -650,20 +889,7 @@ list_type(T, Ctx) ->
 struct_ref(S, Ctx) ->
     {struct, {ref, types_module_atom(Ctx#ectx.current), S#tg_struct.name}}.
 
-%% The identity tag a struct value carries: the (prefixed) record tag in
-%% record mode, the lowercased wire name in map mode — no record exists
-%% there, so the struct representation tags it by name. The same rule
-%% thrift_runtime_record applies when it builds struct maps, so convert/2
-%% finds every struct by the tag its own values carry.
-
--spec struct_index_tag(#tg_struct{}, binary()) -> atom().
-struct_index_tag(S, Prefix) ->
-    case record_mode(S) of
-        true -> record_tag_of(S, Prefix);
-        false -> record_tag(<<>>, S#tg_struct.name)
-    end.
-
-%% The input side of encode_: the definition's exported alias (record,
+%% The input side of encode: the definition's exported alias (record,
 %% map and sum modes); native records are runtime-minted, so their input
 %% stays term(). Record mode also accepts the wire-shaped map — both
 %% normalize inside thrift_runtime_record:to_wire.
@@ -681,93 +907,6 @@ value_type(S) ->
         map ->
             Alias
     end.
-
-%%--------------------------------------------------------------------
-%% Tag index and convert
-%%--------------------------------------------------------------------
-
--spec tag_index_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-tag_index_forms(Mod, Ctx) ->
-    Anno = erl_anno:new(0),
-    Pairs = lists:append([
-        case sum_mode(S) of
-            %% A sum-union value carries a field atom as its tag: every
-            %% field indexes the union. An atom shared by several sum
-            %% unions of one module resolves to the LAST union
-            %% declaring it (maps:from_list order) — the module-level
-            %% convert/2 is context-free, so converting another union's
-            %% value under a shared atom fails its payload type check
-            %% (struct payloads; scalars pass through unchecked).
-            true ->
-                [{field_atom(F#tg_field.name), struct_ref(S, Ctx)} || F <- S#tg_struct.fields];
-            false ->
-                [{struct_index_tag(S, current_prefix(Ctx)), struct_ref(S, Ctx)}]
-        end
-     || S <- Mod#tg_module.structs
-    ]),
-    [
-        {attribute, Anno, spec,
-            {{tag_index, 0}, [
-                thrift_generator_emitter_syntax:fun_type(
-                    [],
-                    {remote_type, Anno, [
-                        {atom, Anno, thrift_runtime}, {atom, Anno, tag_index}, []
-                    ]}
-                )
-            ]}},
-        {attribute, Anno, spec,
-            {{convert, 2}, [
-                thrift_generator_emitter_syntax:fun_type(
-                    [
-                        thrift_generator_emitter_syntax:term_type(),
-                        {remote_type, Anno, [
-                            {atom, Anno, thrift_runtime}, {atom, Anno, repr}, []
-                        ]}
-                    ],
-                    {type, Anno, union, [
-                        {type, Anno, tuple, [{atom, Anno, ok}, thrift_generator_emitter_syntax:term_type()]},
-                        {type, Anno, tuple, [{atom, Anno, error}, thrift_generator_emitter_syntax:term_type()]}
-                    ]}
-                )
-            ]}}
-    ] ++
-        thrift_generator_emitter_syntax:doc_form(
-            undefined,
-            <<
-                "The struct tag -> descriptor map `thrift_runtime:convert/3` takes:"
-                " record tags for record-mode structs, wire names for"
-                " map-mode ones, sum-union field atoms for sums. Several"
-                " sum unions of one module may share a field name; the"
-                " atom indexes the last union declaring it, so converting"
-                " another union's value under a shared atom fails the"
-                " payload type check where a struct payload makes it"
-                " visible (scalars pass through unchecked)."
-            >>
-        ) ++
-        thrift_generator_emitter_syntax:fn_form(tag_index, [
-            thrift_generator_emitter_syntax:fn_clause(
-                [], thrift_generator_emitter_syntax:abstract(maps:from_list(Pairs))
-            )
-        ]) ++
-        thrift_generator_emitter_syntax:doc_form(
-            undefined,
-            <<
-                "Reshapes a typed value (record or struct map, nested"
-                " structures included) into `Repr` without touching bytes."
-            >>
-        ) ++
-        thrift_generator_emitter_syntax:fn_form(convert, [
-            thrift_generator_emitter_syntax:fn_clause(
-                [erl_syntax:variable("Value"), erl_syntax:variable("Repr")],
-                thrift_generator_emitter_syntax:application(thrift_runtime, convert, [
-                    thrift_generator_emitter_syntax:application(
-                        types_module_atom(Ctx#ectx.current), tag_index, []
-                    ),
-                    erl_syntax:variable("Value"),
-                    erl_syntax:variable("Repr")
-                ])
-            )
-        ]).
 
 %%--------------------------------------------------------------------
 %% Enum helpers
@@ -1180,11 +1319,10 @@ function_info_forms(Mod, Ctx) ->
 
 %% Same-named methods across a module's services are legal Thrift and
 %% common in the wild (per-service `GetEvents'), but function_info/2 is
-%% method-name keyed — duplicate clauses could not even compile. The
-%% last declaration wins, the same resolution `tag_index/0' applies to
-%% shared sum-union field atoms. Generated clients do not resolve
-%% through this table: each wrapper embeds its own service's
-%% descriptors, so a collision affects introspection only.
+%% method-name keyed — duplicate clauses could not even compile, so the
+%% last declaration wins. Generated clients do not resolve through this
+%% table: each wrapper embeds its own service's descriptors, so a
+%% collision affects introspection only.
 
 -spec service_functions(#tg_module{}) -> [#tg_function{}].
 service_functions(Mod) ->

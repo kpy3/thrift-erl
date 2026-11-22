@@ -1742,10 +1742,10 @@ same_struct_names_coexist(Config) ->
     ),
     ?assertEqual({first_point, [x]}, first_types:record_fields(<<"Point">>)),
     ?assertEqual({second_point, [y]}, second_types:record_fields(<<"Point">>)),
-    {ok, Bin1} = first_types:encode_first_point({first_point, 7}),
-    {ok, Bin2} = second_types:encode_second_point({second_point, <<"hey">>}),
-    ?assertEqual({ok, {first_point, 7}}, first_types:decode_first_point(Bin1)),
-    ?assertEqual({ok, {second_point, <<"hey">>}}, second_types:decode_second_point(Bin2)),
+    {ok, Bin1} = first_types:encode(point, {first_point, 7}),
+    {ok, Bin2} = second_types:encode(point, {second_point, <<"hey">>}),
+    ?assertEqual({ok, {first_point, 7}}, first_types:decode(point, Bin1)),
+    ?assertEqual({ok, {second_point, <<"hey">>}}, second_types:decode(point, Bin2)),
     ok.
 
 %% End-to-end through the generated stack: main.thrift → compiled
@@ -1850,37 +1850,37 @@ generated_map_mode(Config) ->
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_point">>)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_binpoint">>)),
     %% the codec axis on a map-mode struct: the default target is the map
-    {ok, PointBin} = mapmode_types:encode_mapmode_point(#{x => 1, y => 2}),
-    ?assertEqual({ok, #{x => 1, y => 2}}, mapmode_types:decode_mapmode_point(PointBin)),
+    {ok, PointBin} = mapmode_types:encode(point, #{x => 1, y => 2}),
+    ?assertEqual({ok, #{x => 1, y => 2}}, mapmode_types:decode(point, PointBin)),
     ?assertEqual(
         %% struct maps are tagged by the wire name — map-mode structs
         %% have no record tag
         {ok, #{'__struct__' => point, x => 1, y => 2}},
-        mapmode_types:decode_mapmode_point(PointBin, struct)
+        mapmode_types:decode(point, PointBin, #{repr => struct})
     ),
     %% native records (EEP-79, OTP 29+): the generated codec forwards the
     %% axis to the runtime engine untouched
     case native_supported() of
         true ->
-            {ok, PointNative} = mapmode_types:decode_mapmode_point(PointBin, native),
+            {ok, PointNative} = mapmode_types:decode(point, PointBin, #{repr => native}),
             ?assertEqual(mapmode_types, records:get_module(PointNative)),
             ?assertEqual(point, records:get_name(PointNative)),
-            ?assertEqual({ok, PointBin}, mapmode_types:encode_mapmode_point(PointNative));
+            ?assertEqual({ok, PointBin}, mapmode_types:encode(point, PointNative));
         false ->
             ?assertEqual(
                 {error, {unsupported_repr, native}},
-                mapmode_types:decode_mapmode_point(PointBin, native)
+                mapmode_types:decode(point, PointBin, #{repr => native})
             )
     end,
     ?assertEqual(
         {error, {no_record, point}},
-        mapmode_types:convert(#{'__struct__' => point, x => 1, y => 2}, record)
+        mapmode_types:convert(point, #{'__struct__' => point, x => 1, y => 2}, record)
     ),
     {ok, NestBin} =
-        mapmode_types:encode_mapmode_nest({mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}),
+        mapmode_types:encode(nest, {mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}),
     ?assertEqual(
         {ok, {mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}},
-        mapmode_types:decode_mapmode_nest(NestBin)
+        mapmode_types:decode(nest, NestBin)
     ),
     %% e2e: maps over the wire, both key types, declared exception
     {ok, Server} =
@@ -1946,14 +1946,14 @@ generated_native_repr(Config) ->
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(nativedemo_point">>)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-type nativedemo_point\\(\\)">>)),
     %% codec roundtrip: map and record axes on every release
-    {ok, PointBin} = nativedemo_types:encode_nativedemo_point(#{x => 1, label => <<"p">>}),
+    {ok, PointBin} = nativedemo_types:encode(point, #{x => 1, label => <<"p">>}),
     ?assertEqual(
         {ok, #{x => 1, label => <<"p">>}},
-        nativedemo_types:decode_nativedemo_point(PointBin, map)
+        nativedemo_types:decode(point, PointBin, #{repr => map})
     ),
     ?assertEqual(
         {error, {no_record, point}},
-        nativedemo_types:decode_nativedemo_point(PointBin, record)
+        nativedemo_types:decode(point, PointBin, #{repr => record})
     ),
     {ok, Server} =
         nativedemo_nat_svc_server:start_link(#{port => 0, handler => thrift_generator_nativedemo_handler}),
@@ -1965,19 +1965,19 @@ generated_native_repr(Config) ->
             ?assertEqual({ok, 12}, nativedemo_nat_svc_client:area(Client, 3, 4)),
             case native_supported() of
                 true ->
-                    {ok, PointNative} = nativedemo_types:decode_nativedemo_point(PointBin),
+                    {ok, PointNative} = nativedemo_types:decode(point, PointBin),
                     ?assertEqual(nativedemo_types, records:get_module(PointNative)),
                     ?assertEqual(point, records:get_name(PointNative)),
                     ?assertEqual(
-                        {ok, PointBin}, nativedemo_types:encode_nativedemo_point(PointNative)
+                        {ok, PointBin}, nativedemo_types:encode(point, PointNative)
                     ),
                     ?assertEqual(
                         {ok, #{x => 1, label => <<"p">>}},
-                        nativedemo_types:convert(PointNative, map)
+                        nativedemo_types:convert(point, PointNative, map)
                     ),
                     ?assertEqual(
                         {error, {no_record, point}},
-                        nativedemo_types:convert(PointNative, record)
+                        nativedemo_types:convert(point, PointNative, record)
                     ),
                     %% e2e: generated clients decode replies through the
                     %% low-level record axis (atom-key maps for native
@@ -1994,7 +1994,7 @@ generated_native_repr(Config) ->
                 false ->
                     ?assertEqual(
                         {error, {unsupported_repr, native}},
-                        nativedemo_types:decode_nativedemo_point(PointBin)
+                        nativedemo_types:decode(point, PointBin)
                     )
             end
         after
@@ -2042,10 +2042,10 @@ generated_set_impl(Config) ->
         list_field => [],
         binary_field => <<"b">>
     },
-    {ok, Bin} = test_types:encode_test_crazy_nesting(Value),
-    {ok, #{set_field := MapOrdset}} = test_types:decode_test_crazy_nesting(Bin, map),
+    {ok, Bin} = test_types:encode(crazy_nesting, Value),
+    {ok, #{set_field := MapOrdset}} = test_types:decode(crazy_nesting, Bin, #{repr => map}),
     ?assertEqual(lists:usort([Full, Empty]), MapOrdset),
-    {ok, Rec} = test_types:decode_test_crazy_nesting(Bin),
+    {ok, Rec} = test_types:decode(crazy_nesting, Bin),
     {test_crazy_nesting, <<"s">>, RecOrdset, [], <<"b">>, undefined} = Rec,
     ?assertEqual(
         lists:usort([{test_insanity, #{'ONE' => 1}, []}, {test_insanity, #{}, []}]),
@@ -2054,7 +2054,8 @@ generated_set_impl(Config) ->
     %% encode passes values through as given, so the duplicated wire
     %% above does not reproduce verbatim; the normalized value does
     {ok, NormBin} =
-        test_types:encode_test_crazy_nesting(
+        test_types:encode(
+            crazy_nesting,
             #{
                 string_field => <<"s">>,
                 set_field => lists:usort([Full, Empty]),
@@ -2062,13 +2063,13 @@ generated_set_impl(Config) ->
                 binary_field => <<"b">>
             }
         ),
-    ?assertEqual({ok, NormBin}, test_types:encode_test_crazy_nesting(Rec)),
+    ?assertEqual({ok, NormBin}, test_types:encode(crazy_nesting, Rec)),
     %% the file-wide sets default: unannotated sets decode as sets
     %% collections, encode takes them back (a sets input — no coercion)
-    {ok, VBin} = test_types:encode_test_versioning_test_v2(#{newset => sets:from_list([3, 1, 2])}),
-    {ok, #{newset := NewSet}} = test_types:decode_test_versioning_test_v2(VBin, map),
+    {ok, VBin} = test_types:encode(versioning_test_v2, #{newset => sets:from_list([3, 1, 2])}),
+    {ok, #{newset := NewSet}} = test_types:decode(versioning_test_v2, VBin, #{repr => map}),
     ?assertEqual(sets:from_list([1, 2, 3]), NewSet),
-    ?assertEqual({ok, VBin}, test_types:encode_test_versioning_test_v2(#{newset => NewSet})),
+    ?assertEqual({ok, VBin}, test_types:encode(versioning_test_v2, #{newset => NewSet})),
     ok.
 
 %% Generates and loads the modules for the semantic fixture. Safe to
