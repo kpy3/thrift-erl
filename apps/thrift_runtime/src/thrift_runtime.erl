@@ -47,9 +47,11 @@ axes as data — encode allows exactly `protocol` and `strict` (default
 `binary`, `false`), decode allows exactly `protocol` and `repr` with
 `repr` required — normalized and validated by
 `thrift_runtime_options:codec_options/2`. `convert/3` reshapes typed
-values without touching bytes: pass the tag index emitted by the
-generator (the `TagIndex/0` export of generated types modules) and any
-record or struct-map value.
+values without touching bytes: pass the struct's type descriptor and
+any record, map or struct-map value; nested structures convert
+recursively. The legacy tag-index input (the `TagIndex/0` export of
+generated types modules) is accepted until the generated facade
+migrates and resolves to the same conversion.
 
 All functions are pure; the network API lives in `thrift_runtime_client`
 and `thrift_runtime_server`.
@@ -340,20 +342,39 @@ repr_supported(Repr) ->
 Reshapes a typed value (record, struct-map or native record, nested
 structures included) into `Repr`, without encoding bytes.
 
-`Value` carries its own identity — a record tag, the `__struct__` key
-or the native record's module/name — which is looked up in `TagIndex`
-(the `TagIndex/0` export of generated types modules). Unknown tags and
-values without identity crash: this function is for values the caller
-knows to be service structs. The `record` representation of a
+`Desc` is the value's type descriptor; the value itself needs no
+identity of its own — a plain map converts like a struct-map without
+the `__struct__` key. The `record` representation of a
 map-representation or native-representation struct answers
 `{error, {no_record, Tag}}` — there is no record to produce.
+
+The legacy tag-index form (the `TagIndex/0` export of generated types
+modules) remains until the generated facade migrates: it resolves the
+value's identity tag through the index and enters the same conversion.
+For it, unknown tags and values without identity are a programming
+error, not a data condition: crash.
 """.
--spec convert(tag_index(), term(), repr()) -> {ok, term()} | {error, term()}.
+-spec convert(thrift_runtime_binary:type_desc() | tag_index(), term(), repr()) ->
+    {ok, term()} | {error, term()}.
 convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
     Tag = value_tag(Value),
     %% Misuse (an unknown tag or a value without identity) is a
     %% programming error, not a data condition: crash.
     #{Tag := Desc} = TagIndex,
+    convert_value(Desc, Value, Repr, Tag);
+convert(Desc, Value, Repr) ->
+    convert_value(Desc, Value, Repr, undefined).
+
+%% The shared conversion body both entry points resolve to. `Tag` names
+%% the value's struct for `no_record` errors: the transitional tag-index
+%% clause passes the value's own identity; descriptor callers resolve it
+%% from the descriptor lazily (the same rule `decode/3` follows), so a
+%% descriptor whose record target never reaches the error — inline and
+%% wire-passthrough structs — is never tagged.
+
+-spec convert_value(thrift_runtime_binary:type_desc(), term(), repr(), atom() | undefined) ->
+    {ok, term()} | {error, term()}.
+convert_value(Desc, Value, Repr, Tag) ->
     Wire = thrift_runtime_record:to_wire(Desc, Value),
     case Repr of
         record ->
@@ -361,7 +382,7 @@ convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
                 Record when Record =:= record; Record =:= sum ->
                     from_wire_repr(Desc, Wire, record);
                 _ ->
-                    {error, {no_record, Tag}}
+                    {error, {no_record, no_record_tag(Desc, Tag)}}
             end;
         map ->
             from_wire_repr(Desc, Wire, map);
@@ -373,6 +394,18 @@ convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
                 false -> {error, {unsupported_repr, native}}
             end
     end.
+
+%% The struct name carried by a `no_record` error: the transitional
+%% tag-index clause already holds the value's identity; descriptor
+%% callers derive it from the descriptor through `struct_tag/1` (map-
+%% and native-mode structs are always refs, so this is only reached
+%% where `struct_tag/1` is defined).
+
+-spec no_record_tag(thrift_runtime_binary:type_desc(), atom() | undefined) -> atom().
+no_record_tag(Desc, undefined) ->
+    struct_tag(Desc);
+no_record_tag(_Desc, Tag) ->
+    Tag.
 
 -doc """
 Resolves a protocol axis value to its implementation module.

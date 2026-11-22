@@ -29,6 +29,7 @@
     facade_options_validation_test/0,
     facade_strict_decode_test/0,
     facade_convert_test/0,
+    facade_convert_descriptor_test/0,
     record_engine_autodetect_test/0,
     record_engine_repr_test/0,
     record_engine_map_mode_test/0,
@@ -199,34 +200,79 @@ facade_strict_decode_test() ->
     ),
     ok.
 
+%% Conversion is descriptor-directed: the caller supplies the schema and
+%% the value brings any record, map or struct-map shape.
+
 facade_convert_test() ->
-    TagIndex = #{
-        point => point_desc(),
-        wrap => {struct, {ref, ?FIXTURE, <<"Wrap">>}},
-        loose => {struct, {ref, ?FIXTURE, <<"Loose">>}}
-    },
-    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:convert(TagIndex, {point, 1, 2}, map)),
+    Desc = point_desc(),
+    Wrap = {struct, {ref, ?FIXTURE, <<"Wrap">>}},
+    Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
+    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:convert(Desc, {point, 1, 2}, map)),
     ?assertEqual(
         {ok, {point, 1, 2}},
-        thrift_runtime:convert(TagIndex, #{'__struct__' => point, x => 1, y => 2}, record)
+        thrift_runtime:convert(Desc, #{'__struct__' => point, x => 1, y => 2}, record)
     ),
     %% conversion recurses into nested structs
-    {ok, Nested} = thrift_runtime:convert(TagIndex, {wrap, {point, 1, 2}}, struct),
+    {ok, Nested} = thrift_runtime:convert(Wrap, {wrap, {point, 1, 2}}, struct),
     ?assertEqual(wrap, maps:get('__struct__', Nested)),
     ?assertEqual(point, maps:get('__struct__', maps:get(p, Nested))),
     %% a map-mode struct has no record to produce
     ?assertEqual(
         {error, {no_record, loose}},
-        thrift_runtime:convert(TagIndex, #{'__struct__' => loose, s => <<"v">>}, record)
+        thrift_runtime:convert(Loose, #{'__struct__' => loose, s => <<"v">>}, record)
     ),
     case otp_release() >= 29 of
         true ->
-            {ok, Native} = thrift_runtime:convert(TagIndex, {point, 1, 2}, native),
+            {ok, Native} = thrift_runtime:convert(Desc, {point, 1, 2}, native),
             ?assertEqual(1, records:get(x, Native));
         false ->
             ?assertEqual(
                 {error, {unsupported_repr, native}},
-                thrift_runtime:convert(TagIndex, {point, 1, 2}, native)
+                thrift_runtime:convert(Desc, {point, 1, 2}, native)
+            )
+    end,
+    %% transitional: the old tag-index input resolves the descriptor
+    %% through the value's identity and enters the same conversion
+    TagIndex = #{point => Desc, wrap => Wrap, loose => Loose},
+    ?assertEqual(
+        {ok, #{'__struct__' => point, x => 1, y => 2}},
+        thrift_runtime:convert(TagIndex, {point, 1, 2}, struct)
+    ),
+    ok.
+
+%% The descriptor form needs no source identity: a plain map converts to
+%% a tagged struct map without a __struct__ key, so generated code can
+%% reshape values it only knows by type.
+
+facade_convert_descriptor_test() ->
+    Desc = point_desc(),
+    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:convert(Desc, {point, 1, 2}, map)),
+    %% no source identity required on a map input
+    ?assertEqual(
+        {ok, #{'__struct__' => point, x => 1, y => 2}},
+        thrift_runtime:convert(Desc, #{x => 1, y => 2}, struct)
+    ),
+    %% nested record → struct conversion recurses
+    Wrap = {struct, {ref, ?FIXTURE, <<"Wrap">>}},
+    ?assertEqual(
+        {ok, #{'__struct__' => wrap, p => #{'__struct__' => point, x => 1, y => 2}}},
+        thrift_runtime:convert(Wrap, {wrap, {point, 1, 2}}, struct)
+    ),
+    %% map-mode → record answers the same {error, {no_record, Tag}}
+    Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
+    ?assertEqual(
+        {error, {no_record, loose}},
+        thrift_runtime:convert(Loose, #{s => <<"v">>}, record)
+    ),
+    %% native/OTP-28 behavior is unchanged
+    case otp_release() >= 29 of
+        true ->
+            {ok, Native} = thrift_runtime:convert(Desc, #{x => 1, y => 2}, native),
+            ?assertEqual(1, records:get(x, Native));
+        false ->
+            ?assertEqual(
+                {error, {unsupported_repr, native}},
+                thrift_runtime:convert(Desc, #{x => 1, y => 2}, native)
             )
     end,
     ok.
