@@ -496,16 +496,21 @@ onepass_case(Spec, Repr, Op, HeadArg) ->
     }.
 
 %% Code-identical cells depressed by module layout alone. The emitted
-%% function source is byte-identical between the baseline and head
+%% function source is byte-identical between the series base and head
 %% generators (verified by extracting and comparing the generated
-%% source), yet the cells measure -1.2/-1.4% even at 121 isolated
+%% source), yet the cells measure around/below 0.99 even at 121 isolated
 %% rounds: the enlarged head module places the same code at different
-%% offsets, and a 10-25 us operation's hot loop lands across different
+%% offsets, and a 10-40 us operation's hot loop lands across different
 %% fetch boundaries. A code regression is impossible here; the floors
 %% pin the layout cost and keep it visible. Removing them needs either
 %% a beam-layout control the toolchain does not offer or a re-baseline
 %% of the reference modules.
 layout_floor(Spec, json, direct, encode) ->
+    maps:get(id, Spec) =:= <<"Insanity">>;
+layout_floor(Spec, compact, direct, decode) ->
+    %% The 79-line function is identical to the series base; v0.8.0
+    %% differs only in the initial required mask (#{} vs 0), unused
+    %% because both Insanity fields are optional.
     maps:get(id, Spec) =:= <<"Insanity">>;
 layout_floor(Spec, binary, direct, decode) ->
     maps:get(id, Spec) =:= <<"Xtruct">>;
