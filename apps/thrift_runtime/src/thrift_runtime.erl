@@ -42,16 +42,17 @@ payloads convert). A wire union with zero or several set fields is
 malformed and answers `{error, {invalid_union, Map}}`.
 
 `encode/2,3` accepts any representation on input and auto-detects it;
-`decode/3` produces the requested one. The option-map forms take the
-axes as data — encode allows exactly `protocol` and `strict` (default
-`binary`, `false`), decode allows exactly `protocol` and `repr` with
-`repr` required — normalized and validated by
+`decode/3` produces the requested one. Both take the axes as an options
+map — encode allows exactly `protocol` and `strict` (default `binary`,
+`false`), decode allows exactly `protocol` and `repr` with `repr`
+required — normalized and validated by
 `thrift_runtime_options:codec_options/2`. `convert/3` reshapes typed
 values without touching bytes: pass the struct's type descriptor and
 any record, map or struct-map value; nested structures convert
-recursively. The legacy tag-index input (the `TagIndex/0` export of
-generated types modules) is accepted until the generated facade
-migrates and resolves to the same conversion.
+recursively. A non-map options argument answers the documented
+`{error, {bad_option, {options, Value, [map]}}}` — the transitional
+positional protocol/repr forms, the arity-4 variants and the tag-index
+convert input are gone.
 
 All functions are pure; the network API lives in `thrift_runtime_client`
 and `thrift_runtime_server`.
@@ -60,15 +61,13 @@ and `thrift_runtime_server`.
 -export([
     encode/2,
     encode/3,
-    encode/4,
     decode/3,
-    decode/4,
     convert/3,
     protocol_module/1,
     repr_supported/1
 ]).
 
--export_type([repr/0, protocol/0, tag_index/0]).
+-export_type([repr/0, protocol/0]).
 
 %% Struct representations. `record` requires the generated record
 %% definitions in scope; `map` and `struct` work without them; `native`
@@ -78,10 +77,6 @@ and `thrift_runtime_server`.
 %% Wire protocols: named ones known here, or any module implementing
 %% `thrift_runtime_protocol`.
 -type protocol() :: thrift_runtime_protocol:protocol() | module().
-
-%% Tag index emitted by the generator into `<mod>_types.erl`:
-%% record tag or `__struct__` key -> struct descriptor.
--type tag_index() :: #{atom() => thrift_runtime_protocol:type_desc()}.
 
 %% The thrift_runtime_protocol callback set a custom protocol module must
 %% export. Kept by hand in sync with the -callback attributes of
@@ -99,42 +94,46 @@ and `thrift_runtime_server`.
 -doc "Encodes a value in any representation with the binary protocol.".
 -spec encode(thrift_runtime_binary:type_desc(), term()) -> {ok, binary()} | {error, term()}.
 encode(Desc, Value) ->
-    encode(Desc, Value, binary).
+    encode(Desc, Value, #{}).
 
 -doc """
-Encodes a value with the given protocol or the options map form of the
-facade.
+Encodes a value with the options map form of the facade.
 
 The option map normalizes through
 `thrift_runtime_options:codec_options/2`: exactly `protocol` and
 `strict` are allowed (default `binary`, `false`); unknown keys, a
 non-boolean `strict` and a bad protocol answer the documented option
-errors without touching the value.
+errors without touching the value. `strict => true` checks the
+top-level map/struct-map input against the struct's declared fields and
+fails with `{error, {unknown_fields, Keys}}` instead of silently
+dropping the keys that match nothing (the default). Every other value
+shape the codecs reject on their own with `{error,
+{value_does_not_match_type, Value}}`.
+
+A non-map options argument is not a positional protocol: it answers
+`{error, {bad_option, {options, Options, [map]}}}`.
 """.
--spec encode(thrift_runtime_binary:type_desc(), term(), protocol() | map()) ->
+-spec encode(thrift_runtime_binary:type_desc(), term(), map()) ->
     {ok, binary()} | {error, term()}.
 encode(Desc, Value, Options) when is_map(Options) ->
     case thrift_runtime_options:codec_options(Options, encode) of
         {ok, #{protocol := Protocol, strict := Strict}} ->
-            encode(Desc, Value, Protocol, #{strict => Strict});
+            encode_opts(Desc, Value, Protocol, #{strict => Strict});
         {error, _} = Error ->
             Error
     end;
-encode(Desc, Value, Protocol) ->
-    encode(Desc, Value, Protocol, #{}).
+encode(_Desc, _Value, Options) ->
+    bad_options(Options).
 
--doc """
-Encodes a value with the given protocol and encode options.
+%% The protocol-resolved encode: strict check first, then the wire
+%% codec. The one-pass binary fast path retries through the two-pass
+%% path on any failure so both answer the identical error for genuinely
+%% bad values and the fast path can keep declining shapes it cannot
+%% represent (mixed nesting).
 
-`strict => true` checks the top-level map/struct-map input against the
-struct's declared fields and fails with `{error, {unknown_fields,
-Keys}}` instead of silently dropping the keys that match nothing (the
-default). Every other value shape the codecs reject on their own with
-`{error, {value_does_not_match_type, Value}}`.
-""".
--spec encode(thrift_runtime_binary:type_desc(), term(), protocol(), map()) ->
+-spec encode_opts(thrift_runtime_binary:type_desc(), term(), protocol(), map()) ->
     {ok, binary()} | {error, term()}.
-encode(Desc, Value, Protocol, Opts) ->
+encode_opts(Desc, Value, Protocol, Opts) ->
     case protocol_module(Protocol) of
         {ok, Mod} ->
             case strict_check(Desc, Value, Opts) of
@@ -197,23 +196,24 @@ encode_wire_two_pass(Desc, Value, Mod) ->
     end.
 
 -doc """
-Decodes the whole binary into a record with the binary protocol, or with
-the options map form of the facade.
+Decodes the whole binary with the options map form of the facade.
 
 The option map normalizes through
 `thrift_runtime_options:codec_options/2`: exactly `protocol` and
 `repr` are allowed, `repr` is required (the advanced facade has no
 schema module from which to infer one) and the protocol defaults to
-binary; the normalized repr feeds the same one-pass dispatch as the
-positional call.
+binary; the normalized repr feeds the one-pass dispatch.
 
 Unlike the streaming `thrift_runtime_binary:decode/2`, this is strict: a
 truncated input fails with `{error, truncated}`, trailing bytes with
 `{error, trailing}`. A map-representation or native-representation
 struct has no record to produce: `record` fails with
 `{error, {no_record, Name}}`.
+
+A non-map options argument is not a positional repr: it answers
+`{error, {bad_option, {options, Options, [map]}}}`.
 """.
--spec decode(thrift_runtime_binary:type_desc(), binary(), repr() | map()) ->
+-spec decode(thrift_runtime_binary:type_desc(), binary(), map()) ->
     {ok, term()} | {error, term()}.
 decode(Desc, Binary, Options) when is_map(Options) ->
     case thrift_runtime_options:codec_options(Options, decode) of
@@ -227,24 +227,15 @@ decode(Desc, Binary, Options) when is_map(Options) ->
         {error, _} = Error ->
             Error
     end;
-decode(Desc, Binary, Repr) ->
-    decode(Desc, Binary, Repr, binary).
+decode(_Desc, _Binary, Options) ->
+    bad_options(Options).
 
--doc "Decodes the whole binary into the given representation and protocol.".
--spec decode(thrift_runtime_binary:type_desc(), binary(), repr(), protocol()) ->
-    {ok, term()} | {error, term()}.
-decode(Desc, Binary, Repr, Protocol) ->
-    case repr_supported(Repr) of
-        ok ->
-            case protocol_module(Protocol) of
-                {ok, Mod} ->
-                    decode_fast(Mod, Desc, Binary, Repr);
-                {error, Reason} ->
-                    {error, Reason}
-            end;
-        {error, _} = Error ->
-            Error
-    end.
+%% A non-map options argument is not a positional protocol or repr:
+%% the documented bad_option answer both facade directions share.
+
+-spec bad_options(term()) -> {error, {bad_option, {options, term(), [map]}}}.
+bad_options(Options) ->
+    {error, {bad_option, {options, Options, [map]}}}.
 
 %% The one-pass attempt: binary protocol only; any other protocol (or
 %% a miss — hand-written modules, native-mode and sum unions) takes
@@ -306,7 +297,7 @@ from_wire_repr(Desc, Value, Repr) ->
     end.
 
 %% The tag a struct value carries for this descriptor: the snake-cased
-%% wire name of map-mode structs (the same rule `tag_index/0` follows).
+%% wire name of map-mode structs.
 
 -spec struct_tag({struct, {ref, module(), binary()}}) -> atom().
 struct_tag({struct, {ref, _Module, Name}}) ->
@@ -342,39 +333,32 @@ repr_supported(Repr) ->
 Reshapes a typed value (record, struct-map or native record, nested
 structures included) into `Repr`, without encoding bytes.
 
-`Desc` is the value's type descriptor; the value itself needs no
-identity of its own — a plain map converts like a struct-map without
-the `__struct__` key. The `record` representation of a
-map-representation or native-representation struct answers
-`{error, {no_record, Tag}}` — there is no record to produce.
+`Desc` is the value's type descriptor — a `thrift_runtime_protocol:
+type_desc/0` tuple; the value itself needs no identity of its own — a
+plain map converts like a struct-map without the `__struct__` key. The
+`record` representation of a map-representation or
+native-representation struct answers `{error, {no_record, Tag}}` —
+there is no record to produce.
 
-The legacy tag-index form (the `TagIndex/0` export of generated types
-modules) remains until the generated facade migrates: it resolves the
-value's identity tag through the index and enters the same conversion.
-For it, unknown tags and values without identity are a programming
-error, not a data condition: crash.
+A non-descriptor first argument is a programming error, not a data
+condition: the call crashes. In particular the removed tag-index map
+(the old `TagIndex/0` shape) is not a descriptor and no longer
+converts.
 """.
--spec convert(thrift_runtime_binary:type_desc() | tag_index(), term(), repr()) ->
+-spec convert(thrift_runtime_protocol:type_desc(), term(), repr()) ->
     {ok, term()} | {error, term()}.
-convert(TagIndex, Value, Repr) when is_map(TagIndex) ->
-    Tag = value_tag(Value),
-    %% Misuse (an unknown tag or a value without identity) is a
-    %% programming error, not a data condition: crash.
-    #{Tag := Desc} = TagIndex,
-    convert_value(Desc, Value, Repr, Tag);
-convert(Desc, Value, Repr) ->
-    convert_value(Desc, Value, Repr, undefined).
+convert(Desc, Value, Repr) when is_tuple(Desc) ->
+    convert_value(Desc, Value, Repr).
 
-%% The shared conversion body both entry points resolve to. `Tag` names
-%% the value's struct for `no_record` errors: the transitional tag-index
-%% clause passes the value's own identity; descriptor callers resolve it
-%% from the descriptor lazily (the same rule `decode/3` follows), so a
-%% descriptor whose record target never reaches the error — inline and
-%% wire-passthrough structs — is never tagged.
+%% The conversion body. The `no_record` error names the value's struct:
+%% descriptor callers resolve it from the descriptor lazily (the same
+%% rule `decode/3` follows), so a descriptor whose record target never
+%% reaches the error — inline and wire-passthrough structs — is never
+%% tagged.
 
--spec convert_value(thrift_runtime_binary:type_desc(), term(), repr(), atom() | undefined) ->
+-spec convert_value(thrift_runtime_protocol:type_desc(), term(), repr()) ->
     {ok, term()} | {error, term()}.
-convert_value(Desc, Value, Repr, Tag) ->
+convert_value(Desc, Value, Repr) ->
     Wire = thrift_runtime_record:to_wire(Desc, Value),
     case Repr of
         record ->
@@ -382,7 +366,7 @@ convert_value(Desc, Value, Repr, Tag) ->
                 Record when Record =:= record; Record =:= sum ->
                     from_wire_repr(Desc, Wire, record);
                 _ ->
-                    {error, {no_record, no_record_tag(Desc, Tag)}}
+                    {error, {no_record, struct_tag(Desc)}}
             end;
         map ->
             from_wire_repr(Desc, Wire, map);
@@ -394,18 +378,6 @@ convert_value(Desc, Value, Repr, Tag) ->
                 false -> {error, {unsupported_repr, native}}
             end
     end.
-
-%% The struct name carried by a `no_record` error: the transitional
-%% tag-index clause already holds the value's identity; descriptor
-%% callers derive it from the descriptor through `struct_tag/1` (map-
-%% and native-mode structs are always refs, so this is only reached
-%% where `struct_tag/1` is defined).
-
--spec no_record_tag(thrift_runtime_binary:type_desc(), atom() | undefined) -> atom().
-no_record_tag(Desc, undefined) ->
-    struct_tag(Desc);
-no_record_tag(_Desc, Tag) ->
-    Tag.
 
 -doc """
 Resolves a protocol axis value to its implementation module.
@@ -437,26 +409,3 @@ protocol_module(Mod) when is_atom(Mod) ->
     end;
 protocol_module(Other) ->
     {error, {bad_protocol, Other}}.
-
-%% The identity of a typed struct value: the record tag of a tuple, or
-%% the __struct__ key of an Elixir-style map.
-
--spec value_tag(term()) -> atom().
-value_tag(Value) ->
-    %% A native record carries its identity inside (module and name),
-    %% not in element(1); its tag is the record name — the same
-    %% snake-cased struct name `tag_index/0' keys native-representation
-    %% structs by.
-    case thrift_runtime_native:is_native(Value) of
-        true ->
-            {_, Name, _} = thrift_runtime_native:fields(Value),
-            Name;
-        false ->
-            tuple_or_struct_tag(Value)
-    end.
-
--spec tuple_or_struct_tag(term()) -> atom().
-tuple_or_struct_tag(Value) when is_tuple(Value), is_atom(element(1, Value)) ->
-    element(1, Value);
-tuple_or_struct_tag(#{'__struct__' := Tag}) when is_atom(Tag) ->
-    Tag.

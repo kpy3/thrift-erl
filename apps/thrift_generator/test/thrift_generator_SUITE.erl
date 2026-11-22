@@ -66,6 +66,7 @@
     rpc_loopback_fallback/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
+    getting_started_example/1,
     generated_map_mode/1,
     generated_native_repr/1,
     generated_set_impl/1
@@ -114,6 +115,7 @@ all() ->
         rpc_loopback_fallback,
         generated_loopback_buffered,
         generated_loopback_framed,
+        getting_started_example,
         generated_map_mode,
         generated_native_repr,
         generated_set_impl
@@ -1227,7 +1229,7 @@ repr_native_native_and_index(Config) ->
     end,
     ok.
 
-%% Facade routing: thrift_runtime decode/4 and encode/2 take the
+%% Facade routing: thrift_runtime decode/3 and encode/2 take the
 %% one-pass path underneath for eligible inputs and fall back to the
 %% two-pass conversion otherwise, with identical bytes, values and
 %% error terms on every shape.
@@ -1262,12 +1264,12 @@ repr_native_facade_routing(Config) ->
     Wire = #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}, <<"n">> => 7},
     {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
     Bin = iolist_to_binary(Io),
-    %% decode/4 one-pass equals the two-pass result
-    {ok, Rec} = thrift_runtime:decode(Desc, Bin, record),
+    %% the facade decode equals the two-pass result
+    {ok, Rec} = thrift_runtime:decode(Desc, Bin, #{repr => record}),
     ?assertEqual({reprnativefacade_outer, <<"o-1">>, {reprnativefacade_inner, <<"v">>}, 7}, Rec),
-    {ok, Map} = thrift_runtime:decode(Desc, Bin, map),
+    {ok, Map} = thrift_runtime:decode(Desc, Bin, #{repr => map}),
     ?assertEqual(#{id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}, Map),
-    {ok, Struct} = thrift_runtime:decode(Desc, Bin, struct),
+    {ok, Struct} = thrift_runtime:decode(Desc, Bin, #{repr => struct}),
     ?assertEqual(
         #{
             '__struct__' => reprnativefacade_outer,
@@ -1277,10 +1279,12 @@ repr_native_facade_routing(Config) ->
         },
         Struct
     ),
-    %% decode of a record-mode struct under map mode keeps working
-    %% through the index; truncated and trailing behave as today
-    {error, truncated} = thrift_runtime:decode(Desc, binary:part(Bin, 0, byte_size(Bin) - 1), record),
-    {error, trailing} = thrift_runtime:decode(Desc, <<Bin/binary, 0>>, record),
+    %% decode of a record-mode struct under map mode keeps working;
+    %% truncated and trailing behave as today
+    {error, truncated} = thrift_runtime:decode(Desc, binary:part(Bin, 0, byte_size(Bin) - 1), #{
+        repr => record
+    }),
+    {error, trailing} = thrift_runtime:decode(Desc, <<Bin/binary, 0>>, #{repr => record}),
     %% encode/2 from every accepted shape equals the wire encode
     {ok, EncRec} = thrift_runtime:encode(Desc, Rec),
     ?assertEqual(Bin, EncRec),
@@ -1682,9 +1686,11 @@ utf8_doc_and_const(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    %% single-file document: exactly one types module comes back
-    #{source := Src} = hd(thrift_generator_emitter:sources(Model)),
-    ?assertMatch({_, _}, binary:match(Src, <<"-doc(\"Значение в JSON"/utf8>>)),
+    %% single-file document: exactly one types module comes back; the
+    %% struct's IDL doc comment lands above its hrl record declaration
+    %% (the direct codec functions are internal, the facade module-level)
+    #{source := Src, hrl := Hrl} = hd(thrift_generator_emitter:sources(Model)),
+    ?assertMatch({_, _}, binary:match(Hrl, <<"% Значение в JSON"/utf8>>)),
     ?assertMatch({_, _}, binary:match(Src, <<"demo_greeting() -> <<\"привет\">>."/utf8>>)),
     ok.
 
@@ -1788,6 +1794,119 @@ generated_loopback(Config, Transport) ->
         end
     after
         main_main_service_server:stop(Server)
+    end.
+
+%% The root README's Getting Started example, compiled and executed so
+%% its names cannot drift: the ping.thrift IDL and the ping_handler
+%% module are the README's verbatim sources, and every codec call below
+%% is a README snippet (record values are plain tuples here because the
+%% suite cannot include the generated hrl at its own compile time; the
+%% README spells them with record syntax).
+
+-spec getting_started_example(ct:config()) -> ok.
+getting_started_example(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    Path = write_snippet(
+        Config,
+        "ping.thrift",
+        <<
+            "namespace erl ping.api\n"
+            "\n"
+            "struct PingRequest {\n"
+            "  1: required string message\n"
+            "}\n"
+            "\n"
+            "struct PingReply {\n"
+            "  1: required string message,\n"
+            "  2: i64 at_millis\n"
+            "}\n"
+            "\n"
+            "exception NoSuchMessage {\n"
+            "  1: string text\n"
+            "}\n"
+            "\n"
+            "service Ping {\n"
+            "  PingReply ping(1: PingRequest request) throws(1: NoSuchMessage err),\n"
+            "  oneway void poke()\n"
+            "}\n"
+        >>
+    ),
+    {ok, _} = thrift_generator:generate(Path, PrivDir, #{}),
+    lists:foreach(
+        fun(File) ->
+            {ok, Mod, Beam} = compile:file(filename:join(PrivDir, File), [binary, {i, PrivDir}]),
+            {module, Mod} = code:load_binary(Mod, File, Beam)
+        end,
+        [
+            "ping_api_types.erl",
+            "ping_api_ping_client.erl",
+            "ping_api_ping_server.erl",
+            "ping_api_ping_handler.erl"
+        ]
+    ),
+    ok = file:write_file(
+        filename:join(PrivDir, "ping_handler.erl"),
+        <<
+            "-module(ping_handler).\n"
+            "-include(\"ping_api_types.hrl\").\n"
+            "\n"
+            "-behaviour(ping_api_ping_handler).\n"
+            "\n"
+            "-export([ping/1, poke/0]).\n"
+            "\n"
+            "ping(#ping_api_ping_request{message = <<\"bad\">>}) ->\n"
+            "    {error, {exception, #ping_api_no_such_message{text = <<\"nope\">>}}};\n"
+            "ping(#ping_api_ping_request{message = Msg}) ->\n"
+            "    {ok, #ping_api_ping_reply{message = <<\"pong: \", Msg/binary>>, at_millis = 0}}.\n"
+            "\n"
+            "poke() -> {ok, undefined}.\n"
+        >>
+    ),
+    {ok, ping_handler, HandlerBeam} = compile:file(
+        filename:join(PrivDir, "ping_handler.erl"), [binary, {i, PrivDir}]
+    ),
+    {module, ping_handler} = code:load_binary(ping_handler, "ping_handler.erl", HandlerBeam),
+    %% the README codec facade snippets
+    Req = {ping_api_ping_request, <<"hi">>},
+    {ok, Bin} = ping_api_types:encode(ping_request, Req),
+    {ok, Req} = ping_api_types:decode(ping_request, Bin),
+    {ok, Map} = ping_api_types:decode(ping_request, Bin, #{repr => map}),
+    ?assertEqual(#{message => <<"hi">>}, Map),
+    {ok, Struct} = ping_api_types:decode(ping_request, Bin, #{repr => struct}),
+    ?assertEqual(ping_api_ping_request, maps:get('__struct__', Struct)),
+    {ok, Req} = ping_api_types:convert(ping_request, Struct, record),
+    ?assertEqual(
+        {error, {unknown_fields, [extra]}},
+        ping_api_types:encode(ping_request, #{message => <<"hi">>, extra => 1}, #{strict => true})
+    ),
+    {ok, Compact} = ping_api_types:encode(ping_request, Req, #{protocol => compact}),
+    {ok, Req} = ping_api_types:decode(ping_request, Compact, #{protocol => compact}),
+    {ok, Json} = ping_api_types:encode(ping_request, Req, #{protocol => json}),
+    {ok, Req} = ping_api_types:decode(ping_request, Json, #{protocol => json}),
+    {ok, Desc} = ping_api_types:descriptor(ping_request),
+    ?assertEqual({ok, Compact}, thrift_runtime:encode(Desc, Req, #{protocol => compact})),
+    ?assertEqual({ok, Map}, thrift_runtime:decode(Desc, Bin, #{repr => map})),
+    ?assertEqual({ok, Struct}, thrift_runtime:convert(Desc, Map, struct)),
+    %% the README server/client snippet (an ephemeral port instead of 9090)
+    {ok, Server} = ping_api_ping_server:start_link(#{port => 0, handler => ping_handler}),
+    try
+        {ok, Port} = ping_api_ping_server:port(Server),
+        {ok, Client} = ping_api_ping_client:start_link(#{host => "127.0.0.1", port => Port}),
+        try
+            ?assertEqual(
+                {ok, {ping_api_ping_reply, <<"pong: hi">>, 0}},
+                ping_api_ping_client:ping(Client, {ping_api_ping_request, <<"hi">>})
+            ),
+            ?assertEqual(
+                {error, {exception, {ping_api_no_such_message, <<"nope">>}}},
+                ping_api_ping_client:ping(Client, {ping_api_ping_request, <<"bad">>})
+            ),
+            ok = ping_api_ping_client:poke(Client)
+        after
+            ok = ping_api_ping_client:stop(Client)
+        end
+    after
+        ok = ping_api_ping_server:stop(Server)
     end.
 
 -spec check_oneway(pid()) -> ok.

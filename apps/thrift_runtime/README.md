@@ -25,9 +25,17 @@ plugin) and use the generated modules — specialized codecs, typed
 clients, servers and handler behaviours. The generated code depends on
 this package and nothing else.
 
-A taste of the generated surface:
+A taste of the generated surface — the type-first codec facade, then
+the RPC client:
 
 ```erlang
+%% codecs: the type atom selects the schema, the options map the axes
+{ok, Bin} = ping_api_types:encode(ping_request, #ping_api_ping_request{message = <<"hi">>}),
+{ok, Map} = ping_api_types:decode(ping_request, Bin, #{repr => map}),
+{ok, Rec} = ping_api_types:convert(ping_request, Map, record),
+{ok, Compact} = ping_api_types:encode(ping_request, Rec, #{protocol => compact}),
+
+%% RPC: typed client against a generated server module
 {ok, Server} = ping_api_ping_server:start_link(#{port => 9090, handler => ping_handler}),
 {ok, Client} = ping_api_ping_client:start_link(#{host => "127.0.0.1", port => 9090}),
 {ok, Reply} = ping_api_ping_client:ping(Client, #ping_api_ping_request{message = <<"hi">>}),
@@ -37,6 +45,14 @@ A taste of the generated surface:
 ok = ping_api_ping_client:stop(Client),
 ok = ping_api_ping_server:stop(Server).
 ```
+
+For hand-written schemas and dynamic work the runtime exposes the same
+contract with explicit descriptors:
+`thrift_runtime:encode(Desc, Value[, Options])`,
+`thrift_runtime:decode(Desc, Binary, #{repr := Repr})` and
+`thrift_runtime:convert(Desc, Value, Repr)`. See
+[docs/public-api-migration.md](https://github.com/kpy3/thrift-erl/blob/master/docs/public-api-migration.md)
+for the old → new call tables.
 
 ## What the package provides
 

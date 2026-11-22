@@ -313,12 +313,19 @@ enum_test() ->
 
 facade_test() ->
     Value = #{<<"a">> => 1, <<"b">> => <<"x">>},
-    {ok, Wire} = thrift_runtime:encode(sdesc(), Value, json),
+    {ok, Wire} = thrift_runtime:encode(sdesc(), Value, #{protocol => json}),
     ?assertEqual(<<"{\"1\":{\"i32\":1},\"2\":{\"str\":\"x\"}}">>, Wire),
     %% strict decode: map representation, trailing, truncated
-    {ok, #{<<"a">> := 1, <<"b">> := <<"x">>}} = thrift_runtime:decode(sdesc(), Wire, map, json),
-    ?assertEqual({error, trailing}, thrift_runtime:decode(sdesc(), <<Wire/binary, " ">>, map, json)),
-    ?assertEqual({error, truncated}, thrift_runtime:decode(sdesc(), <<"{\"1\":">>, map, json)),
+    {ok, #{<<"a">> := 1, <<"b">> := <<"x">>}} =
+        thrift_runtime:decode(sdesc(), Wire, #{protocol => json, repr => map}),
+    ?assertEqual(
+        {error, trailing},
+        thrift_runtime:decode(sdesc(), <<Wire/binary, " ">>, #{protocol => json, repr => map})
+    ),
+    ?assertEqual(
+        {error, truncated},
+        thrift_runtime:decode(sdesc(), <<"{\"1\":">>, #{protocol => json, repr => map})
+    ),
     ok.
 
 %% The same option keys drive the JSON protocol through the advanced facade.

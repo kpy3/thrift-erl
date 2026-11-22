@@ -391,10 +391,23 @@ hrl_guard(Mod) ->
 hrl_record_forms(Mod, Ctx) ->
     lists:append([
         [thrift_generator_emitter_syntax:section_form(section_label(S))] ++
+            doc_comment_forms(S#tg_struct.doc) ++
             record_form(S, Mod#tg_module.prefix, Ctx#ectx{qualify = true})
      || S <- Mod#tg_module.structs,
         has_record(S)
     ]).
+
+%% The struct's IDL doc comment above its hrl record declaration: the
+%% direct codec functions are internal (`-doc false`) and the type-first
+%% facade is module-level, so the record is the per-struct public
+%% surface left to carry it.
+
+-spec doc_comment_forms(binary() | undefined) -> erl_syntax:forms().
+doc_comment_forms(undefined) ->
+    [];
+doc_comment_forms(Doc) ->
+    Lines = binary:split(Doc, <<"\n">>, [global]),
+    [erl_syntax:comment([["% ", unicode:characters_to_list(Line)] || Line <- Lines])].
 
 %% The sum type of a `erl.union_type = "sum"' union: one {Tag, Payload}
 %% tuple per field, payload types inline.
@@ -1439,15 +1452,17 @@ record_fields_forms(Mod) ->
         )
      || S <- Mod#tg_module.structs
     ],
-    thrift_generator_emitter_syntax:fn_form(
-        record_fields,
-        Clauses ++
-            [
-                thrift_generator_emitter_syntax:fn_clause(
-                    [thrift_generator_emitter_syntax:wildcard()], thrift_generator_emitter_syntax:abstract(none)
-                )
-            ]
-    ).
+    thrift_generator_emitter_syntax:doc_false_form() ++
+        thrift_generator_emitter_syntax:fn_form(
+            record_fields,
+            Clauses ++
+                [
+                    thrift_generator_emitter_syntax:fn_clause(
+                        [thrift_generator_emitter_syntax:wildcard()],
+                        thrift_generator_emitter_syntax:abstract(none)
+                    )
+                ]
+        ).
 
 %% The record_fields contract: record mode answers {Tag, FieldAtoms},
 %% map mode answers {map, KeyType} (default atom keys), sum unions

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+The public codec API is finalized as one coherent, type-first surface;
+the transitional legacy forms are removed with no compatibility shims
+(see `docs/public-api-migration.md` for old → new call tables):
+
+- Generated `<mod>_types` modules expose a type-first schema facade:
+  `encode(Type, Value[, Options])`, `decode(Type, Binary[, Options])`,
+  `convert(Type, Value, Repr)` and `descriptor(Type)`, where `Type` is
+  the canonical snake-cased IDL struct name. The per-struct wrappers
+  `encode_<name>/1,2`, `decode_<name>/1,2,3`, `<name>_from_map/1`,
+  `convert/2` and `tag_index/0` are removed. Options maps accept
+  `protocol` (encode/decode) and `strict` (encode) / `repr` (decode,
+  filled from the schema default when absent); a non-map options
+  argument answers `{error, {bad_option, {options, Value, [map]}}}`.
+- `thrift_runtime` keeps the advanced descriptor facade only:
+  `encode(Desc, Value[, Options])`, `decode(Desc, Binary, Options)`
+  with a required `repr` option, and `convert(Desc, Value, Repr)` with
+  an explicit type descriptor. `encode/4`, `decode/4`, the positional
+  protocol/repr variants and the tag-index `convert/3` input (with the
+  exported `tag_index/0` type) are removed; a non-map options argument
+  answers the same documented `bad_option` error.
+- `struct_info/1`, `enum_info/1`, `function_info/2` and `service_info/0`
+  remain advanced-public with unchanged shapes. The direct codec
+  entries (`binary_codec/1`, `compact_codec/1`, `json_codec/1`,
+  `binary_repr_codec/2`, all `*_wire`/`*_compact`/`*_json` functions),
+  `record_fields/1` and `<mod>_types_repr` stay exported for the
+  runtime's dispatch but are now classified internal (`-doc false`) in
+  the generated docs.
+- Constants may reuse the facade names (`encode`, `decode`, `convert`,
+  `descriptor`, …): constants are arity-0 functions, the facade starts
+  at arity 1. Semantic analysis stops reserving the removed wrapper and
+  tag-index names; enum-helper names remain reserved.
+
 ### Generator (`thrift_generator`)
 
 - Repr-native one-pass binary codecs: generated types modules encode
@@ -72,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Runtime (`thrift_runtime`)
 
-- `encode/2,3,4` and `decode/3,4` route binary-protocol struct calls
+- `encode/2,3` and `decode/3` route binary-protocol struct calls
   through the generated repr-native codecs (persistent_term-cached
   probe, the same pattern as the codec dispatch); any fast-path failure
   retries the two-pass path, so mixed nesting and every error term

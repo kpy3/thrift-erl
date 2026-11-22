@@ -214,7 +214,7 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     RecordValue = thrift_runtime_record:from_wire(BinDesc, OurValue, record),
     {ok, FacadeBinary} = thrift_runtime:encode(BinDesc, RecordValue),
     ?assertEqual(BinaryWire, FacadeBinary),
-    {ok, FacadeDecoded} = thrift_runtime:decode(BinDesc, BinaryWire, record),
+    {ok, FacadeDecoded} = thrift_runtime:decode(BinDesc, BinaryWire, #{repr => record}),
     ?assertEqual(RecordValue, FacadeDecoded),
 
     %% Ours: the specialized codecs (ref descriptors).
@@ -260,7 +260,7 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     FacadeBinaryEncode =
         erlbench(fun() -> {ok, _} = thrift_runtime:encode(BinDesc, RecordValue) end),
     FacadeBinaryDecode =
-        erlbench(fun() -> {ok, _} = thrift_runtime:decode(BinDesc, BinaryWire, record) end),
+        erlbench(fun() -> {ok, _} = thrift_runtime:decode(BinDesc, BinaryWire, #{repr => record}) end),
 
     Rows = [
         {<<"binary/encode">>, {measured, SpecBinaryEncode}, {measured, ReferenceBinaryEncode}},

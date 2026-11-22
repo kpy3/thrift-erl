@@ -558,7 +558,7 @@ decode_twopass({Desc, Bin, Repr}) ->
     thrift_runtime_record:from_wire(Desc, Wire, Repr).
 
 decode_onepass({Desc, Bin, Repr}) ->
-    {ok, Value} = thrift_runtime:decode(Desc, Bin, Repr),
+    {ok, Value} = thrift_runtime:decode(Desc, Bin, #{repr => Repr}),
     Value.
 
 encode_twopass({Desc, Value}) ->

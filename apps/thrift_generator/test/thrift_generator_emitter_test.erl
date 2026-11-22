@@ -332,6 +332,11 @@ schema_codec_api_test() ->
     %% option validation errors surface through the facade
     ?assertEqual({error, {unknown_option, repr}}, t_types:encode(outer, Record, #{repr => map})),
     ?assertEqual({error, {unknown_option, strict}}, t_types:decode(outer, Bin, #{strict => true})),
+    %% the four introspection exports stay advanced-public, unchanged
+    ?assert(erlang:function_exported(t_types, struct_info, 1)),
+    ?assert(erlang:function_exported(t_types, enum_info, 1)),
+    ?assert(erlang:function_exported(t_types, function_info, 2)),
+    ?assert(erlang:function_exported(t_types, service_info, 0)),
     %% the schema default fills an absent repr: a protocol-only options
     %% map decodes into the struct's default representation
     ?assertEqual({ok, Record}, t_types:decode(outer, Bin, #{protocol => binary})),
@@ -987,10 +992,11 @@ type_definitions_test() ->
 
 %% IDL doc comments (/** */, ///) reach the generated code: as -doc on
 %% the entity's functions (enum helpers, the constant, service
-%% callbacks/methods), plus the service doc in the generated module
-%% docs; every generated function carries a built-in -doc explaining
-%% its contract. The type-first codec facade is module-level, so its
-%% docs are the built-in contracts rather than per-struct IDL text.
+%% callbacks/methods), as a comment above the struct's hrl record
+%% declaration (the direct codec functions are internal and the
+%% type-first facade is module-level), plus the service doc in the
+%% generated module docs; every generated function carries a built-in
+%% -doc explaining its contract.
 
 doc_pipeline_test() ->
     {ok, Doc} = thrift_generator:parse_string(?DOC_SNIPPET),
@@ -1043,6 +1049,19 @@ doc_pipeline_test() ->
     ?assertMatch({match, _}, re:run(ClientSrc, <<"Waves at the caller\\.">>)),
     ServerSrc = entry_source(t_svc_server, Sources),
     ?assertMatch({match, _}, re:run(ServerSrc, <<"Waves at the caller\\.">>)),
+    %% the direct codec entries, codec indexes and record_fields/1 are
+    %% classified internal: -doc false in the types module, so the
+    %% published docs carry only the facade and the introspection API
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"-doc\\(false\\)\\.">>)),
+    ?assertMatch(
+        {match, _},
+        re:run(TypesSrc, <<"-doc\\(false\\)\\.\\nrecord_fields\\(<<\"Inner\">>\\)">>)
+    ),
+    %% the struct's IDL doc lands above its hrl record declaration
+    Hrl = entry_hrl(t_types, Sources),
+    ?assertMatch({match, _}, re:run(Hrl, <<"% The request payload\\.">>)),
+    ReprSrc = entry_source(t_types_repr, Sources),
+    ?assertMatch({match, _}, re:run(ReprSrc, <<"-moduledoc\\(false\\)\\.">>)),
     ok.
 
 %%--------------------------------------------------------------------

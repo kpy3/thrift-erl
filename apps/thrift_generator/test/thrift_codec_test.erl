@@ -348,12 +348,14 @@ repr_parity(_Name, _Repr, skip) ->
     true;
 repr_parity(Name, Repr, {_, V}) ->
     Desc = {struct, {ref, goldentest_types, Name}},
-    Facade = run_safe(fun() -> thrift_runtime:encode(Desc, V, binary) end),
+    Facade = run_safe(fun() -> thrift_runtime:encode(Desc, V, #{protocol => binary}) end),
     TwoPass = run_safe(fun() -> two_pass_encode(Desc, V) end),
     Facade =:= TwoPass andalso
         case TwoPass of
             {normal, {ok, Bytes}} ->
-                FacadeDec = run_safe(fun() -> thrift_runtime:decode(Desc, Bytes, Repr, binary) end),
+                FacadeDec = run_safe(fun() ->
+                    thrift_runtime:decode(Desc, Bytes, #{protocol => binary, repr => Repr})
+                end),
                 TwoDec = run_safe(fun() -> two_pass_decode(Desc, Bytes, Repr) end),
                 FacadeDec =:= TwoDec andalso corrupt_bytes_parity(Desc, Repr, Bytes);
             _ ->
@@ -374,7 +376,9 @@ corrupt_bytes_parity(Desc, Repr, Bytes) ->
             ?LET(N, integer(0, Size - 1), binary:part(Bytes, 0, N))
         ]),
         begin
-            Facade = run_safe(fun() -> thrift_runtime:decode(Desc, Corrupt, Repr, binary) end),
+            Facade = run_safe(fun() ->
+                thrift_runtime:decode(Desc, Corrupt, #{protocol => binary, repr => Repr})
+            end),
             TwoPass = run_safe(fun() -> two_pass_decode(Desc, Corrupt, Repr) end),
             Facade =:= TwoPass
         end

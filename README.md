@@ -21,6 +21,8 @@ against its official compact, JSON, HTTP and multiplexed clients.
   - [One struct, four representations](#one-struct-four-representations)
   - [The compact protocol](#the-compact-protocol)
   - [The JSON protocol](#the-json-protocol)
+  - [Advanced: explicit descriptors, streaming codecs, custom protocols](#advanced-explicit-descriptors-streaming-codecs-custom-protocols)
+- [Public API migration](docs/public-api-migration.md)
 - [The HTTP transport](#the-http-transport)
 - [Pooling](#pooling)
 - [Reconnecting client](#reconnecting-client)
@@ -60,8 +62,9 @@ the in-process contract differs, it is deliberate.
 - **Four in-process representations.** Records (default), plain atom
   maps, tagged struct-maps, or EEP-79 native records on OTP 29 —
   selectable per struct, uniform all the way down, reshaped without
-  touching bytes via `convert/2`. Sum-typed unions, atom enums and a
-  selectable set implementation come with the IDL mapping.
+  touching bytes via the type-first `convert/3`. Sum-typed unions,
+  atom enums and a selectable set implementation come with the IDL
+  mapping.
 - **A runtime with no dependencies.** `thrift_runtime` stands on kernel
   and stdlib alone, generated code depends on nothing else, and the
   generator itself never ships to production.
@@ -368,15 +371,17 @@ wire format (`binary`, `compact` and `json` are built in; any
 
 ### One struct, four representations
 
-Decoding the same `PingRequest` bytes in the four representations —
-only the record needs its hrl include, the maps and the native record
-need nothing:
+The generated types module is the normal entry point: `Type` selects
+the schema (the snake-cased IDL name, no namespace prefix), the options
+map carries the axes. Decoding the same `PingRequest` bytes in the four
+representations — only the record needs its hrl include, the maps and
+the native record need nothing:
 
 ```erlang
-{ok, Req}    = ping_api_types:ping_api_decode_ping_request(Bin),         %% record (the default)
-{ok, Map}    = ping_api_types:ping_api_decode_ping_request(Bin, map),    %% plain atom-key map
-{ok, Struct} = ping_api_types:ping_api_decode_ping_request(Bin, struct), %% tagged map
-{ok, Native} = ping_api_types:ping_api_decode_ping_request(Bin, native), %% EEP-79 (OTP 29+)
+{ok, Req}    = ping_api_types:decode(ping_request, Bin),                    %% record (the default)
+{ok, Map}    = ping_api_types:decode(ping_request, Bin, #{repr => map}),    %% plain atom-key map
+{ok, Struct} = ping_api_types:decode(ping_request, Bin, #{repr => struct}), %% tagged map
+{ok, Native} = ping_api_types:decode(ping_request, Bin, #{repr => native}), %% EEP-79 (OTP 29+)
 ```
 
 The value each binding carries:
@@ -392,36 +397,38 @@ Struct = #{__struct__ => ping_api_ping_request, message => <<"hi">>},
 
 Details worth knowing: a field absent on the wire is absent from the
 maps (the record carries `undefined` in its slot instead), and the
-`__struct__` tag is the same record tag the record repr uses. Every
-struct in `<mod>_types.erl` gets a fixed set of codec functions
-(prefix = the `erl` namespace prefix, then the lowercased struct name):
-
-```erlang
-{ok, Req} = ping_api_types:ping_api_ping_request_from_map(Map),
-%% the protocol goes into the last argument of every codec:
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, my_protocol_mod).
-```
+`__struct__` tag is the same record tag the record repr uses.
 
 Encoding accepts any representation and auto-detects it — every form
 encodes back to the same bytes:
 
 ```erlang
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Map),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Struct),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Native).
+{ok, Bin} = ping_api_types:encode(ping_request, Req),
+{ok, Bin} = ping_api_types:encode(ping_request, Map),
+{ok, Bin} = ping_api_types:encode(ping_request, Struct),
+{ok, Bin} = ping_api_types:encode(ping_request, Native).
 ```
 
-On the facade `thrift_runtime:encode/2` accepts any representation and
-auto-detects it, `thrift_runtime:decode/3` produces the requested one, and
-`thrift_runtime:encode/4` takes an options map on top: `strict => true`
-fails a map/struct input carrying keys that match no declared field
+The options map is validated, not silently ignored. `encode/3` accepts
+exactly `protocol` (default `binary`) and `strict` (default `false`);
+`decode/3` accepts exactly `protocol` and `repr` (absent `repr` falls
+back to the struct's schema-selected default). Unknown keys answer
+`{error, {unknown_option, Key}}`; a non-map options argument answers
+`{error, {bad_option, {options, Value, [map]}}}` — there are no
+positional protocol or repr forms. `strict => true` fails a
+map/struct-map input carrying keys that match no declared field
 (`{error, {unknown_fields, Keys}}`) instead of dropping them silently:
 
 ```erlang
 {error, {unknown_fields, [extra]}} =
-    thrift_runtime:encode(ping_api_types:struct_info(<<"PingRequest">>),
-                      #{message => <<"hi">>, extra => 1}, binary, #{strict => true}).
+    ping_api_types:encode(ping_request, #{message => <<"hi">>, extra => 1}, #{strict => true}).
+```
+
+Other protocols ride the same options vocabulary:
+
+```erlang
+{ok, Compact} = ping_api_types:encode(ping_request, Req, #{protocol => compact}),
+{ok, Json} = ping_api_types:encode(ping_request, Req, #{protocol => json}).
 ```
 
 Decoding is strict: trailing bytes answer `{error, trailing}`,
@@ -429,16 +436,19 @@ truncation `{error, truncated}`. A value that matches no
 representation answers `{error, {value_does_not_match_type, Value}}`
 from every entry point.
 
-`convert/2` reshapes typed values without touching bytes (it also
-lives on `thrift_runtime:convert/3` for hand-written descriptors):
+`convert/3` reshapes typed values without touching bytes — the type is
+explicit, so the value's own tag is never consulted:
 
 ```erlang
-{ok, Map} = ping_api_types:convert(Req, map),
-{ok, Req} = ping_api_types:convert(Struct, record).
+{ok, Map} = ping_api_types:convert(ping_request, Req, map),
+{ok, Req} = ping_api_types:convert(ping_request, Struct, record).
 %% map-mode structs (erl.struct_type = "map") have no record to
 %% produce: the record target answers {error, {no_record, Tag}} in
-%% convert/2, convert/3 and decode alike.
+%% convert/3 and decode alike.
 ```
+
+`descriptor/1` hands out the named-ref descriptor the advanced runtime
+facade consumes: `{ok, Desc} = ping_api_types:descriptor(ping_request)`.
 
 The representation of a struct can also be pinned in the IDL with
 `erl.struct_type = "map"` — values become maps at the wire boundary in
@@ -453,15 +463,51 @@ emitted), so pattern matching one requires declaring `-record #name{}`
 in the consumer — reading through the `records` module needs nothing:
 
 ```erlang
-{ok, Req} = ping_api_types:ping_api_decode_ping_request(Bin, native),
+{ok, Req} = ping_api_types:decode(ping_request, Bin, #{repr => native}),
 <<"hi">> = records:get(message, Req),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req).   %% auto-detected
+{ok, Bin} = ping_api_types:encode(ping_request, Req).   %% auto-detected
 ```
 
 Enums get `color_to_int/1` / `color_from_int/1` helpers, constants get
 zero-argument functions plus `-define` macros for scalars, and the
 header file declares typed records, record/enum aliases and those
 macros.
+
+### Advanced: explicit descriptors, streaming codecs, custom protocols
+
+The generated facade covers the common case; the runtime exposes the
+same contract for hand-written schemas and dynamic work, with an
+explicit descriptor instead of the type atom. The descriptor shape is
+the one `struct_info/1` returns; `descriptor/1` on the generated module
+hands out named-ref descriptors directly.
+
+```erlang
+{ok, Desc} = ping_api_types:descriptor(ping_request),
+{ok, Bin} = thrift_runtime:encode(Desc, Req),
+{ok, Map} = thrift_runtime:decode(Desc, Bin, #{repr => map}),
+{ok, Struct} = thrift_runtime:convert(Desc, Map, struct).
+```
+
+Differences from the generated facade: the advanced `decode/3` requires
+the `repr` option (there is no schema module to infer a default from),
+and the advanced `convert/3` takes the descriptor instead of the type
+atom. Everything else — option keys, error terms, strict decoding,
+the one-pass fast path — is identical.
+
+Streaming and framing stay on the protocol modules, below the facade:
+`thrift_runtime_binary:decode/2` answers `{ok, WireMap, Rest} | more |
+{error, _}` so transports can feed partial buffers, and the
+socket/framing layer (`thrift_runtime_socket:extract_message/4`) builds
+frames and buffered messages on top. Generated modules also carry
+internal per-struct wire codecs (`binary_codec/1`, `compact_codec/1`,
+`json_codec/1` hand out the pairs) that the runtime dispatches to —
+they are exported but classified internal (`-doc false`); call the
+facade instead of these.
+
+Any module implementing the `thrift_runtime_protocol` behaviour plugs
+into every `protocol` slot — the facade's `protocol` option, client and
+server options — resolved through `thrift_runtime:protocol_module/1`,
+which verifies the callback set.
 
 ### The compact protocol
 
@@ -479,7 +525,7 @@ the same way as `binary`:
 {ok, Client} = ping_api_ping_client:start_link(#{
     host => "127.0.0.1", port => 9090, protocol => compact, transport => buffered
 }),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_runtime_compact),
+{ok, Bin} = ping_api_types:encode(ping_request, Req, #{protocol => compact}),
 {ok, Req, <<>>} = thrift_runtime_compact:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
@@ -509,7 +555,7 @@ ins:
 {ok, Client} = ping_api_ping_client:start_link(#{
     host => "127.0.0.1", port => 9090, protocol => json, transport => buffered
 }),
-{ok, Bin} = ping_api_types:ping_api_encode_ping_request(Req, thrift_runtime_json),
+{ok, Bin} = ping_api_types:encode(ping_request, Req, #{protocol => json}),
 {ok, Req, <<>>} = thrift_runtime_json:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
 ```
 
@@ -751,7 +797,7 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
   cannot make every key unique, loading fails with `duplicate_module`
   rather than choosing an arbitrary file;
 - prefixes every generated identifier of the file — record tags, type
-  aliases, derived function names (`encode_demo_widgets_point`),
+  aliases, derived helper names (`demo_widgets_color_to_int`),
   constant macros — so same-named structs of different files coexist
   once both hrl files land in one compilation. The value is normalized:
   lowercased, non-identifier runs collapsed to `_`, a leading digit
@@ -796,9 +842,9 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
   encoding is identical for all three; records in the generated hrl get
   `sets:set(E)` / `ordsets:ordset(E)` types;
 - `erl.record_name = "Name"` on a struct or exception — the verbatim
-  record tag: the hrl record, `record_fields/1` and `tag_index/0` key
-  the struct by `Name` as written instead of the snake-cased struct
-  name. This is the drop-in knob for codebases whose existing records
+  record tag: the hrl record and `record_fields/1` key the struct by
+  `Name` as written instead of the snake-cased struct name. This is the
+  drop-in knob for codebases whose existing records
   carry the IDL casing verbatim (the official Erlang generator spells
   record tags exactly as the IDL does) — adopting this runtime over a
   fork or over the official codegen then needs no value-transcoding
@@ -823,8 +869,10 @@ A `namespace erl` (or the `namespace *` fallback) does two things:
   preserved.
 
 Introspection in the spirit of the official generator: `struct_info/1`,
-`enum_info/1`, `function_info/2`, `record_fields/1`, `service_info/0`,
-`tag_index/0` and `convert/2` in `<mod>_types.erl`.
+`enum_info/1`, `function_info/2`, `service_info/0` and `record_fields/1`
+in `<mod>_types.erl` (`record_fields/1` is exported for the runtime's
+representation dispatch and classified internal; the schema facade
+`encode/decode/convert/descriptor` is the documented entry point).
 
 Record-mode structs also generate a companion `<mod>_types_repr.erl`
 with direct representation converters `repr_to_wire_<name>/1` /
@@ -874,9 +922,9 @@ codec-level numbers alone cannot prove.
 
 Binary-protocol calls through the `thrift_runtime` facade take a
 one-pass path when the target module was generated with repr-native
-codecs (the default): `encode/2,3,4` reads a tuple-with-tag record, an
+codecs (the default): `encode/2,3` reads a tuple-with-tag record, an
 atom- or binary-keyed map (or a native record, OTP 29+) straight to
-wire bytes, and `decode/3,4` builds the requested representation
+wire bytes, and `decode/3` builds the requested representation
 directly, with no intermediate wire map. Any value the fast path cannot
 represent — mixed nesting, malformed shapes — retries the two-pass
 path and answers identically, byte for byte and error for error; a

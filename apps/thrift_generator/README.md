@@ -6,6 +6,16 @@ wire codecs specialized per struct, typed clients, servers, handler
 behaviours and introspection exports — binary-compatible with the
 stock Apache Thrift implementation.
 
+The generated `<mod>_types` module exposes a type-first codec facade —
+`encode(Type, Value[, Options])`, `decode(Type, Binary[, Options])`,
+`convert(Type, Value, Repr)` and `descriptor(Type)` — over the
+specialized codecs; `struct_info/1`, `enum_info/1`, `function_info/2`
+and `service_info/0` provide advanced introspection. The direct codec
+entries stay exported for the runtime's dispatch but are classified
+internal. Migrating from the per-struct wrappers of earlier releases?
+See
+[docs/public-api-migration.md](https://github.com/kpy3/thrift-erl/blob/master/docs/public-api-migration.md).
+
 The generated code depends on
 [`thrift_runtime`](https://hex.pm/packages/thrift_runtime) and nothing
 else; this package is a build-time tool and never ships to production.
@@ -23,11 +33,11 @@ programmatic generation or scripting.
 ```
 
 ```erlang
-ok = thrift_generator:generate("src/ping.thrift", "src", #{}),
+{ok, _} = thrift_generator:generate("src/ping.thrift", "src", #{}),
 %% CI freshness gate: fails when artifacts are missing or stale:
 ok = thrift_generator:check("src/ping.thrift", "src", #{}),
 %% sweep generated files, including ones orphaned by a deleted IDL:
-ok = thrift_generator:clean("src").
+{ok, _} = thrift_generator:clean("src").
 ```
 
 The options map (`#{}` = defaults) carries four axes, each applied

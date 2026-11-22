@@ -227,13 +227,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
             union -> union_check(S#tg_struct.fields, call_local(Entry, [v("Value")]));
             _ -> required_check(S#tg_struct.fields, call_local(Entry, [v("Value")]))
         end,
-    Doc =
-        <<
-            "Encodes the wire representation (a map keyed by binary field"
-            " names) with the binary protocol, byte-compatible with"
-            " thrift_runtime_binary:encode/2."
-        >>,
-    thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
+    thrift_generator_emitter_syntax:doc_false_form() ++
         [
             spec_form(Encode, 1, [t_fun([t_map_exact()], t_union([t_ok(t_atom(iodata)), t_error()]))]),
             {function, ?ANNO, Encode, 1, [encode_entry_clause(CheckBody), encode_error_clause()]}
@@ -399,13 +393,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     Fields = S#tg_struct.fields,
     FieldsName = atom_concat(Decode, <<"_fields">>),
     Bits = required_bits(Fields),
-    Doc =
-        <<
-            "Decodes the binary protocol into the wire representation,"
-            " byte-compatible with thrift_runtime_binary:decode/2; `more` on"
-            " truncated input, unknown field ids skipped by wire type."
-        >>,
-    thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
+    thrift_generator_emitter_syntax:doc_false_form() ++
         [
             spec_form(Decode, 1, [
                 t_fun(
@@ -1116,30 +1104,31 @@ repr_index_forms(Convertible, Ctx) ->
     Clauses =
         lists:append([repr_index_clauses(S, Ctx) || S <- Convertible]) ++
             [clause([v("_"), v("_")], none, [at(error)])],
-    [
-        {attribute, ?ANNO, spec,
-            {{binary_repr_codec, 2}, [
-                {type, ?ANNO, 'fun', [
-                    {type, ?ANNO, product, [
-                        {type, ?ANNO, binary, [{integer, ?ANNO, 0}, {integer, ?ANNO, 8}]},
-                        {type, ?ANNO, union, [
-                            {atom, ?ANNO, record},
-                            {atom, ?ANNO, map},
-                            {atom, ?ANNO, struct},
-                            {atom, ?ANNO, native}
-                        ]}
-                    ]},
-                    {type, ?ANNO, union, [
-                        {type, ?ANNO, tuple, [
-                            {atom, ?ANNO, ok},
-                            {type, ?ANNO, tuple, [{type, ?ANNO, atom, []}, {type, ?ANNO, atom, []}]}
+    thrift_generator_emitter_syntax:doc_false_form() ++
+        [
+            {attribute, ?ANNO, spec,
+                {{binary_repr_codec, 2}, [
+                    {type, ?ANNO, 'fun', [
+                        {type, ?ANNO, product, [
+                            {type, ?ANNO, binary, [{integer, ?ANNO, 0}, {integer, ?ANNO, 8}]},
+                            {type, ?ANNO, union, [
+                                {atom, ?ANNO, record},
+                                {atom, ?ANNO, map},
+                                {atom, ?ANNO, struct},
+                                {atom, ?ANNO, native}
+                            ]}
                         ]},
-                        {atom, ?ANNO, error}
+                        {type, ?ANNO, union, [
+                            {type, ?ANNO, tuple, [
+                                {atom, ?ANNO, ok},
+                                {type, ?ANNO, tuple, [{type, ?ANNO, atom, []}, {type, ?ANNO, atom, []}]}
+                            ]},
+                            {atom, ?ANNO, error}
+                        ]}
                     ]}
-                ]}
-            ]}},
-        {function, ?ANNO, binary_repr_codec, 2, Clauses}
-    ].
+                ]}},
+            {function, ?ANNO, binary_repr_codec, 2, Clauses}
+        ].
 
 repr_index_clauses(S, Ctx) ->
     {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
