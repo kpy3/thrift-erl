@@ -25,6 +25,8 @@
 -export([
     protocol_module_axis_test/0,
     facade_roundtrip_test/0,
+    facade_options_map_test/0,
+    facade_options_validation_test/0,
     facade_strict_decode_test/0,
     facade_convert_test/0,
     record_engine_autodetect_test/0,
@@ -103,6 +105,88 @@ facade_roundtrip_test() ->
                 thrift_runtime:decode(Desc, FromRecord, native)
             )
     end,
+    ok.
+
+%% The advanced facade takes the protocol and strictness as an option
+%% map: the same axes as the positional calls, normalized by
+%% `thrift_runtime_options:codec_options/2`.
+
+facade_options_map_test() ->
+    Desc = point_desc(),
+    Record = {point, 1, 2},
+    %% an option map answers exactly like the positional protocol call
+    {ok, CompactBin} = thrift_runtime:encode(Desc, Record, #{protocol => compact}),
+    ?assertEqual({ok, CompactBin}, thrift_runtime:encode(Desc, Record, compact)),
+    ?assertEqual(
+        {ok, Record},
+        thrift_runtime:decode(Desc, CompactBin, #{protocol => compact, repr => record})
+    ),
+    ?assertEqual({ok, Record}, thrift_runtime:decode(Desc, CompactBin, record, compact)),
+    ?assertEqual(
+        {ok, #{x => 1, y => 2}},
+        thrift_runtime:decode(Desc, CompactBin, #{protocol => compact, repr => map})
+    ),
+    %% the defaults: binary protocol, non-strict encode
+    {ok, Bin} = thrift_runtime:encode(Desc, Record, #{}),
+    ?assertEqual({ok, Bin}, thrift_runtime:encode(Desc, Record)),
+    ?assertEqual({ok, Record}, thrift_runtime:decode(Desc, Bin, #{repr => record})),
+    %% strict => true retains the strict encode check
+    ?assertMatch(
+        {error, {unknown_fields, [zzz]}},
+        thrift_runtime:encode(Desc, #{x => 1, y => 2, zzz => 3}, #{strict => true})
+    ),
+    ?assertMatch(
+        {ok, _},
+        thrift_runtime:encode(Desc, #{x => 1, y => 2, zzz => 3}, #{})
+    ),
+    ok.
+
+%% Option maps are validated, not silently ignored: exactly the allowed
+%% keys, a required repr for decode, boolean strictness, and the
+%% existing bad_protocol/bad_repr vocabulary for the axis values.
+
+facade_options_validation_test() ->
+    Desc = point_desc(),
+    Value = #{x => 1, y => 2},
+    {ok, Bin} = thrift_runtime:encode(Desc, Value),
+    ?assertEqual({error, {unknown_option, typo}}, thrift_runtime:encode(Desc, Value, #{typo => true})),
+    ?assertEqual({error, {unknown_option, repr}}, thrift_runtime:encode(Desc, Value, #{repr => map})),
+    ?assertEqual(
+        {error, {unknown_option, strict}},
+        thrift_runtime:decode(Desc, Bin, #{repr => record, strict => true})
+    ),
+    ?assertEqual({error, {missing_option, repr}}, thrift_runtime:decode(Desc, Bin, #{})),
+    ?assertEqual(
+        {error, {bad_option, {strict, yes, [true, false]}}},
+        thrift_runtime:encode(Desc, Value, #{strict => yes})
+    ),
+    %% a non-map options argument is a bad options value, not a protocol
+    ?assertEqual(
+        {error, {bad_option, {options, strict, [map]}}},
+        thrift_runtime_options:codec_options(strict, encode)
+    ),
+    %% the axis values keep their existing error forms
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        thrift_runtime:encode(Desc, Value, #{protocol => <<"binary">>})
+    ),
+    ?assertEqual(
+        {error, {bad_repr, maps}},
+        thrift_runtime:decode(Desc, Bin, #{repr => maps})
+    ),
+    %% normalization fills the defaults and keeps valid entries
+    ?assertEqual(
+        {ok, #{protocol => binary, strict => false}},
+        thrift_runtime_options:codec_options(#{}, encode)
+    ),
+    ?assertEqual(
+        {ok, #{protocol => compact, strict => true}},
+        thrift_runtime_options:codec_options(#{protocol => compact, strict => true}, encode)
+    ),
+    ?assertEqual(
+        {ok, #{protocol => binary, repr => record}},
+        thrift_runtime_options:codec_options(#{repr => record}, decode)
+    ),
     ok.
 
 facade_strict_decode_test() ->

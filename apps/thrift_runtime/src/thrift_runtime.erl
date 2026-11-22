@@ -42,7 +42,11 @@ payloads convert). A wire union with zero or several set fields is
 malformed and answers `{error, {invalid_union, Map}}`.
 
 `encode/2,3` accepts any representation on input and auto-detects it;
-`decode/3,4` produces the requested one. `convert/3` reshapes typed
+`decode/3` produces the requested one. The option-map forms take the
+axes as data — encode allows exactly `protocol` and `strict` (default
+`binary`, `false`), decode allows exactly `protocol` and `repr` with
+`repr` required — normalized and validated by
+`thrift_runtime_options:codec_options/2`. `convert/3` reshapes typed
 values without touching bytes: pass the tag index emitted by the
 generator (the `TagIndex/0` export of generated types modules) and any
 record or struct-map value.
@@ -58,7 +62,8 @@ and `thrift_runtime_server`.
     decode/3,
     decode/4,
     convert/3,
-    protocol_module/1
+    protocol_module/1,
+    repr_supported/1
 ]).
 
 -export_type([repr/0, protocol/0, tag_index/0]).
@@ -94,8 +99,25 @@ and `thrift_runtime_server`.
 encode(Desc, Value) ->
     encode(Desc, Value, binary).
 
--doc "Encodes a value in any representation with the given protocol.".
--spec encode(thrift_runtime_binary:type_desc(), term(), protocol()) -> {ok, binary()} | {error, term()}.
+-doc """
+Encodes a value with the given protocol or the options map form of the
+facade.
+
+The option map normalizes through
+`thrift_runtime_options:codec_options/2`: exactly `protocol` and
+`strict` are allowed (default `binary`, `false`); unknown keys, a
+non-boolean `strict` and a bad protocol answer the documented option
+errors without touching the value.
+""".
+-spec encode(thrift_runtime_binary:type_desc(), term(), protocol() | map()) ->
+    {ok, binary()} | {error, term()}.
+encode(Desc, Value, Options) when is_map(Options) ->
+    case thrift_runtime_options:codec_options(Options, encode) of
+        {ok, #{protocol := Protocol, strict := Strict}} ->
+            encode(Desc, Value, Protocol, #{strict => Strict});
+        {error, _} = Error ->
+            Error
+    end;
 encode(Desc, Value, Protocol) ->
     encode(Desc, Value, Protocol, #{}).
 
@@ -173,7 +195,15 @@ encode_wire_two_pass(Desc, Value, Mod) ->
     end.
 
 -doc """
-Decodes the whole binary into a record with the binary protocol.
+Decodes the whole binary into a record with the binary protocol, or with
+the options map form of the facade.
+
+The option map normalizes through
+`thrift_runtime_options:codec_options/2`: exactly `protocol` and
+`repr` are allowed, `repr` is required (the advanced facade has no
+schema module from which to infer one) and the protocol defaults to
+binary; the normalized repr feeds the same one-pass dispatch as the
+positional call.
 
 Unlike the streaming `thrift_runtime_binary:decode/2`, this is strict: a
 truncated input fails with `{error, truncated}`, trailing bytes with
@@ -181,7 +211,20 @@ truncated input fails with `{error, truncated}`, trailing bytes with
 struct has no record to produce: `record` fails with
 `{error, {no_record, Name}}`.
 """.
--spec decode(thrift_runtime_binary:type_desc(), binary(), repr()) -> {ok, term()} | {error, term()}.
+-spec decode(thrift_runtime_binary:type_desc(), binary(), repr() | map()) ->
+    {ok, term()} | {error, term()}.
+decode(Desc, Binary, Options) when is_map(Options) ->
+    case thrift_runtime_options:codec_options(Options, decode) of
+        {ok, #{protocol := Protocol, repr := Repr}} ->
+            case protocol_module(Protocol) of
+                {ok, Mod} ->
+                    decode_fast(Mod, Desc, Binary, Repr);
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end;
 decode(Desc, Binary, Repr) ->
     decode(Desc, Binary, Repr, binary).
 
@@ -272,8 +315,16 @@ struct_tag({struct, {ref, _Module, Name}}) ->
 
 %% The one representation with an OTP floor plus membership: native
 %% records need the `records` module (OTP 29), and a repr outside the
-%% axis vocabulary is a caller typo, not a decode condition.
+%% axis vocabulary is a caller typo, not a decode condition. Exported
+%% for `thrift_runtime_options:codec_options/2`, which validates the
+%% decode facade's `repr` option through this same check.
 
+-doc """
+Validates a representation axis value.
+
+`record`, `map` and `struct` always exist; `native` additionally needs
+the `records` module (OTP 29), and anything else is a `bad_repr` typo.
+""".
 -spec repr_supported(repr()) -> ok | {error, {unsupported_repr, native} | {bad_repr, repr()}}.
 repr_supported(native) ->
     case thrift_runtime_native:supported() of
