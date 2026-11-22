@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed generator crashes on compact enum/header bytes `0x80..0xFF` by
   emitting raw binary literals as bytes, restoring large enum values and
   field ids without changing wire output.
+- Doc comments directly before closing delimiters are parsed as
+  whitespace, matching the official grammar and fixing IDL bodies that
+  end with a commented-out member.
 - `scripts/bench-regression`: paired historical benchmark of generated
   code against a git ref (defaults to `v0.8.0`), per-cell 0.99 gate,
   direct/public entries, cross-module and representation-conversion
