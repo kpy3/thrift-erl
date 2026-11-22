@@ -22,7 +22,8 @@
     paired_ratio_uses_throughput_direction_test/0,
     constant_ratio_has_degenerate_interval_test/0,
     wide_interval_is_inconclusive_test/0,
-    median_handles_even_sample_count_test/0
+    median_handles_even_sample_count_test/0,
+    schema_rows_use_current_head_module_facade_test/0
 ]).
 
 paired_ratio_uses_throughput_direction_test() ->
@@ -54,4 +55,51 @@ wide_interval_is_inconclusive_test() ->
 
 median_handles_even_sample_count_test() ->
     ?assertEqual(2.5, thrift_bench_regression:median([4, 1, 3, 2])),
+    ok.
+
+%% The schema family compares the runtime's advanced descriptor call with
+%% the generated type-first facade on the same head-side modules and
+%% codecs: the base side carries the literal `{struct, {ref, Module, Name}}'
+%% descriptor into `thrift_runtime', the head side carries the module and
+%% canonical type atom into the generated `encode/3'/`decode/3'. Both
+%% sides must reference the current head module — historical wrappers are
+%% never executed here.
+
+schema_rows_use_current_head_module_facade_test() ->
+    Value = #{
+        <<"string_thing">> => <<"hi">>,
+        <<"byte_thing">> => 1,
+        <<"i32_thing">> => 2,
+        <<"i64_thing">> => 3
+    },
+    Spec = #{
+        id => <<"Xtruct">>,
+        struct => <<"Xtruct">>,
+        value => Value,
+        base_prefix => <<"goldentest">>,
+        base_module => goldentest080a_types,
+        head_prefix => <<"goldentest">>,
+        head_module => goldentesthead_types
+    },
+    Wire = <<"encoded-wire-bytes">>,
+    Encode = thrift_bench_regression:schema_case(Spec, encode, Value, #{}),
+    ?assertEqual({<<"Xtruct">>, binary, schema, encode}, maps:get(key, Encode)),
+    ?assertEqual(
+        {encode, {runtime, {struct, {ref, goldentesthead_types, <<"Xtruct">>}}, Value, #{}}},
+        maps:get(base, Encode)
+    ),
+    ?assertEqual(
+        {encode, {facade, goldentesthead_types, xtruct, Value, #{}}},
+        maps:get(head, Encode)
+    ),
+    Decode = thrift_bench_regression:schema_case(Spec, decode, Wire, #{repr => record}),
+    ?assertEqual({<<"Xtruct">>, binary, schema, decode}, maps:get(key, Decode)),
+    ?assertEqual(
+        {decode, {runtime, {struct, {ref, goldentesthead_types, <<"Xtruct">>}}, Wire, #{repr => record}}},
+        maps:get(base, Decode)
+    ),
+    ?assertEqual(
+        {decode, {facade, goldentesthead_types, xtruct, Wire, #{repr => record}}},
+        maps:get(head, Decode)
+    ),
     ok.

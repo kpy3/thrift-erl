@@ -63,4 +63,5 @@ compare_group public || STATUS=1
 compare_group direct || STATUS=1
 compare_group conversion || STATUS=1
 compare_group onepass || STATUS=1
+compare_group schema || STATUS=1
 exit "$STATUS"

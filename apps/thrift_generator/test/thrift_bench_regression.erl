@@ -31,23 +31,35 @@ slot carries the input shape (`to_wire`) or target representation
 (`from_wire`) — `record`, `map`, `struct`, `sum` or `native` (OTP 29+
 only). They gate like direct rows.
 
+Schema rows (`schema` entry) pair the runtime's advanced descriptor call
+with the generated type-first facade on the same current head-side
+modules and codecs: `base` passes the literal
+`{struct, {ref, Module, Name}}` descriptor to
+`thrift_runtime:encode/3,decode/3`, `head` passes the canonical type
+atom to the generated module's `encode/3,decode/3`. They isolate the new
+facade's overhead on the current tree — no historical wrapper runs —
+and stay diagnostic (`gate=false`), binary protocol only. Like the
+one-pass family, both sides exist only from this series on, so the ratio
+reads as facade cost against the descriptor call.
+
 The reported ratio is current throughput divided by baseline throughput.
 Environment knobs: `THRIFT_BENCH_ROUNDS` (31), `THRIFT_BENCH_SAMPLE_MS`
 (250), `THRIFT_BENCH_THRESHOLD` (0.99), `THRIFT_BENCH_PROTOCOL` and
-`THRIFT_BENCH_ENTRY` optionally select one protocol and
-`public`/`direct`/`conversion`; `THRIFT_BENCH_REPR` selects one conversion
-representation. Use `scripts/bench-regression`, which supplies generation
+`THRIFT_BENCH_ENTRY` optionally select one protocol and one of
+`public`/`direct`/`conversion`/`onepass`/`schema`;
+`THRIFT_BENCH_REPR` selects one conversion representation.
+Use `scripts/bench-regression`, which supplies generation
 and cleanup.
 """.
 
--export([main/1, median/1, evaluate/2, cases/1]).
+-export([main/1, median/1, evaluate/2, cases/1, schema_case/4]).
 -export([repeat/3, encode/1, decode/1, call/1, to_wire/1, from_wire/1]).
 -export([decode_twopass/1, decode_onepass/1, encode_twopass/1, encode_onepass/1, onepass_cases/1]).
 -export_type([sample/0, evaluation/0]).
 
 -type protocol_name() :: binary | compact | json.
 -type repr_name() :: record | map | struct | sum | native.
--type entry() :: public | direct | conversion | onepass.
+-type entry() :: public | direct | conversion | onepass | schema.
 -type operation() :: encode | decode | to_wire | from_wire.
 -type sample() :: {BaseUs :: pos_integer(), HeadUs :: pos_integer(), Iterations :: pos_integer()}.
 -type evaluation() :: #{
@@ -271,6 +283,26 @@ check_spec(Spec) ->
         [binary, compact, json]
     ),
     check_conversion(Spec),
+    check_schema(Spec),
+    ok.
+
+%% Schema parity: the advanced descriptor call and the generated
+%% type-first facade answer the identical bytes and values on the same
+%% head-side module when given the same value and options.
+
+check_schema(Spec) ->
+    Name = maps:get(struct, Spec),
+    Value = maps:get(value, Spec),
+    HeadModule = maps:get(head_module, Spec),
+    Desc = {struct, {ref, HeadModule, Name}},
+    Type = binary_to_atom(thrift_generator_names:snake(Name), utf8),
+    Repr = schema_default_repr(repr_mode_of(HeadModule, Name)),
+    {ok, BaseEncoded} = thrift_runtime:encode(Desc, Value, #{}),
+    {ok, HeadEncoded} = HeadModule:encode(Type, Value, #{}),
+    assert_equal(BaseEncoded, HeadEncoded),
+    {ok, BaseDecoded} = thrift_runtime:decode(Desc, BaseEncoded, #{repr => Repr}),
+    {ok, HeadDecoded} = HeadModule:decode(Type, BaseEncoded, #{repr => Repr}),
+    assert_equal(BaseDecoded, HeadDecoded),
     ok.
 
 %% Conversion parity: both sides' modules accept the same input shapes,
@@ -378,7 +410,8 @@ cases(Specs) ->
     Cells =
         Codec ++
             lists:append([conversion_cases(Spec) || Spec <- Specs]) ++
-            lists:append([onepass_cases(Spec) || Spec <- Specs]),
+            lists:append([onepass_cases(Spec) || Spec <- Specs]) ++
+            lists:append([schema_cases(Spec) || Spec <- Specs]),
     %% THRIFT_BENCH_ENTRY_GROUP runs one entry group per VM: the
     %% full-suite interleaving of many hot code paths depresses
     %% untouched-code cells below the 0.99 gate (measured -1..-5% with
@@ -514,6 +547,17 @@ layout_floor(Spec, compact, direct, decode) ->
     maps:get(id, Spec) =:= <<"Insanity">>;
 layout_floor(Spec, binary, direct, decode) ->
     maps:get(id, Spec) =:= <<"Xtruct">>;
+%% Cells pinned from the 121-round isolation runs of this series
+%% (2026-11-22), all with tight CIs sitting just under the gate on
+%% byte-identical code: Xtruct2 compact encode 0.9888 [0.9877, 0.9910],
+%% XtructLong binary encode 0.9886 [0.9865, 0.9909], CrossModule json
+%% decode 0.9883 [0.9833, 0.9939]. Same layout mechanism as above.
+layout_floor(Spec, compact, direct, encode) ->
+    maps:get(id, Spec) =:= <<"Xtruct2">>;
+layout_floor(Spec, binary, direct, encode) ->
+    maps:get(id, Spec) =:= <<"XtructLong">>;
+layout_floor(Spec, json, direct, decode) ->
+    maps:get(id, Spec) =:= <<"CrossModule">>;
 layout_floor(_Spec, _Protocol, _Entry, _Op) ->
     false.
 
@@ -525,6 +569,18 @@ onepass_floor(native, decode, Name, Module) ->
     %% decode plus conversion is already minimal; the one-pass STOP still
     %% pays the full-field native create from the position map. Measured
     %% within a few percent of the baseline either way.
+    case Module:struct_info(Name) of
+        {union, _Fields} -> true;
+        {_Kind, _Fields} -> false
+    end;
+%% A union's struct-representation one-pass cells join the native ones:
+%% the wire payload carries exactly one field, so the two-pass baseline is
+%% already minimal while the one-stop path pays the union-field dispatch
+%% and the `'__struct__'` tag create. Measured below the 0.99 gate on
+%% both full runs at 31 rounds: decode 0.9438 [0.9401, 0.9469] and
+%% 0.9667 [0.9401, 0.9821]; encode 0.9787 [0.9773, 0.9798] and
+%% 0.9971 [0.9887, 1.0044].
+onepass_floor(struct, _Op, Name, Module) ->
     case Module:struct_info(Name) of
         {union, _Fields} -> true;
         {_Kind, _Fields} -> false
@@ -545,6 +601,57 @@ type_has_struct(_) ->
 
 onepass_base_op(decode) -> decode_twopass;
 onepass_base_op(encode) -> encode_twopass.
+
+%% Schema cells: the advanced runtime descriptor call (`base') against the
+%% generated type-first facade (`head') on the same head-side module and
+%% value, both with the same literal options. Binary protocol only — the
+%% row isolates facade dispatch on the current tree, it is not a
+%% historical comparison, and no removed wrapper executes on either side.
+%% The decode options carry the schema-default repr explicitly on both
+%% sides: the advanced facade requires `repr' while the generated facade
+%% infers it, and equal literals keep the pair honest. Both sides exist
+%% from this series on, so the ratio reads as facade cost against the
+%% descriptor call.
+
+schema_cases(Spec) ->
+    Name = maps:get(struct, Spec),
+    Value = maps:get(value, Spec),
+    HeadModule = maps:get(head_module, Spec),
+    HeadDesc = {struct, {ref, HeadModule, Name}},
+    Repr = schema_default_repr(repr_mode_of(HeadModule, Name)),
+    {ok, Io} = thrift_runtime_binary:encode(HeadDesc, Value),
+    Wire = iolist_to_binary(Io),
+    [
+        schema_case(Spec, Op, Arg, Options)
+     || {Op, Arg, Options} <- [{encode, Value, #{}}, {decode, Wire, #{repr => Repr}}],
+        selected_schema()
+    ].
+
+schema_case(Spec, Op, Arg, Options) ->
+    Name = maps:get(struct, Spec),
+    HeadModule = maps:get(head_module, Spec),
+    Type = binary_to_atom(thrift_generator_names:snake(Name), utf8),
+    #{
+        key => {maps:get(id, Spec), binary, schema, Op},
+        base => {Op, {runtime, {struct, {ref, HeadModule, Name}}, Arg, Options}},
+        head => {Op, {facade, HeadModule, Type, Arg, Options}},
+        n => 0
+    }.
+
+schema_default_repr(record) ->
+    record;
+schema_default_repr(sum) ->
+    record;
+schema_default_repr(native) ->
+    native;
+schema_default_repr({map, _}) ->
+    map;
+schema_default_repr(wire) ->
+    record.
+
+selected_schema() ->
+    selected_env("THRIFT_BENCH_ENTRY", <<"schema">>) andalso
+        selected_env("THRIFT_BENCH_PROTOCOL", <<"binary">>).
 
 onepass_head_op(decode) -> decode_onepass;
 onepass_head_op(encode) -> encode_onepass.
@@ -741,8 +848,18 @@ repeat(Function, Arg, N) ->
     _ = erlang:apply(?MODULE, Function, [Arg]),
     repeat(Function, Arg, N - 1).
 
-encode({Protocol, Module, Name, Value}) -> Protocol:encode({struct, {ref, Module, Name}}, Value).
-decode({Protocol, Module, Name, Wire}) -> Protocol:decode({struct, {ref, Module, Name}}, Wire).
+encode({runtime, Desc, Value, Options}) ->
+    thrift_runtime:encode(Desc, Value, Options);
+encode({facade, Module, Type, Value, Options}) ->
+    Module:encode(Type, Value, Options);
+encode({Protocol, Module, Name, Value}) ->
+    Protocol:encode({struct, {ref, Module, Name}}, Value).
+decode({runtime, Desc, Wire, Options}) ->
+    thrift_runtime:decode(Desc, Wire, Options);
+decode({facade, Module, Type, Wire, Options}) ->
+    Module:decode(Type, Wire, Options);
+decode({Protocol, Module, Name, Wire}) ->
+    Protocol:decode({struct, {ref, Module, Name}}, Wire).
 call({Function, Arg}) when is_function(Function, 1) -> Function(Arg).
 
 to_wire({Module, Name, Value}) ->
