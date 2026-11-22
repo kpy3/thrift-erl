@@ -743,7 +743,12 @@ true}`); the client presents `certs_keys` the same way.
 A `namespace erl` (or the `namespace *` fallback) does two things:
 
 - names the generated modules, as before (`namespace erl demo.widgets`
-  → `demo_widgets_types.erl`, `demo_widgets_types.hrl`);
+  → `demo_widgets_types.erl`, `demo_widgets_types.hrl`). If two files in
+  one include graph claim the same namespace-derived module key, the
+  collision group uses unique file basenames instead (`domain_config` →
+  `domain_config_types` beside `domain_types`); identifier prefixes still
+  share the namespace. If basenames cannot make every key unique, loading
+  fails with `duplicate_module` rather than choosing an arbitrary file;
 - prefixes every generated identifier of the file — record tags, type
   aliases, derived function names (`encode_demo_widgets_point`),
   constant macros — so same-named structs of different files coexist

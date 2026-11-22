@@ -31,7 +31,8 @@
     reject_syntax_error/1,
     semantic_pipeline/1,
     loader_cycle/1,
-    loader_duplicate_module/1,
+    loader_shared_namespace_modules/1,
+    loader_unresolved_duplicate_module/1,
     loader_missing_include/1,
     loader_namespace_prefix/1,
     loader_namespace_error/1,
@@ -76,7 +77,8 @@ all() ->
         reject_syntax_error,
         semantic_pipeline,
         loader_cycle,
-        loader_duplicate_module,
+        loader_shared_namespace_modules,
+        loader_unresolved_duplicate_module,
         loader_missing_include,
         loader_namespace_prefix,
         loader_namespace_error,
@@ -1479,13 +1481,53 @@ rpc_loopback_fallback(Config) ->
         thrift_runtime_server:stop(Server)
     end.
 
-loader_duplicate_module(Config) ->
+%% Two files may share a namespace for generated identifiers. Their module
+%% keys disambiguate by basename, while prefixes, include qualifiers and
+%% record tags keep the shared namespace value.
+loader_shared_namespace_modules(Config) ->
     One = data_file(Config, "semantic/dup_one.thrift"),
-    Two = data_file(Config, "semantic/dup_two.thrift"),
+    {ok, Loaded} = thrift_generator_loader:load(One),
+    ?assertEqual([<<"dup_one">>, <<"dup_two">>], [E#tg_loaded.name || E <- Loaded]),
+    ?assertEqual([<<"duplicated">>, <<"duplicated">>], [E#tg_loaded.prefix || E <- Loaded]),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [OneMod, TwoMod] = Model#tg_model.modules,
+    ?assertEqual([<<"duplicated">>, <<"duplicated">>], [OneMod#tg_module.prefix, TwoMod#tg_module.prefix]),
+    ok = generate_modules(One),
+    {struct, Fields} = dup_one_types:struct_info(<<"One">>),
+    OtherField = lists:keyfind(2, 1, Fields),
+    ?assertEqual({struct, {ref, dup_two_types, <<"Two">>}}, element(3, OtherField)),
+    ?assertEqual({duplicated_one, [x, other]}, dup_one_types:record_fields(<<"One">>)),
+    ?assertEqual({duplicated_two, [y]}, dup_two_types:record_fields(<<"Two">>)),
+    ok.
+
+%% When even file basenames cannot make module keys unique, the original
+%% duplicate error remains — silently choosing either file would make
+%% cross-file references ambiguous.
+loader_unresolved_duplicate_module(Config) ->
+    Priv = proplists:get_value(priv_dir, Config),
+    First = filename:join(Priv, "same_ns_a/shared.thrift"),
+    Second = filename:join(Priv, "same_ns_b/shared.thrift"),
+    ok = filelib:ensure_dir(First),
+    ok = filelib:ensure_dir(Second),
+    Content = <<"namespace erl shared\nstruct Thing { 1: i32 value }\n">>,
+    ok = file:write_file(First, Content),
+    ok = file:write_file(Second, Content),
+    Root = write_snippet(
+        Config,
+        "same_ns_root.thrift",
+        <<
+            "include \"same_ns_a/shared.thrift\"\n"
+            "include \"same_ns_b/shared.thrift\"\n"
+            "namespace erl root\n"
+        >>
+    ),
+    FirstAbs = unicode:characters_to_binary(filename:absname(First)),
+    SecondAbs = unicode:characters_to_binary(filename:absname(Second)),
     ?assertMatch(
-        {error, {duplicate_module, <<"duplicated">>, One, Two}},
-        thrift_generator_loader:load(One)
-    ).
+        {error, {duplicate_module, <<"shared">>, FirstAbs, SecondAbs}},
+        thrift_generator_loader:load(Root)
+    ),
+    ok.
 
 loader_missing_include(Config) ->
     Missing = data_file(Config, "semantic/does_not_exist.thrift"),
