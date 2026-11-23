@@ -4,6 +4,30 @@
 
 ### Breaking changes
 
+The generator tooling API is unified on one validated options map
+across every frontend — the library, the standalone CLI and the rebar3
+plugin — with the transitional forms removed and no compatibility
+shims (old → new tables in `docs/public-api-migration.md`):
+
+- The transitional library forms `generate/3` and `check/3` (explicit
+  positional out dir) are removed: pass `#{out_dir => Dir}` in the
+  options map instead. `generate/1`, `generate/2`, `check/1`, `check/2`
+  and `clean/1` are now the only generation operations; the
+  parser-level `tokens/1`, `ast/1`, `parse_file/1` and `parse_string/1`
+  stay exported (the loader pipeline and the test suites call them)
+  but are internal, not a stable public contract.
+- The CLI no longer accepts a bare file operand, an implicit
+  `generate` or the legacy `--check` flag: the explicit `generate`,
+  `check` and `clean` subcommands are the grammar, and `-o` defaults
+  to `src` (the escript's flags are unchanged otherwise).
+- The rebar3 plugin validates `{thrift, [...]}` through the
+  generator's shared options contract: a config typo or an invalid
+  value fails the provider with the shared rendered
+  `{unknown_option, Key}` / `{bad_option, {Key, Value, Allowed}}`
+  diagnostic (replacing the old `{bad_opt, ...}` error), and the
+  hooked clean provider validates `out_dir` through the same contract
+  before deleting anything.
+
 The public codec API is finalized as one coherent, type-first surface;
 the transitional legacy forms are removed with no compatibility shims
 (see `docs/public-api-migration.md` for old → new call tables):

@@ -48,9 +48,9 @@ triples before failing, where `Loc` is a line number or a
 
 -type resolved_ref() :: {Module :: binary(), Name :: binary(), def_kind()}.
 
-%% Invocation-wide option axes of analyze/2 (mirrored by generate/3 and
-%% check/3); every axis is optional and applies only where the IDL
-%% carries no explicit annotation.
+%% Invocation-wide option axes of analyze/2 (mirrored by the generate
+%% and check frontends); every axis is optional and applies only where
+%% the IDL carries no explicit annotation.
 
 -type generate_semantic_opts() :: #{
     repr => record | map | native,

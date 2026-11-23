@@ -33,17 +33,21 @@ programmatic generation or scripting.
 ```
 
 ```erlang
-{ok, _} = thrift_generator:generate("src/ping.thrift", "src", #{}),
+{ok, _} = thrift_generator:generate("src/ping.thrift", #{out_dir => "src"}),
 %% CI freshness gate: fails when artifacts are missing or stale:
-ok = thrift_generator:check("src/ping.thrift", "src", #{}),
+ok = thrift_generator:check("src/ping.thrift", #{out_dir => "src"}),
 %% sweep generated files, including ones orphaned by a deleted IDL:
 {ok, _} = thrift_generator:clean("src").
 ```
 
-The options map (`#{}` = defaults) carries four axes, each applied
+The options map (`#{}` = all defaults) names the output directory
+(`out_dir`, `"src"` by default) and carries five axes, each applied
 only where the IDL carries no explicit annotation of its own:
 `#{repr => record | map | native, union_type => record | sum,
-set => list | sets | ordset, typedef_type => alias | nominal}`.
+set => list | sets | ordset, typedef_type => alias | nominal,
+enum_case => preserve | lower}`. Unknown keys and invalid values are
+returned as `{error, {unknown_option, Key}}` / `{error, {bad_option,
+{Key, Value, Allowed}}}` before anything is written.
 
 ## Standalone CLI
 
@@ -52,12 +56,14 @@ A self-contained escript is attached to the
 build one from a checkout with `rebar3 as prod escriptize`):
 
 ```console
-$ thrift_generator -o src src/ping.thrift
+$ thrift_generator generate src/ping.thrift -o src
 ```
 
 Errors render located rich blocks (line, caret on the exact column)
 in the terminal; `--compact-errors` switches to `path:line[:col]`
-records, `--check` verifies freshness instead of writing.
+records. The companion `thrift_generator check src/ping.thrift -o src`
+verifies freshness instead of writing, and `thrift_generator clean -o
+src` sweeps the generated files.
 
 See the [repository README](https://github.com/kpy3/thrift-erl) for
 the IDL language coverage, codegen annotations (`erl.*`) and the

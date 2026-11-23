@@ -25,7 +25,9 @@ in the consumer's `rebar.config`:
 ]}
 ```
 
-Five optional axes mirror the standalone generator's flags and apply
+Every option mirrors the standalone generator's flags and is validated
+by the generator's own normalizer, so a bad config fails with the same
+diagnostic the CLI prints. Besides `out_dir`, five optional axes apply
 only to definitions without an explicit annotation of their own:
 `{repr, record|map|native}` (like `--repr`, the `erl.struct_type`
 default), `{union_type, record|sum}` (like `--union-type`,
@@ -93,10 +95,9 @@ do(State) ->
     {Parsed, _Args} = rebar_state:command_parsed_args(State),
     Check = proplists:get_value(check, Parsed, false),
     Opts = rebar_state:get(State, thrift, []),
-    OutDir = proplists:get_value(out_dir, Opts, "src"),
     case thrift_gen_opts(Opts) of
         {ok, GenOpts} ->
-            run_task(State, Parsed, Check, Opts, OutDir, GenOpts);
+            run_task(State, Parsed, Check, Opts, GenOpts);
         {error, Reason} ->
             {error, {?MODULE, Reason}}
     end.
@@ -106,7 +107,6 @@ do(State) ->
     proplists:proplist(),
     boolean(),
     proplists:proplist(),
-    file:filename_all(),
     thrift_generator:generate_opts()
 ) -> {ok, rebar_state:t()} | {error, {rebar3_thrift, term()}}.
 %% `rebar3 thrift clean' reaches this provider as the global `task'
@@ -114,7 +114,8 @@ do(State) ->
 %% default-namespace provider wins resolution over the thrift
 %% namespace, so the namespaced clean provider is hook-only (see
 %% rebar3_thrift_clean)
-run_task(State, Parsed, Check, Opts, OutDir, GenOpts) ->
+run_task(State, Parsed, Check, Opts, GenOpts) ->
+    OutDir = maps:get(out_dir, GenOpts),
     case proplists:get_all_values(task, Parsed) of
         [] ->
             Files = proplists:get_value(files, Opts, []),
@@ -125,11 +126,11 @@ run_task(State, Parsed, Check, Opts, OutDir, GenOpts) ->
                 _ ->
                     Action =
                         case Check of
-                            true -> fun check/3;
-                            false -> fun generate/3
+                            true -> fun check/2;
+                            false -> fun generate/2
                         end,
                     try
-                        lists:foreach(fun(File) -> Action(File, OutDir, GenOpts) end, Files),
+                        lists:foreach(fun(File) -> Action(File, GenOpts) end, Files),
                         {ok, State}
                     catch
                         throw:{thrift_error, Reason} -> {error, {?MODULE, Reason}}
@@ -148,49 +149,34 @@ run_task(State, Parsed, Check, Opts, OutDir, GenOpts) ->
             {error, {?MODULE, {unknown_args, Other}}}
     end.
 
-%% The {thrift, [...]} axes mirror the standalone generator's option
-%% flags; the values are config terms, so each is checked here — an
-%% invalid atom (or a string like "map") must fail the provider with a
-%% rendered message, not crash rebar3 with a raw badarg.
+%% The {thrift, [...]} section is the generator's options map plus the
+%% host-only `files' key: the proplist becomes a map (sans `files') and
+%% is validated by thrift_generator_options:normalize/1, so a config
+%% typo or an invalid value (including a string like "map" where the
+%% atom is meant) fails the provider with the exact reason — and the
+%% same rendered message — the library and the CLI report.
 
 -doc """
-Reads the five option axes of the `{thrift, [...]}` config section into
-the `thrift_generator:generate_opts()` map: `{repr, _}`, `{union_type,
-_}`, `{set, _}`, `{typedef_type, _}` and `{enum_case, _}`, each
-defaulting to the generator's built-in value. Unknown axis values (including config
-terms of the wrong type, e.g. the string `"map"`) answer `{error,
-{bad_opt, {Key, Value, Allowed}}}`.
+Reads the `{thrift, [...]}` config section into the generator's
+normalized `thrift_generator:generate_opts()` map: the host-only
+`files` key is removed, every remaining entry is validated through
+`thrift_generator_options:normalize/1` and the fully-defaulted map —
+including `out_dir` (`"src"` by default) — is returned. A config typo
+answers `{error, {unknown_option, Key}}`; an invalid value answers
+`{error, {bad_option, {Key, Value, Allowed}}}`.
 """.
 -spec thrift_gen_opts(proplists:proplist()) ->
-    {ok, thrift_generator:generate_opts()} | {error, {bad_opt, {atom(), term(), [atom()]}}}.
+    {ok, thrift_generator:generate_opts()}
+    | {error, {unknown_option, atom()} | {bad_option, {atom(), term(), [atom()]}}}.
 thrift_gen_opts(Opts) ->
-    Axes = [
-        {repr, [record, map, native], record},
-        {union_type, [record, sum], record},
-        {set, [list, sets, ordset], list},
-        {typedef_type, [alias, nominal], alias},
-        {enum_case, [preserve, lower], preserve}
-    ],
-    try
-        {ok, maps:from_list([{Key, axis_value(Key, Allowed, Default, Opts)} || {Key, Allowed, Default} <- Axes])}
-    catch
-        throw:{bad_opt, _} = Bad -> {error, Bad}
-    end.
+    thrift_generator_options:normalize(maps:from_list(proplists:delete(files, Opts))).
 
--spec axis_value(atom(), [atom(), ...], atom(), proplists:proplist()) -> atom().
-axis_value(Key, Allowed, Default, Opts) ->
-    Value = proplists:get_value(Key, Opts, Default),
-    case lists:member(Value, Allowed) of
-        true -> Value;
-        false -> throw({bad_opt, {Key, Value, Allowed}})
-    end.
-
--spec generate(file:filename_all(), file:filename_all(), thrift_generator:generate_opts()) -> ok.
-generate(File, OutDir, GenOpts) ->
-    case thrift_generator:generate(File, OutDir, GenOpts) of
+-spec generate(file:filename_all(), thrift_generator:generate_opts()) -> ok.
+generate(File, GenOpts) ->
+    case thrift_generator:generate(File, GenOpts) of
         {ok, Generated} ->
             rebar_api:info("~ts: generated ~b module(s) in ~ts", [
-                File, length(Generated), OutDir
+                File, length(Generated), maps:get(out_dir, GenOpts)
             ]),
             ok;
         {error, Reason} ->
@@ -216,11 +202,13 @@ clean(OutDir) ->
             throw({thrift_error, Reason})
     end.
 
--spec check(file:filename_all(), file:filename_all(), thrift_generator:generate_opts()) -> ok.
-check(File, OutDir, GenOpts) ->
-    case thrift_generator:check(File, OutDir, GenOpts) of
+-spec check(file:filename_all(), thrift_generator:generate_opts()) -> ok.
+check(File, GenOpts) ->
+    case thrift_generator:check(File, GenOpts) of
         ok ->
-            rebar_api:info("~ts: generated sources are up to date in ~ts", [File, OutDir]),
+            rebar_api:info("~ts: generated sources are up to date in ~ts", [
+                File, maps:get(out_dir, GenOpts)
+            ]),
             ok;
         {error, {stale, Paths}} ->
             rebar_api:debug("~ts: stale generated sources", [File]),
@@ -240,11 +228,6 @@ format_error({unknown_args, Args}) ->
     io_lib:format("unrecognized arguments: ~ts (usage: rebar3 thrift [--check] [clean])", [
         string:join(Args, " ")
     ]);
-format_error({bad_opt, {Key, Value, Allowed}}) ->
-    io_lib:format(
-        "invalid value ~0p for the {thrift, ~0p} option (expected one of: ~ts)",
-        [Value, Key, lists:join(" | ", [atom_to_list(A) || A <- Allowed])]
-    );
 format_error(Reason) ->
     unicode:characters_to_list(
         lists:flatten(thrift_generator_cli:format_error(Reason))
