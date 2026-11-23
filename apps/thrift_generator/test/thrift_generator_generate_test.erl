@@ -12,7 +12,8 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
-%% File-level tests for generate/3 and check/3: real IDL files in a
+%% File-level tests for the generate and check frontends (legacy /3
+%% forms and the new /1,/2 options-map forms): real IDL files in a
 %% temp directory, artifacts on disk, drift detection and the
 %% unchanged-file write skip. In-memory pipeline coverage lives in
 %% thrift_generator_test.
@@ -23,11 +24,13 @@
 -include_lib("kernel/include/file.hrl").
 
 -export([
+    options_normalize_test/0,
     generate_check_up_to_date_test/0,
     generate_check_modified_file_test/0,
     generate_check_missing_file_test/0,
     generate_check_repr_drift_test/0,
     generate_check_option_axes_test/0,
+    generate_and_check_new_api_test/0,
     generate_bad_opts_test/0,
     generate_skips_unchanged_test/0,
     clean_removes_generated_files_test/0,
@@ -42,6 +45,91 @@
     "struct Point { 1: required i32 x, 2: optional string note }\n"
     "service Pinger { void ping() }\n"
 ).
+
+%% The shared options contract: normalize/1 fills every default, keeps
+%% valid overrides (string or binary out_dir), and reports the first
+%% error deterministically (keys checked in sorted order, so a bad
+%% value on a key sorting before an unknown key wins).
+
+options_normalize_test() ->
+    Default = #{
+        out_dir => "src",
+        repr => record,
+        union_type => record,
+        set => list,
+        typedef_type => alias,
+        enum_case => preserve
+    },
+    ?assertEqual({ok, Default}, thrift_generator_options:normalize(#{})),
+    ?assertEqual(
+        {ok, Default#{out_dir => "gen"}},
+        thrift_generator_options:normalize(#{out_dir => "gen"})
+    ),
+    ?assertEqual(
+        {ok, Default#{out_dir => <<"gen">>}},
+        thrift_generator_options:normalize(#{out_dir => <<"gen">>})
+    ),
+    ?assertEqual({ok, Default#{repr => map}}, thrift_generator_options:normalize(#{repr => map})),
+    ?assertEqual(
+        {ok, Default#{union_type => sum}},
+        thrift_generator_options:normalize(#{union_type => sum})
+    ),
+    ?assertEqual({ok, Default#{set => sets}}, thrift_generator_options:normalize(#{set => sets})),
+    ?assertEqual(
+        {ok, Default#{set => ordset}},
+        thrift_generator_options:normalize(#{set => ordset})
+    ),
+    ?assertEqual(
+        {ok, Default#{typedef_type => nominal}},
+        thrift_generator_options:normalize(#{typedef_type => nominal})
+    ),
+    ?assertEqual(
+        {ok, Default#{enum_case => lower}},
+        thrift_generator_options:normalize(#{enum_case => lower})
+    ),
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        thrift_generator_options:normalize(#{bogus => true})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {repr, tuple, [record, map, native]}}},
+        thrift_generator_options:normalize(#{repr => tuple})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {union_type, tagged, [record, sum]}}},
+        thrift_generator_options:normalize(#{union_type => tagged})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {set, gb_sets, [list, sets, ordset]}}},
+        thrift_generator_options:normalize(#{set => gb_sets})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {typedef_type, record, [alias, nominal]}}},
+        thrift_generator_options:normalize(#{typedef_type => record})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {enum_case, upper, [preserve, lower]}}},
+        thrift_generator_options:normalize(#{enum_case => upper})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {out_dir, 42, [string, binary]}}},
+        thrift_generator_options:normalize(#{out_dir => 42})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {out_dir, ["/x" | 42], [string, binary]}}},
+        thrift_generator_options:normalize(#{out_dir => ["/x" | 42]})
+    ),
+    %% deterministic first error: the bad enum_case (sorts first) is
+    %% reported before the unknown key
+    ?assertEqual(
+        {error, {bad_option, {enum_case, upper, [preserve, lower]}}},
+        thrift_generator_options:normalize(#{enum_case => upper, zzz_typo => true})
+    ),
+    ?assertEqual(
+        {error, {bad_option, {options, atoms, [map]}}},
+        thrift_generator_options:normalize(atoms)
+    ),
+    ok.
 
 generate_check_up_to_date_test() ->
     Dir = tmp_dir(),
@@ -141,28 +229,93 @@ generate_check_option_axes_test() ->
         rm_rf(Dir)
     end.
 
-%% Option validation: only the four known keys with their exact atom
-%% values; anything else — an unknown key, a bad value, a non-map —
-%% fails with badarg before any file is written.
+%% Option validation: unknown keys, bad values and non-map options are
+%% returned as errors (via the shared normalizer) before the loader
+%% runs, and no artifact directory is created.
 
 generate_bad_opts_test() ->
     Dir = tmp_dir(),
     try
         File = write_idl(Dir),
         OutDir = filename:join(Dir, "out"),
-        ?assertError({badarg, #{unknown := 1}}, thrift_generator:generate(File, OutDir, #{unknown => 1})),
-        ?assertError({badarg, {repr, tuple}}, thrift_generator:generate(File, OutDir, #{repr => tuple})),
-        ?assertError(
-            {badarg, {union_type, tagged}}, thrift_generator:generate(File, OutDir, #{union_type => tagged})
+        ?assertEqual(
+            {error, {unknown_option, unknown}},
+            thrift_generator:generate(File, OutDir, #{unknown => 1})
         ),
-        ?assertError({badarg, {set, gb_sets}}, thrift_generator:generate(File, OutDir, #{set => gb_sets})),
-        ?assertError(
-            {badarg, {typedef_type, record}},
+        ?assertNot(filelib:is_dir(OutDir)),
+        ?assertEqual(
+            {error, {bad_option, {repr, tuple, [record, map, native]}}},
+            thrift_generator:generate(File, OutDir, #{repr => tuple})
+        ),
+        ?assertNot(filelib:is_dir(OutDir)),
+        ?assertEqual(
+            {error, {bad_option, {union_type, tagged, [record, sum]}}},
+            thrift_generator:generate(File, OutDir, #{union_type => tagged})
+        ),
+        ?assertNot(filelib:is_dir(OutDir)),
+        ?assertEqual(
+            {error, {bad_option, {set, gb_sets, [list, sets, ordset]}}},
+            thrift_generator:generate(File, OutDir, #{set => gb_sets})
+        ),
+        ?assertNot(filelib:is_dir(OutDir)),
+        ?assertEqual(
+            {error, {bad_option, {typedef_type, record, [alias, nominal]}}},
             thrift_generator:generate(File, OutDir, #{typedef_type => record})
         ),
-        ?assertError({badarg, atoms}, thrift_generator:generate(File, OutDir, atoms)),
+        ?assertNot(filelib:is_dir(OutDir)),
+        ?assertEqual(
+            {error, {bad_option, {out_dir, 42, [string, binary]}}},
+            thrift_generator:generate(File, OutDir, #{out_dir => 42})
+        ),
+        ?assertNot(filelib:is_dir(OutDir)),
+        ?assertEqual(
+            {error, {bad_option, {options, atoms, [map]}}},
+            thrift_generator:generate(File, OutDir, atoms)
+        ),
+        ?assertNot(filelib:is_dir(OutDir)),
+        %% check goes through the same validation
+        ?assertEqual(
+            {error, {unknown_option, unknown}},
+            thrift_generator:check(File, OutDir, #{unknown => 1})
+        ),
+        ?assertNot(filelib:is_dir(OutDir)),
         ok
     after
+        rm_rf(Dir)
+    end.
+
+%% The new /1,/2 forms: generate/2 takes out_dir from the options map,
+%% generate/1 (and check/1) in a temporary working directory default to
+%% ./src, freshness still depends on the exact options, and the /1,/2
+%% artifacts are byte-identical to the transitional /3 output.
+
+generate_and_check_new_api_test() ->
+    Dir = tmp_dir(),
+    {ok, Cwd} = file:get_cwd(),
+    try
+        File = write_idl(Dir),
+        OutOld = filename:join(Dir, "out_old"),
+        OutNew = filename:join(Dir, "out_new"),
+        {ok, OldArtifacts} = thrift_generator:generate(File, OutOld, #{}),
+        {ok, NewArtifacts} = thrift_generator:generate(File, #{out_dir => OutNew}),
+        ?assertEqual(artifact_bytes(OldArtifacts), artifact_bytes(NewArtifacts)),
+        ?assertEqual(ok, thrift_generator:check(File, #{out_dir => OutNew})),
+
+        %% a different repr regenerates different sources: the new check
+        %% form reports them stale the same way check/3 does
+        {error, {stale, Stale}} = thrift_generator:check(File, #{out_dir => OutNew, repr => map}),
+        ?assert(lists:member(filename:join(OutNew, "checkgate_types.erl"), Stale)),
+
+        %% /1 forms from a temporary working directory use ./src
+        WorkDir = filename:join(Dir, "work"),
+        ok = file:make_dir(WorkDir),
+        ok = file:set_cwd(WorkDir),
+        {ok, _} = thrift_generator:generate(File),
+        ?assert(filelib:is_file(filename:join("src", "checkgate_types.erl"))),
+        ?assertEqual(ok, thrift_generator:check(File)),
+        ok
+    after
+        ok = file:set_cwd(Cwd),
         rm_rf(Dir)
     end.
 
@@ -250,6 +403,26 @@ write_idl(Dir) ->
 entry_for(Module, Generated) ->
     {value, Entry} = lists:search(fun(E) -> maps:get(module, E) =:= Module end, Generated),
     Entry.
+
+%% Artifact contents keyed by file name, so outputs written to
+%% different directories compare byte-for-byte.
+
+-spec artifact_bytes([#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]) ->
+    #{string() => {ok, binary()} | {error, term()}}.
+artifact_bytes(Artifacts) ->
+    maps:from_list(
+        lists:flatmap(
+            fun(#{module := Module, path := Path} = Entry) ->
+                Base = atom_to_list(Module),
+                [{Base ++ ".erl", file:read_file(Path)}] ++
+                    case maps:get(hrl, Entry, undefined) of
+                        undefined -> [];
+                        HrlPath -> [{Base ++ ".hrl", file:read_file(HrlPath)}]
+                    end
+            end,
+            Artifacts
+        )
+    ).
 
 rm_rf(Dir) ->
     case file:list_dir(Dir) of

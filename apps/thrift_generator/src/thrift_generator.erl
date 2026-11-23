@@ -27,7 +27,7 @@ paths the loader tracks.
 """.
 
 -export([tokens/1, ast/1, parse_file/1, parse_string/1]).
--export([generate/3, check/3, clean/1]).
+-export([generate/1, generate/2, generate/3, check/1, check/2, check/3, clean/1]).
 
 -include("thrift_generator.hrl").
 
@@ -42,11 +42,14 @@ paths the loader tracks.
 
 -export_type([generate_opts/0]).
 
-%% The invocation-wide option axes. Each one applies only to
+%% The invocation-wide option axes, normalized by
+%% thrift_generator_options:normalize/1. Each axis applies only to
 %% definitions without an explicit annotation of its own (`record'
 %% repr, `record' unions, `list' sets and `alias' typedefs inject
-%% nothing — the annotation-free defaults stay as they are).
+%% nothing — the annotation-free defaults stay as they are); `out_dir'
+%% names the directory artifacts are written to (`src' by default).
 -type generate_opts() :: #{
+    out_dir => file:filename_all(),
     repr => record | map | native,
     union_type => record | sum,
     set => list | sets | ordset,
@@ -65,7 +68,8 @@ left untouched, so regenerating an unchanged IDL does not churn mtimes
 (and recompiles).
 
 `Opts` carries the invocation-wide axes; each applies only to
-definitions without an explicit annotation of its own: `repr`
+definitions without an explicit annotation of its own: `out_dir`
+(`"src"`, the default) names the output directory, `repr`
 (`record`, the default, `map` or `native`) for structures and
 exceptions without `erl.struct_type`, `union_type` (`record` or `sum`)
 for unions without `erl.union_type`, `set` (`list`, the default,
@@ -75,27 +79,65 @@ and `enum_case` (`preserve`, the default, or `lower`) for enum members
 without `erl.enum_case`. A file-wide namespace default overrides the
 option for its file.
 
+Invalid options — an unknown key, a bad value, a non-map — are
+returned as `{error, {unknown_option, Key}}` or
+`{error, {bad_option, ...}}` before the IDL is read and before
+anything is written.
+
 Returns the generated modules with their paths (and the include path
 when one was written).
+""".
+-spec generate(file:filename_all(), generate_opts()) ->
+    {ok, [#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]}
+    | {error, term()}.
+generate(ThriftFile, Options) ->
+    with_normalized(Options, fun(Opts) ->
+        generate(ThriftFile, maps:get(out_dir, Opts), maps:remove(out_dir, Opts))
+    end).
+
+-doc "Generates with default options; artifacts are written to `./src`.".
+-spec generate(file:filename_all()) ->
+    {ok, [#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]}
+    | {error, term()}.
+generate(ThriftFile) ->
+    generate(ThriftFile, #{}).
+
+-doc """
+Transitional form kept while frontends migrate: like `generate/2`, but
+the output directory is the explicit `OutDir` argument instead of the
+`out_dir` option (an `out_dir` key in `Opts` is ignored here). Will be
+removed once the CLI and the rebar3 plugin consume `generate/1,2`.
 """.
 -spec generate(file:filename_all(), file:filename_all(), generate_opts()) ->
     {ok, [#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]}
     | {error, term()}.
-generate(ThriftFile, OutDir, Opts) ->
-    with_sources(ThriftFile, Opts, fun(Sources) ->
-        ok = filelib:ensure_dir(filename:join(OutDir, "x")),
-        write_all(Sources, OutDir, [])
+generate(ThriftFile, OutDir, Options) ->
+    with_normalized(Options, fun(Opts) ->
+        with_sources(ThriftFile, maps:remove(out_dir, Opts), fun(Sources) ->
+            ok = filelib:ensure_dir(filename:join(OutDir, "x")),
+            write_all(Sources, OutDir, [])
+        end)
     end).
 
+%% Options enter only through the shared normalizer: validation errors
+%% are returned before the loader runs, so a bad options map never
+%% causes a partial write.
+-spec with_normalized(term(), fun((generate_opts()) -> {ok, term()} | {error, term()})) ->
+    {ok, term()} | {error, term()}.
+with_normalized(Options, Fun) ->
+    case thrift_generator_options:normalize(Options) of
+        {ok, Opts} -> Fun(Opts);
+        {error, Reason} -> {error, Reason}
+    end.
+
 %% Internal: the generate pipeline without writing, shared by
-%% generate/3 and check/3 through with_sources/3.
--spec sources(file:filename_all(), generate_opts()) ->
+%% generate and check through with_sources/3.
+-spec sources(file:filename_all(), thrift_generator_semantic:generate_semantic_opts()) ->
     {ok, [thrift_generator_emitter:source()]} | {error, term()}.
 sources(ThriftFile, Opts) ->
     maybe
-        SemanticOpts ?= semantic_opts(Opts),
         {ok, Loaded} ?= thrift_generator_loader:load(ThriftFile),
-        {ok, Model} ?= thrift_generator_semantic:analyze(Loaded, SemanticOpts),
+        {ok, Model} ?= thrift_generator_semantic:analyze(Loaded, Opts),
         {ok, thrift_generator_emitter:sources(Model)}
     else
         {error, Reason} -> {error, Reason};
@@ -104,19 +146,40 @@ sources(ThriftFile, Opts) ->
 
 -doc """
 CI gate: verifies the generated sources are up to date without
-writing. Runs the same pipeline as `generate/3` and requires every
-artifact to already exist in `OutDir` with the exact content this
-input would produce. Returns `ok`, or `{error, {stale, Paths}}` with
-the drifted (missing or differing) files.
+writing. Runs the same pipeline as `generate/2` and requires every
+artifact to already exist in the `out_dir` from `Opts` (default
+`"src"`) with the exact content this input would produce. Returns `ok`,
+or `{error, {stale, Paths}}` with the drifted (missing or differing)
+files.
+""".
+-spec check(file:filename_all(), generate_opts()) ->
+    ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
+check(ThriftFile, Options) ->
+    with_normalized(Options, fun(Opts) ->
+        check(ThriftFile, maps:get(out_dir, Opts), maps:remove(out_dir, Opts))
+    end).
+
+-doc "Checks freshness with default options against `./src`.".
+-spec check(file:filename_all()) -> ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
+check(ThriftFile) ->
+    check(ThriftFile, #{}).
+
+-doc """
+Transitional form kept while frontends migrate: like `check/2`, but the
+output directory is the explicit `OutDir` argument instead of the
+`out_dir` option. Will be removed once the CLI and the rebar3 plugin
+consume `check/1,2`.
 """.
 -spec check(file:filename_all(), file:filename_all(), generate_opts()) ->
     ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
-check(ThriftFile, OutDir, Opts) ->
-    with_sources(ThriftFile, Opts, fun(Sources) ->
-        case stale_sources(Sources, OutDir, []) of
-            [] -> ok;
-            Stale -> {error, {stale, lists:reverse(Stale)}}
-        end
+check(ThriftFile, OutDir, Options) ->
+    with_normalized(Options, fun(Opts) ->
+        with_sources(ThriftFile, maps:remove(out_dir, Opts), fun(Sources) ->
+            case stale_sources(Sources, OutDir, []) of
+                [] -> ok;
+                Stale -> {error, {stale, lists:reverse(Stale)}}
+            end
+        end)
     end).
 
 with_sources(ThriftFile, Opts, Fun) ->
@@ -209,39 +272,6 @@ stale_path(Path, Source, Acc) ->
 
 disk_differs(Path, Source) ->
     file:read_file(Path) =/= {ok, Source}.
-
-%% Validates the public option axes of generate/3, sources/2 and
-%% check/3: only the five known keys, each with its exact atom values.
-%% Unknown keys are rejected — a typo like `typedef' would otherwise
-%% silently fall back to the built-in defaults. (No empty-map clause:
-%% the `#{}' pattern matches ANY map, so the key check below must see
-%% every input.)
-
--spec semantic_opts(term()) -> generate_opts().
-semantic_opts(Opts) when is_map(Opts) ->
-    case maps:keys(Opts) -- [repr, union_type, set, typedef_type, enum_case] of
-        [] ->
-            #{
-                repr => axis_opt(repr, [record, map, native], Opts, record),
-                union_type => axis_opt(union_type, [record, sum], Opts, record),
-                set => axis_opt(set, [list, sets, ordset], Opts, list),
-                typedef_type => axis_opt(typedef_type, [alias, nominal], Opts, alias),
-                enum_case => axis_opt(enum_case, [preserve, lower], Opts, preserve)
-            };
-        _ ->
-            erlang:error({badarg, Opts})
-    end;
-semantic_opts(Opts) ->
-    erlang:error({badarg, Opts}).
-
--spec axis_opt(repr | union_type | set | typedef_type | enum_case, [atom()], generate_opts(), atom()) ->
-    atom().
-axis_opt(Key, Allowed, Opts, Default) ->
-    Value = maps:get(Key, Opts, Default),
-    case is_atom(Value) andalso lists:member(Value, Allowed) of
-        true -> Value;
-        false -> erlang:error({badarg, {Key, Value}})
-    end.
 
 write_all([#{module := Module, source := Source} = Entry | Rest], OutDir, Acc) ->
     Base = atom_to_list(Module),
