@@ -117,8 +117,8 @@ A non-map options argument is not a positional protocol: it answers
     {ok, binary()} | {error, term()}.
 encode(Desc, Value, Options) when is_map(Options) ->
     case thrift_runtime_options:codec_options(Options, encode) of
-        {ok, #{protocol := Protocol, strict := Strict}} ->
-            encode_opts(Desc, Value, Protocol, #{strict => Strict});
+        {ok, #{protocol := Mod, strict := Strict}} ->
+            encode_opts(Desc, Value, Mod, #{strict => Strict});
         {error, _} = Error ->
             Error
     end;
@@ -126,27 +126,23 @@ encode(_Desc, _Value, Options) ->
     bad_options(Options).
 
 %% The protocol-resolved encode: strict check first, then the wire
-%% codec. The one-pass binary fast path retries through the two-pass
-%% path on any failure so both answer the identical error for genuinely
-%% bad values and the fast path can keep declining shapes it cannot
-%% represent (mixed nesting).
+%% codec. The options normalization already resolved the protocol to its
+%% module, so this path dispatches on the module directly. The one-pass
+%% binary fast path retries through the two-pass path on any failure so
+%% both answer the identical error for genuinely bad values and the fast
+%% path can keep declining shapes it cannot represent (mixed nesting).
 
--spec encode_opts(thrift_runtime_binary:type_desc(), term(), protocol(), map()) ->
+-spec encode_opts(thrift_runtime_binary:type_desc(), term(), module(), map()) ->
     {ok, binary()} | {error, term()}.
-encode_opts(Desc, Value, Protocol, Opts) ->
-    case protocol_module(Protocol) of
-        {ok, Mod} ->
-            case strict_check(Desc, Value, Opts) of
-                ok ->
-                    case encode_wire(Desc, Value, Mod) of
-                        {ok, IoData} -> {ok, iolist_to_binary(IoData)};
-                        {error, Reason} -> {error, Reason}
-                    end;
-                {error, _} = Error ->
-                    Error
+encode_opts(Desc, Value, Mod, Opts) ->
+    case strict_check(Desc, Value, Opts) of
+        ok ->
+            case encode_wire(Desc, Value, Mod) of
+                {ok, IoData} -> {ok, iolist_to_binary(IoData)};
+                {error, Reason} -> {error, Reason}
             end;
-        {error, Reason} ->
-            {error, Reason}
+        {error, _} = Error ->
+            Error
     end.
 
 -spec strict_check(thrift_runtime_binary:type_desc(), term(), map()) -> ok | {error, term()}.
@@ -217,13 +213,8 @@ A non-map options argument is not a positional repr: it answers
     {ok, term()} | {error, term()}.
 decode(Desc, Binary, Options) when is_map(Options) ->
     case thrift_runtime_options:codec_options(Options, decode) of
-        {ok, #{protocol := Protocol, repr := Repr}} ->
-            case protocol_module(Protocol) of
-                {ok, Mod} ->
-                    decode_fast(Mod, Desc, Binary, Repr);
-                {error, _} = Error ->
-                    Error
-            end;
+        {ok, #{protocol := Mod, repr := Repr}} ->
+            decode_fast(Mod, Desc, Binary, Repr);
         {error, _} = Error ->
             Error
     end;

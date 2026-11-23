@@ -76,7 +76,9 @@ Encode accepts exactly `protocol` and `strict` (default `binary`,
 `false`); decode accepts exactly `protocol` and `repr`, with `repr`
 required — the advanced facade has no schema module from which to infer
 a default representation. The `protocol` value resolves through
-`thrift_runtime:protocol_module/1` and `repr` through
+`thrift_runtime:protocol_module/1` and the normalized map carries the
+resolved module, so the facade dispatches on it directly without a
+second resolution; `repr` validates through
 `thrift_runtime:repr_supported/1`, so `bad_protocol`, `bad_repr` and
 `unsupported_repr` keep their existing forms. A non-map argument is a
 bad options value, not a protocol: `{error, {bad_option, {options,
@@ -148,8 +150,8 @@ with_repr(Options, Normalized) ->
 with_protocol(Options, Normalized) ->
     Protocol = maps:get(protocol, Options, binary),
     case thrift_runtime:protocol_module(Protocol) of
-        {ok, _Mod} ->
-            {ok, Normalized#{protocol => Protocol}};
+        {ok, Mod} ->
+            {ok, Normalized#{protocol => Mod}};
         {error, _} = Error ->
             Error
     end.

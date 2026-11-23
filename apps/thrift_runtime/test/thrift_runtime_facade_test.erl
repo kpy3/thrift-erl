@@ -27,6 +27,7 @@
     facade_roundtrip_test/0,
     facade_options_map_test/0,
     facade_options_validation_test/0,
+    facade_protocol_resolved_once_test/0,
     facade_strict_decode_test/0,
     facade_no_positional_legacy_test/0,
     facade_convert_test/0,
@@ -173,18 +174,50 @@ facade_options_validation_test() ->
         {error, {bad_repr, maps}},
         thrift_runtime:decode(Desc, Bin, #{repr => maps})
     ),
-    %% normalization fills the defaults and keeps valid entries
+    %% normalization fills the defaults, resolves the protocol once and
+    %% keeps valid entries
     ?assertEqual(
-        {ok, #{protocol => binary, strict => false}},
+        {ok, #{protocol => thrift_runtime_binary, strict => false}},
         thrift_runtime_options:codec_options(#{}, encode)
     ),
     ?assertEqual(
-        {ok, #{protocol => compact, strict => true}},
+        {ok, #{protocol => thrift_runtime_compact, strict => true}},
         thrift_runtime_options:codec_options(#{protocol => compact, strict => true}, encode)
     ),
     ?assertEqual(
-        {ok, #{protocol => binary, repr => record}},
+        {ok, #{protocol => thrift_runtime_binary, repr => record}},
         thrift_runtime_options:codec_options(#{repr => record}, decode)
+    ),
+    ok.
+
+%% The normalized options carry the resolved protocol module, so the
+%% facade dispatches on the module directly instead of resolving the axis
+%% a second time. The public option vocabulary is unchanged — callers
+%% still name `binary'/`compact'/`json' or an implementation module — and
+%% the axis errors keep their existing forms.
+
+facade_protocol_resolved_once_test() ->
+    Desc = point_desc(),
+    Value = {point, 1, 2},
+    ?assertEqual(
+        {ok, #{protocol => thrift_runtime_json, strict => false}},
+        thrift_runtime_options:codec_options(#{protocol => json}, encode)
+    ),
+    ?assertEqual(
+        {ok, #{protocol => thrift_runtime_compact, repr => map}},
+        thrift_runtime_options:codec_options(#{protocol => compact, repr => map}, decode)
+    ),
+    %% an already-resolved module names the axis itself: normalization is
+    %% idempotent on it and the facade routes the call to that module
+    {ok, Compact} = thrift_runtime:encode(Desc, Value, #{protocol => compact}),
+    ?assertEqual(
+        {ok, #{x => 1, y => 2}},
+        thrift_runtime:decode(Desc, Compact, #{protocol => thrift_runtime_compact, repr => map})
+    ),
+    %% bad axis values still answer through the facade, before any wire work
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        thrift_runtime_options:codec_options(#{protocol => <<"binary">>}, encode)
     ),
     ok.
 
