@@ -290,13 +290,32 @@ typedef_type_of(_) -> skip.
 %% after it: once a module's typedefs are resolved, its index entry holds
 %% the resolved bodies, so constant checking and throws validation follow
 %% typedef chains through resolved references instead of resolving the
-%% original spellings again. Modules not analyzed yet keep their parsed
-%% bodies (references into them fail validation anyway).
+%% original spellings again. Modules not analyzed yet (the root, from its
+%% includes' point of view — an include may reference the root's
+%% definitions by module key) keep their parsed bodies;
+%% typedef_body/3 normalizes those on demand in the OWNING module's
+%% context.
 
 -spec publish_typedefs([#tg_typedef{}], #ctx{}) -> #ctx{}.
 publish_typedefs(Typedefs, Ctx) ->
     Resolved = #{T#tg_typedef.name => T#tg_typedef.type || T <- Typedefs},
     Ctx#ctx{all_typedefs = (Ctx#ctx.all_typedefs)#{Ctx#ctx.module => Resolved}}.
+
+%% One typedef body from the index, normalized for chain following:
+%% entries of an already analyzed module are resolved, entries of a
+%% module not analyzed yet are parsed bodies and resolve on demand — in
+%% the OWNING module's context, where the body's plain names live, never
+%% in the consuming module's. Answers `error` when the name is not a
+%% typedef of the module at all.
+
+-spec typedef_body(binary(), binary(), #ctx{}) -> thrift_type() | resolved_thrift_type() | error.
+typedef_body(Module, Name, Ctx) ->
+    case maps:get(Module, Ctx#ctx.all_typedefs, #{}) of
+        #{Name := Body} ->
+            resolve_model_type(Body, Ctx#ctx{module = Module});
+        _ ->
+            error
+    end.
 
 %%--------------------------------------------------------------------
 %% Module analysis
@@ -913,18 +932,20 @@ analyze_const(Node, {Acc, Ctx}) ->
 
 -spec check_value(thrift_type() | resolved_thrift_type(), const_value(), #ctx{}) -> ok | {error, binary()}.
 check_value({resolved_ref, Mod, Name, Ann}, Value, Ctx) ->
-    case maps:find(Name, maps:get(Mod, Ctx#ctx.all_typedefs, #{})) of
-        {ok, Target} ->
-            check_value(Target, Value, Ctx);
+    case typedef_body(Mod, Name, Ctx) of
         error ->
-            check_named_value(Mod, Name, Ann, Value, Ctx)
+            check_named_value(Mod, Name, Ann, Value, Ctx);
+        Target ->
+            check_value(Target, Value, Ctx)
     end;
 check_value({ref, Ref, Ann}, Value, Ctx) ->
-    case local_typedef_target(Ref, Ctx) of
-        {ok, Target} ->
-            check_value(Target, Value, Ctx);
+    %% raw spelling of an unresolved reference (failing models): local
+    %% typedefs expand at home, the consuming module being the owner here
+    case typedef_body(Ctx#ctx.module, Ref, Ctx) of
         error ->
-            check_named_value(Ctx#ctx.module, Ref, Ann, Value, Ctx)
+            check_named_value(Ctx#ctx.module, Ref, Ann, Value, Ctx);
+        Target ->
+            check_value(Target, Value, Ctx)
     end;
 check_value({base, bool, _}, Value, _Ctx) when is_boolean(Value) ->
     ok;
@@ -999,10 +1020,6 @@ check_each(Type, [Value | Rest], Ctx) ->
         Error ->
             Error
     end.
-
--spec local_typedef_target(binary(), #ctx{}) -> {ok, thrift_type()} | error.
-local_typedef_target(Ref, Ctx) ->
-    maps:find(Ref, maps:get(Ctx#ctx.module, Ctx#ctx.all_typedefs, #{})).
 
 %% -- services --------------------------------------------------------
 
@@ -1220,11 +1237,11 @@ typedef_ref_kind(Module, Name, Visited, Ctx) ->
         #{{Module, Name} := true} ->
             error;
         _ ->
-            case maps:get(Module, Ctx#ctx.all_typedefs, #{}) of
-                #{Name := Body} ->
-                    typedef_body_kind(Body, Visited#{{Module, Name} => true}, Ctx);
-                _ ->
-                    error
+            case typedef_body(Module, Name, Ctx) of
+                error ->
+                    error;
+                Body ->
+                    typedef_body_kind(Body, Visited#{{Module, Name} => true}, Ctx)
             end
     end.
 
