@@ -314,17 +314,17 @@ generate_default_out_dir_test() ->
         rm_rf(Dir)
     end.
 
-%% The /2 artifacts match the pre-Series-2 fixture output: the fixture
-%% files checked in next to this suite were generated with the Series-1
-%% API (positional out dir) before the options unification, and the
-%% emitter has not changed since. Both sides are compared as parsed
-%% forms with positions and map-field order normalized away: the
-%% project's eunit runs under cover, and a cover-compiled generator beam
-%% emits map literals in a different field order than a plain-compiled
-%% one (the compiler's maps:from_list-to-literal rewrite does not run on
-%% cover's recompile) — semantically irrelevant, so the pin ignores
-%% field order but still compares every form, attribute, clause and
-%% literal exactly.
+%% The /2 artifacts match the fixture output: the fixture files checked
+%% in next to this suite were generated with the Series-1 API
+%% (positional out dir) before the options unification; the Series-3
+%% unlinked client start refreshed the client fixture. Both sides are
+%% compared as parsed forms with positions and map-field order
+%% normalized away: the project's eunit runs under cover, and a
+%% cover-compiled generator beam emits map literals in a different
+%% field order than a plain-compiled one (the compiler's
+%% maps:from_list-to-literal rewrite does not run on cover's recompile)
+%% — semantically irrelevant, so the pin ignores field order but still
+%% compares every form, attribute, clause and literal exactly.
 
 generate_matches_fixture_test() ->
     Dir = tmp_dir(),
@@ -482,9 +482,10 @@ artifact_bytes(Artifacts) ->
         )
     ).
 
-%% The pre-Series-2 fixture artifacts parsed to normalized abstract
-%% format, keyed by file name, for the pin in
-%% generate_matches_fixture_test/0.
+%% The fixture artifacts parsed to normalized abstract format, keyed by
+%% file name, for the pin in generate_matches_fixture_test/0. The client
+%% fixture carries the Series-3 `start/1` addition; the rest is
+%% Series-1 output, unchanged since.
 
 -spec fixture_forms() -> #{string() => term()}.
 fixture_forms() ->

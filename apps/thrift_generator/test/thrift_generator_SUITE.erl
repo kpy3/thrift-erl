@@ -68,6 +68,7 @@
     generated_loopback_framed/1,
     standalone_generate_check_clean/1,
     getting_started_example/1,
+    generated_client_start_unlinked/1,
     generated_map_mode/1,
     generated_native_repr/1,
     generated_set_impl/1
@@ -118,6 +119,7 @@ all() ->
         generated_loopback_framed,
         standalone_generate_check_clean,
         getting_started_example,
+        generated_client_start_unlinked,
         generated_map_mode,
         generated_native_repr,
         generated_set_impl
@@ -1909,6 +1911,98 @@ getting_started_example(Config) ->
         end
     after
         ok = ping_api_ping_server:stop(Server)
+    end.
+
+%% The generated client's unlinked `start/1`: same options map as
+%% `start_link/1`, but no link to the caller — a dying caller leaves the
+%% client alive and callable, unlike the linked variant.
+
+-spec generated_client_start_unlinked(ct:config()) -> ok.
+generated_client_start_unlinked(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    Path = write_snippet(
+        Config,
+        "start_unlinked.thrift",
+        <<
+            "namespace erl start.unlink\n"
+            "struct PingRequest { 1: required string message }\n"
+            "struct PingReply { 1: required string message }\n"
+            "service Ping { PingReply ping(1: PingRequest request) }\n"
+        >>
+    ),
+    {ok, _} = thrift_generator:generate(Path, #{out_dir => PrivDir}),
+    lists:foreach(
+        fun(File) ->
+            {ok, Mod, Beam} = compile:file(filename:join(PrivDir, File), [binary, {i, PrivDir}]),
+            {module, Mod} = code:load_binary(Mod, File, Beam)
+        end,
+        [
+            "start_unlink_types.erl",
+            "start_unlink_ping_client.erl",
+            "start_unlink_ping_server.erl",
+            "start_unlink_ping_handler.erl"
+        ]
+    ),
+    ok = file:write_file(
+        filename:join(PrivDir, "start_unlink_handler.erl"),
+        <<
+            "-module(start_unlink_handler).\n"
+            "-behaviour(start_unlink_ping_handler).\n"
+            "\n"
+            "-export([ping/1]).\n"
+            "\n"
+            "ping({start_unlink_ping_request, Msg}) ->\n"
+            "    {ok, {start_unlink_ping_reply, <<\"pong: \", Msg/binary>>}}.\n"
+        >>
+    ),
+    {ok, start_unlink_handler, HandlerBeam} = compile:file(
+        filename:join(PrivDir, "start_unlink_handler.erl"), [binary, {i, PrivDir}]
+    ),
+    {module, start_unlink_handler} = code:load_binary(
+        start_unlink_handler, "start_unlink_handler.erl", HandlerBeam
+    ),
+    {ok, Server} = start_unlink_ping_server:start_link(#{port => 0, handler => start_unlink_handler}),
+    try
+        {ok, Port} = start_unlink_ping_server:port(Server),
+        Opts = #{host => "127.0.0.1", port => Port},
+        %% start/1 links nothing: the caller is absent from the client's links
+        {ok, Client} = start_unlink_ping_client:start(Opts),
+        {links, Links} = process_info(Client, links),
+        ?assertNot(lists:member(self(), Links)),
+        ?assertEqual(
+            {ok, {start_unlink_ping_reply, <<"pong: hi">>}},
+            start_unlink_ping_client:ping(Client, {start_unlink_ping_request, <<"hi">>})
+        ),
+        %% a dying caller leaves the unlinked client alive and callable
+        Parent = self(),
+        {Spawner, Ref} = spawn_monitor(fun() ->
+            {ok, C2} = start_unlink_ping_client:start(Opts),
+            Parent ! {unlinked_client, C2},
+            receive
+                stop -> ok
+            end
+        end),
+        C2 =
+            receive
+                {unlinked_client, Pid} -> Pid
+            after 5000 -> error(start_unlink_client_timeout)
+            end,
+        {links, Links2} = process_info(C2, links),
+        ?assertNot(lists:member(Spawner, Links2)),
+        exit(Spawner, kill),
+        receive
+            {'DOWN', Ref, process, Spawner, killed} -> ok
+        after 5000 -> error(spawner_down_timeout)
+        end,
+        ?assert(is_process_alive(C2)),
+        ?assertEqual(
+            {ok, {start_unlink_ping_reply, <<"pong: again">>}},
+            start_unlink_ping_client:ping(C2, {start_unlink_ping_request, <<"again">>})
+        ),
+        ok = start_unlink_ping_client:stop(C2),
+        ok = start_unlink_ping_client:stop(Client)
+    after
+        ok = start_unlink_ping_server:stop(Server)
     end.
 
 %% The standalone CLI end to end, over the real prod escript: explicit

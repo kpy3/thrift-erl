@@ -32,6 +32,7 @@
     record_fields_and_defaults_test/0,
     map_representation_test/0,
     handler_callbacks_test/0,
+    client_start_unlinked_test/0,
     source_is_readable_text_test/0,
     types_hrl_content_test/0,
     schema_codec_api_test/0,
@@ -205,6 +206,27 @@ handler_callbacks_test() ->
     ?assertEqual(
         lists:sort([{fire, 1}, {ping, 0}, {fetch, 1}, {area, 2}]),
         lists:sort(t_svc_handler:behaviour_info(callbacks))
+    ),
+    ok.
+
+%% The generated client offers the unlinked `start/1` beside `start_link/1`:
+%% same options map, same `service` insertion, delegating to the runtime's
+%% unlinked start rather than the linked one.
+
+client_start_unlinked_test() ->
+    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Sources = thrift_generator_emitter:sources(Model),
+    ClientSrc = entry_source(t_svc_client, Sources),
+    ?assertMatch({match, _}, re:run(ClientSrc, <<"-export\\(\\[[^\\]]*start/1,[^\\]]*start_link/1">>)),
+    ?assertMatch(
+        {match, _},
+        re:run(ClientSrc, <<"start\\(Opts\\) ->\\n    thrift_runtime_client:start\\(Opts#\\{service =>\\n">>)
+    ),
+    ?assertMatch(
+        nomatch,
+        re:run(ClientSrc, <<"start\\(Opts\\) ->\\n    thrift_runtime_client:start_link">>)
     ),
     ok.
 
