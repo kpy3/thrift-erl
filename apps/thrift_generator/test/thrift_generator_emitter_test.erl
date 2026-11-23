@@ -35,6 +35,8 @@
     source_is_readable_text_test/0,
     types_hrl_content_test/0,
     schema_codec_api_test/0,
+    facade_decode_no_merge_source_test/0,
+    facade_decode_options_paths_test/0,
     schema_default_repr_test/0,
     schema_convert_is_typed_test/0,
     schema_onepass_and_fallback_test/0,
@@ -342,6 +344,46 @@ schema_codec_api_test() ->
     ?assertEqual({ok, Record}, t_types:decode(outer, Bin, #{protocol => binary})),
     %% a non-map options argument answers the documented bad_option error,
     %% it does not crash on map operations
+    ?assertEqual(
+        {error, {bad_option, {options, record, [map]}}},
+        t_types:decode(outer, Bin, record)
+    ),
+    ok.
+
+%% The schema facade's decode/3 must not pay `maps:merge/2` on every
+%% call: the generated source takes one of two paths per struct — an
+%% options map that already carries `repr' matches in the clause head and
+%% passes through unchanged, a map without it receives the schema default
+%% through a literal `Options#{repr => Default}' update.
+
+facade_decode_no_merge_source_test() ->
+    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Sources = thrift_generator_emitter:sources(Model),
+    TypesSrc = entry_source(t_types, Sources),
+    ?assertMatch(nomatch, re:run(TypesSrc, <<"maps:merge">>)),
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"Options = #\\{repr := _\\}">>)),
+    ?assertMatch({match, _}, re:run(TypesSrc, <<"Options#\\{repr => record\\}">>)),
+    ok.
+
+%% Behavior of the two decode paths: a repr-present options map wins over
+%% the schema default, a repr-absent one decodes into the default; the
+%% unknown-type and bad-option clauses keep their answers and order.
+
+facade_decode_options_paths_test() ->
+    generate(),
+    Record = {outer, {inner, <<"x">>}, 42},
+    Map = #{inner => #{name => <<"x">>}, count => 42},
+    {ok, Bin} = t_types:encode(outer, Record),
+    %% repr present: the caller's repr passes through and wins
+    ?assertEqual({ok, Map}, t_types:decode(outer, Bin, #{repr => map})),
+    ?assertEqual({ok, Map}, t_types:decode(outer, Bin, #{protocol => binary, repr => map})),
+    %% repr absent: the schema default fills in
+    ?assertEqual({ok, Record}, t_types:decode(outer, Bin, #{})),
+    ?assertEqual({ok, Record}, t_types:decode(outer, Bin, #{protocol => binary})),
+    %% the error clauses keep their places after the per-struct paths
+    ?assertEqual({error, {unknown_type, missing}}, t_types:decode(missing, Bin, #{repr => map})),
     ?assertEqual(
         {error, {bad_option, {options, record, [map]}}},
         t_types:decode(outer, Bin, record)

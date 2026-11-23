@@ -742,27 +742,54 @@ facade_decode_forms(Structs, Ctx) ->
         [Spec3] ++
         thrift_generator_emitter_syntax:fn_form(
             decode,
-            [
-                erl_syntax:clause(
-                    [
-                        thrift_generator_emitter_syntax:abstract(facade_type(S)),
-                        erl_syntax:variable("Binary"),
-                        erl_syntax:variable("Options")
-                    ],
-                    is_map_guard(erl_syntax:variable("Options")),
-                    [
-                        thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
-                            thrift_generator_emitter_syntax:abstract(struct_ref(S, Ctx)),
+            lists:append([
+                [
+                    %% repr present: the caller's map passes through
+                    %% unchanged, no merge and no copy
+                    erl_syntax:clause(
+                        [
+                            thrift_generator_emitter_syntax:abstract(facade_type(S)),
                             erl_syntax:variable("Binary"),
-                            thrift_generator_emitter_syntax:application(maps, merge, [
-                                thrift_generator_emitter_syntax:abstract(#{repr => facade_default_repr(S)}),
-                                erl_syntax:variable("Options")
-                            ])
-                        ])
-                    ]
-                )
+                            erl_syntax:match_expr(
+                                erl_syntax:variable("Options"),
+                                erl_syntax:map_expr([
+                                    erl_syntax:map_field_exact(
+                                        erl_syntax:atom(repr), erl_syntax:underscore()
+                                    )
+                                ])
+                            )
+                        ],
+                        none,
+                        [facade_decode_call(S, Ctx, erl_syntax:variable("Options"))]
+                    ),
+                    %% repr absent: the schema default goes in through a
+                    %% literal update
+                    erl_syntax:clause(
+                        [
+                            thrift_generator_emitter_syntax:abstract(facade_type(S)),
+                            erl_syntax:variable("Binary"),
+                            erl_syntax:variable("Options")
+                        ],
+                        is_map_guard(erl_syntax:variable("Options")),
+                        [
+                            facade_decode_call(
+                                S,
+                                Ctx,
+                                erl_syntax:map_expr(
+                                    erl_syntax:variable("Options"),
+                                    [
+                                        erl_syntax:map_field_assoc(
+                                            erl_syntax:atom(repr),
+                                            thrift_generator_emitter_syntax:abstract(facade_default_repr(S))
+                                        )
+                                    ]
+                                )
+                            )
+                        ]
+                    )
+                ]
              || S <- Structs
-            ] ++
+            ]) ++
                 [
                     erl_syntax:clause(
                         [
@@ -783,6 +810,18 @@ facade_decode_forms(Structs, Ctx) ->
                     )
                 ]
         ).
+
+%% The facade decode body shared by both option paths: the descriptor is
+%% schema-fixed, only the options argument differs (pass-through vs the
+%% literal default update).
+
+-spec facade_decode_call(#tg_struct{}, #ectx{}, erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
+facade_decode_call(S, Ctx, OptionsTree) ->
+    thrift_generator_emitter_syntax:application(thrift_runtime, decode, [
+        thrift_generator_emitter_syntax:abstract(struct_ref(S, Ctx)),
+        erl_syntax:variable("Binary"),
+        OptionsTree
+    ]).
 
 -spec facade_convert_forms([#tg_struct{}], #ectx{}) -> erl_syntax:forms().
 facade_convert_forms(Structs, Ctx) ->
