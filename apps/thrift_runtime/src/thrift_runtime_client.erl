@@ -26,7 +26,8 @@ without extra keep-alive logic.
 
 `call/4` sends a CALL envelope with the function's parameter struct,
 then waits for exactly one REPLY. The reply payload is decoded per the
-service description: field 0 is the success value, a declared exception
+service description: field 0 is the success value (a `void` function
+answers the bare atom `ok`), a declared exception
 field turns into the wire-level `{error, {exception, Name, Map}}`
 (generated clients convert it to `{error, {exception, Value}}` in the
 value's representation), and a
@@ -105,10 +106,13 @@ both:
 }.
 
 -type call_result() ::
-    {ok, term()}
+    %% a `void' function: the success payload carries no field 0, the
+    %% answer is the bare atom
+    ok
     %% wire level: the exception carries its name; after
     %% `thrift_runtime_record:call_result_from_wire/3' the value alone
     %% remains — its representation identifies the exception.
+    | {ok, term()}
     | {error, {exception, binary(), thrift_runtime_binary:struct_value()}}
     | {error, {exception, thrift_runtime_binary:struct_value()}}
     | {error, {application_exception, binary(), non_neg_integer(), binary()}}
@@ -221,7 +225,7 @@ stop(Pid) ->
 Calls `Function` with `Args` (declaration order, wire representation)
 and waits for a reply.
 
-For `void` functions the success value is `undefined`. Concurrent
+For `void` functions the answer is the bare atom `ok`. Concurrent
 callers queue in order; only the head request is on the wire.
 """.
 -spec call(pid(), binary(), [term()], pos_integer() | infinity) -> call_result().
@@ -657,6 +661,8 @@ decode_reply(Function, SeqId, Info, Message, #state{} = State) ->
     end.
 
 %% Field 0 is success; any declared exception field that appears wins.
+%% Voidness comes from the service description, never from the payload
+%% map being empty.
 
 -spec decode_result(thrift_runtime_service:function_info(), binary(), #state{}) ->
     {ok, call_result()} | {error, term()}.
@@ -667,13 +673,25 @@ decode_result(Info, Tail, #state{} = State) ->
             case exception_field(Values, Exceptions) of
                 {ok, Name, Value} ->
                     {ok, {error, {exception, Name, Value}}};
-                none when map_size(Values) =:= 0 ->
-                    {ok, {ok, undefined}};
                 none ->
-                    {ok, {ok, maps:get(<<"success">>, Values)}}
+                    {ok, result_value(Info, Values)}
             end;
         {error, Reason} ->
             {error, Reason}
+    end.
+
+%% The success answer by the declared `reply' type: a `void' function
+%% (`reply' absent or `undefined') answers the bare atom `ok'; a
+%% non-void payload keeps its historical `{ok, Value}' even when the
+%% payload carries no success field.
+
+-spec result_value(thrift_runtime_service:function_info(), map()) -> call_result().
+result_value(Info, Values) ->
+    case maps:get(reply, Info, undefined) of
+        undefined ->
+            ok;
+        _ReplyType ->
+            {ok, maps:get(<<"success">>, Values, undefined)}
     end.
 
 %% The params payload through the generated hook when the service info

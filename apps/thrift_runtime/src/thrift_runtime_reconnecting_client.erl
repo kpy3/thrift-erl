@@ -153,10 +153,11 @@ through the wrapped client.
 
 Fails immediately with `{error, disconnected}` while the wrapper has
 no connection; exceptions reported by the server come back unchanged
-and keep the connection.
+and keep the connection. A `void` result answers the bare atom `ok`,
+like `thrift_runtime_client:call/4`.
 """.
 -spec call(pid(), binary(), [term()], pos_integer() | infinity) ->
-    {ok, term()} | {error, term()}.
+    ok | {ok, term()} | {error, term()}.
 call(Pid, Function, Args, Timeout) ->
     gen_server:call(Pid, {call, Function, Args, Timeout}, infinity).
 
@@ -206,6 +207,8 @@ handle_call({call, _Function, _Args, _Timeout}, _From, #state{child = undefined}
     {reply, {error, disconnected}, State#state{calls_failed = State#state.calls_failed + 1}};
 handle_call({call, Function, Args, Timeout}, _From, #state{child = Child} = State) ->
     case child_call(fun() -> thrift_runtime_client:call(Child, Function, Args, Timeout) end) of
+        ok ->
+            {reply, ok, State#state{calls_ok = State#state.calls_ok + 1}};
         {ok, Reply} ->
             {reply, {ok, Reply}, State#state{calls_ok = State#state.calls_ok + 1}};
         {error, Reason} ->

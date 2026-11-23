@@ -105,6 +105,25 @@ exceptions_keep_the_connection_test() ->
         ok = thrift_runtime_server:stop(Server)
     end.
 
+%% A void result crosses the wrapper as the bare atom `ok`: counted as a
+%% success on the same connection — not wrapped again as `{ok, ok}', no
+%% reconnect. The non-void shape stays `{ok, Value}'.
+
+void_result_is_bare_ok_test() ->
+    quiet(),
+    Port = free_port(),
+    {ok, Server} = start_server(Port),
+    {ok, Wrapper} = thrift_runtime_reconnecting_client:start_link(opts(Port, #{})),
+    try
+        ?assertEqual(ok, call(Wrapper, <<"ping">>, [])),
+        ?assertMatch(#{connected := true, connects := 1, calls_ok := 1}, stats(Wrapper)),
+        ?assertEqual({ok, 5}, call(Wrapper, <<"add">>, [2, 3])),
+        ?assertMatch(#{connected := true, connects := 1, calls_ok := 2}, stats(Wrapper))
+    after
+        thrift_runtime_reconnecting_client:stop(Wrapper),
+        ok = thrift_runtime_server:stop(Server)
+    end.
+
 oneway_through_wrapper_test() ->
     quiet(),
     Port = free_port(),

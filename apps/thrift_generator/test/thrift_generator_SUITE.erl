@@ -1448,7 +1448,7 @@ rpc_loopback_hooks(Config) ->
                 {error, {exception, <<"Failed">>, #{<<"reason">> := <<"negative id">>}}},
                 thrift_runtime_client:call(Client, <<"fetch">>, [-1], 5000)
             ),
-            ?assertEqual({ok, undefined}, thrift_runtime_client:call(Client, <<"ping">>, [], 5000)),
+            ?assertEqual(ok, thrift_runtime_client:call(Client, <<"ping">>, [], 5000)),
             ?assertEqual(ok, thrift_runtime_client:oneway(Client, <<"fire">>, [42], 5000))
         after
             thrift_runtime_client:stop(Client)
@@ -1485,7 +1485,7 @@ rpc_loopback_fallback(Config) ->
                 {error, {exception, <<"Failed">>, #{<<"reason">> := <<"negative id">>}}},
                 thrift_runtime_client:call(Client, <<"fetch">>, [-1], 5000)
             ),
-            ?assertEqual({ok, undefined}, thrift_runtime_client:call(Client, <<"ping">>, [], 5000))
+            ?assertEqual(ok, thrift_runtime_client:call(Client, <<"ping">>, [], 5000))
         after
             thrift_runtime_client:stop(Client)
         end
@@ -1782,7 +1782,7 @@ generated_loopback(Config, Transport) ->
             host => "127.0.0.1", port => Port, transport => Transport
         }),
         try
-            ?assertEqual({ok, undefined}, main_main_service_client:ping(Client)),
+            ?assertEqual(ok, main_main_service_client:ping(Client)),
             ?assertEqual({ok, 12}, main_main_service_client:area(Client, 3, 4)),
             ?assertEqual(
                 {ok, {shared_inner, <<"5">>}},

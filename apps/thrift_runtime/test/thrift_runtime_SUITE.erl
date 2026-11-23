@@ -25,6 +25,7 @@
 -export([
     framed_calls/1,
     buffered_calls/1,
+    empty_result_payload_uses_service_info/1,
     compact_framed_calls/1,
     compact_buffered_calls/1,
     json_framed_calls/1,
@@ -52,6 +53,7 @@ all() ->
     [
         framed_calls,
         buffered_calls,
+        empty_result_payload_uses_service_info,
         compact_framed_calls,
         compact_buffered_calls,
         json_framed_calls,
@@ -87,7 +89,7 @@ framed_calls(_Config) ->
         ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
         ?assertEqual({ok, <<"hello">>}, call(Client, <<"echo">>, [<<"hello">>])),
         ?assertEqual({ok, 3}, call(Client, <<"size">>, [[<<"a">>, <<"b">>, <<"c">>]])),
-        ?assertEqual({ok, undefined}, call(Client, <<"ping">>, [])),
+        ?assertEqual(ok, call(Client, <<"ping">>, [])),
         ?assertEqual(
             {ok, #{<<"x">> => 2, <<"y">> => 1}}, call(Client, <<"deep">>, [#{<<"x">> => 1, <<"y">> => 2}])
         )
@@ -100,6 +102,27 @@ buffered_calls(_Config) ->
             {ok, #{<<"x">> => 9, <<"y">> => 8}}, call(Client, <<"deep">>, [#{<<"x">> => 8, <<"y">> => 9}])
         )
     end).
+
+%% A reply whose result struct carries no success field: the void
+%% function (declared without a `reply' descriptor) answers the bare
+%% atom `ok', while a non-void function with an equally empty payload
+%% keeps its historical `{ok, undefined}' — voidness comes from the
+%% service description, never from the payload being empty. A raw peer
+%% answers an empty result struct per protocol, something the normal
+%% server stack cannot send for a non-void function (its encoder writes
+%% the success field whenever the function declares a reply type).
+
+empty_result_payload_uses_service_info(_Config) ->
+    lists:foreach(
+        fun(Protocol) ->
+            with_empty_payload_peer(Protocol, fun(Client) ->
+                ?assertEqual(ok, call(Client, <<"ping">>, [])),
+                ?assertEqual({ok, undefined}, call(Client, <<"add">>, [2, 3]))
+            end)
+        end,
+        [thrift_runtime_binary, thrift_runtime_compact, thrift_runtime_json]
+    ),
+    ok.
 
 %% The compact protocol over both transports: the framed path is pure
 %% codec, the buffered path additionally exercises the probe-decode in
@@ -195,7 +218,7 @@ multiplexed_calls(_Config) ->
                 ?assertEqual(
                     {ok, <<"echo2:hello">>}, call(Beta, <<"echo">>, [<<"hello">>])
                 ),
-                ?assertEqual({ok, undefined}, call(Beta, <<"ping">>, [])),
+                ?assertEqual(ok, call(Beta, <<"ping">>, [])),
                 true = register(thrift_runtime_test_sink, self()),
                 try
                     ok = thrift_runtime_client:oneway(Beta, <<"notify">>, [<<"fire">>], 5000),
@@ -485,15 +508,16 @@ client_stats(_Config) ->
     with_server(#{}, fun(Client) ->
         ?assertEqual(#{calls_ok => 0, calls_failed => 0}, thrift_runtime_client:get_stats(Client)),
         ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
+        ?assertEqual(ok, call(Client, <<"ping">>, [])),
         ok = thrift_runtime_client:oneway(Client, <<"notify">>, [<<"x">>], 5000),
         ?assertEqual({error, unknown_function}, call(Client, <<"nope">>, [])),
         ?assertEqual(
             {error, {exception, <<"boom">>, #{<<"message">> => <<"as declared">>}}},
             call(Client, <<"boom">>, [])
         ),
-        ?assertEqual(#{calls_ok => 2, calls_failed => 2}, thrift_runtime_client:get_stats(Client)),
+        ?assertEqual(#{calls_ok => 3, calls_failed => 2}, thrift_runtime_client:get_stats(Client)),
         ?assertEqual(
-            #{calls_ok => 2, calls_failed => 2}, thrift_runtime_client:get_and_reset_stats(Client)
+            #{calls_ok => 3, calls_failed => 2}, thrift_runtime_client:get_and_reset_stats(Client)
         ),
         ?assertEqual(#{calls_ok => 0, calls_failed => 0}, thrift_runtime_client:get_stats(Client))
     end).
@@ -614,7 +638,7 @@ protocol_calls(Overrides) ->
         ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
         ?assertEqual({ok, <<"hello">>}, call(Client, <<"echo">>, [<<"hello">>])),
         ?assertEqual({ok, 3}, call(Client, <<"size">>, [[<<"a">>, <<"b">>, <<"c">>]])),
-        ?assertEqual({ok, undefined}, call(Client, <<"ping">>, [])),
+        ?assertEqual(ok, call(Client, <<"ping">>, [])),
         ?assertEqual(
             {ok, #{<<"x">> => 2, <<"y">> => 1}}, call(Client, <<"deep">>, [#{<<"x">> => 1, <<"y">> => 2}])
         ),
@@ -677,6 +701,54 @@ multiplex_client(Port, Service, ServiceMod) ->
     thrift_runtime_client:start_link(#{
         host => "127.0.0.1", port => Port, service => ServiceMod, multiplex => Service
     }).
+
+%% A raw framed peer that answers every request with a reply whose
+%% result struct is empty — no success field, no exception field. The
+%% envelope fields (name, seqid) are echoed from the request, so the
+%% client accepts the reply; only the payload shape is controlled here.
+
+-spec with_empty_payload_peer(module(), fun((pid()) -> term())) -> term().
+with_empty_payload_peer(Protocol, Test) ->
+    {ok, Listen} = gen_tcp:listen(0, [binary, {packet, raw}, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(Listen),
+    Peer = spawn_link(fun() -> empty_payload_peer(Listen, Protocol) end),
+    {ok, Client} =
+        thrift_runtime_client:start_link(#{
+            host => "127.0.0.1", port => Port, service => ?SERVICE, protocol => Protocol
+        }),
+    try
+        Test(Client)
+    after
+        thrift_runtime_client:stop(Client),
+        Peer ! close
+    end.
+
+-spec empty_payload_peer(inet:socket(), module()) -> ok.
+empty_payload_peer(Listen, Protocol) ->
+    {ok, Sock} = gen_tcp:accept(Listen, 5000),
+    empty_payload_loop(Sock, Protocol).
+
+-spec empty_payload_loop(inet:socket(), module()) -> ok.
+empty_payload_loop(Sock, Protocol) ->
+    receive
+        close ->
+            gen_tcp:close(Sock),
+            ok
+    after 0 ->
+        case gen_tcp:recv(Sock, 4, 5000) of
+            {ok, <<Len:32/big-signed>>} ->
+                {ok, Frame} = gen_tcp:recv(Sock, Len, 5000),
+                {ok, call, Name, SeqId, _Tail} = Protocol:decode_message(Frame),
+                {ok, Empty} = Protocol:encode({struct, {struct, []}}, #{}),
+                Reply = iolist_to_binary(Protocol:encode_message(reply, Name, SeqId, Empty)),
+                ok = gen_tcp:send(Sock, <<(byte_size(Reply)):32/big-signed, Reply/binary>>),
+                empty_payload_loop(Sock, Protocol);
+            _Closed ->
+                %% the client went away (stopped or crashed)
+                gen_tcp:close(Sock),
+                ok
+        end
+    end.
 
 %% An exported-but-broken hook (raises undef from inside) must crash the
 %% call, not silently fall back to the descriptor engine: the fallback
