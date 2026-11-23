@@ -682,16 +682,20 @@ decode_result(Info, Tail, #state{} = State) ->
 
 %% The success answer by the declared `reply' type: a `void' function
 %% (`reply' absent or `undefined') answers the bare atom `ok'; a
-%% non-void payload keeps its historical `{ok, Value}' even when the
-%% payload carries no success field.
+%% non-void empty payload keeps its historical `{ok, undefined}', and a
+%% non-void payload without a success field keeps its historical
+%% `badkey' crash — an unknown-key map is a malformed payload, not a
+%% void result.
 
 -spec result_value(thrift_runtime_service:function_info(), map()) -> call_result().
 result_value(Info, Values) ->
     case maps:get(reply, Info, undefined) of
         undefined ->
             ok;
+        _ReplyType when map_size(Values) =:= 0 ->
+            {ok, undefined};
         _ReplyType ->
-            {ok, maps:get(<<"success">>, Values, undefined)}
+            {ok, maps:get(<<"success">>, Values)}
     end.
 
 %% The params payload through the generated hook when the service info

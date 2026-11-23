@@ -26,6 +26,7 @@
     framed_calls/1,
     buffered_calls/1,
     empty_result_payload_uses_service_info/1,
+    nonvoid_result_without_success_keeps_badkey/1,
     compact_framed_calls/1,
     compact_buffered_calls/1,
     json_framed_calls/1,
@@ -54,6 +55,7 @@ all() ->
         framed_calls,
         buffered_calls,
         empty_result_payload_uses_service_info,
+        nonvoid_result_without_success_keeps_badkey,
         compact_framed_calls,
         compact_buffered_calls,
         json_framed_calls,
@@ -123,6 +125,42 @@ empty_result_payload_uses_service_info(_Config) ->
         [thrift_runtime_binary, thrift_runtime_compact, thrift_runtime_json]
     ),
     ok.
+
+%% A non-void result whose decoded map has no `success' entry must keep
+%% the historical failure mode: the client process crashes with
+%% `badkey' (its terminate releases the pending caller with `{error,
+%% closed}'), not silently answer `{ok, undefined}'. Neither the generic
+%% engine nor the generated codecs can produce that map (both skip
+%% unknown wire ids), but a custom protocol module — a supported client
+%% option — can; the mystery protocol test double injects an unknown key
+%% into every decoded struct map.
+
+nonvoid_result_without_success_keeps_badkey(_Config) ->
+    with_empty_payload_peer(thrift_runtime_test_mystery_protocol, fun(Client) ->
+        %% the linked client crashes on purpose; keep the exit a message
+        process_flag(trap_exit, true),
+        Self = self(),
+        spawn(fun() ->
+            Self ! {mystery_result, call(Client, <<"add">>, [2, 3])}
+        end),
+        %% terminate answers the pending call while dying
+        ?assertEqual(
+            {error, closed},
+            receive
+                {mystery_result, R} ->
+                    R
+            after 5000 ->
+                erlang:error(no_mystery_result)
+            end
+        ),
+        receive
+            {'EXIT', Client, {{badkey, <<"success">>}, _}} ->
+                ok
+        after 1000 ->
+            erlang:error(client_did_not_crash_with_badkey)
+        end,
+        ?assertNot(is_process_alive(Client))
+    end).
 
 %% The compact protocol over both transports: the framed path is pure
 %% codec, the buffered path additionally exercises the probe-decode in
@@ -719,7 +757,12 @@ with_empty_payload_peer(Protocol, Test) ->
     try
         Test(Client)
     after
-        thrift_runtime_client:stop(Client),
+        %% the regression case crashes the client on purpose
+        try
+            thrift_runtime_client:stop(Client)
+        catch
+            _:_ -> ok
+        end,
         Peer ! close
     end.
 
