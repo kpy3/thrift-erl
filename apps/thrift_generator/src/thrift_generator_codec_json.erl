@@ -53,7 +53,7 @@ constructors — so `erl_pp` renders them; doc and spec attributes stay
 syntax trees like everywhere else in the emitter.
 """.
 
--export([module_forms/2]).
+-export([module_forms/1]).
 
 -include("thrift_generator.hrl").
 -include("thrift_generator_model.hrl").
@@ -157,25 +157,24 @@ syntax trees like everywhere else in the emitter.
 Every JSON wire-codec form of the module: per-struct encode/decode
 functions, container and scanner helpers, `json_codec/1`.
 """.
--spec module_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-module_forms(Mod, Ctx) ->
+-spec module_forms(#tg_codec_plan{}) -> erl_syntax:forms().
+module_forms(Plan) ->
     %% The synthetic RPC codecs go last: the hooks in service_info reach
     %% them directly, and keeping the declared structs' code layout
     %% untouched matters more than grouping (BEAM layout sensitivity).
-    ServiceStructs = thrift_generator_codec_common:service_structs(Mod),
-    WireTypes = [
-        wtype(F#tg_field.type, Ctx)
-     || S <- Mod#tg_module.structs ++ ServiceStructs,
-        F <- S#tg_struct.fields
-    ],
-    Enums = thrift_generator_codec_common:enum_registry(WireTypes),
+    Mod = Plan#tg_codec_plan.module,
+    Ctx = Plan#tg_codec_plan.ctx,
+    Enums = Plan#tg_codec_plan.enums,
+    ServiceStructs = [CS#tg_codec_struct.struct || CS <- Plan#tg_codec_plan.rpc],
     Blocks = struct_blocks(Mod#tg_module.structs, Ctx, Enums),
     ServiceBlocks = struct_blocks(ServiceStructs, Ctx, Enums),
+    %% JSON keeps its own container inventory: the unsupported-map
+    %% cutoff prunes the children of a map with no JSON-supported key.
     Containers = lists:usort(
-        lists:append([containers_json(T) || T <- WireTypes])
+        lists:append([containers_json(T) || T <- Plan#tg_codec_plan.wire_types])
     ),
     ContainerForms = lists:append([container_forms(C, Ctx, Enums) || C <- Containers]),
-    Codec = thrift_generator_codec_common:codec_index_forms(json, Mod, Ctx),
+    Codec = thrift_generator_codec_common:codec_index_forms(json, Plan),
     Blocks ++
         ContainerForms ++
         %% The scanner and conversion helper set is derived from the

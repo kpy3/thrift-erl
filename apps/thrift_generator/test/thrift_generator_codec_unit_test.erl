@@ -27,7 +27,9 @@
     used_helpers_cycle_test/0,
     codec_pair_names_test/0,
     export_entries_include_protocol_pairs_test/0,
-    export_entries_empty_module_test/0
+    export_entries_empty_module_test/0,
+    codec_plan_collects_shared_metadata_test/0,
+    rpc_plan_preserves_shapes_test/0
 ]).
 
 colliding_enum_descriptors_test() ->
@@ -109,16 +111,17 @@ codec_pair_names_test() ->
 export_entries_include_protocol_pairs_test() ->
     Mod = #tg_module{
         name = <<"demo">>,
-        structs = [#tg_struct{kind = struct, name = <<"PingRequest">>}]
+        structs = [#tg_struct{kind = struct, name = <<"PingRequest">>, fields = []}]
     },
     Ctx = #ectx{modules = #{<<"demo">> => Mod}, current = <<"demo">>},
+    Plan = thrift_generator_codec_plan:build(Mod, Ctx),
     ?assertEqual(
         [{binary_codec, 1}, {encode_ping_request_wire, 1}, {decode_ping_request_wire, 1}],
-        thrift_generator_codec_common:export_entries(wire, Mod, Ctx)
+        thrift_generator_codec_common:export_entries(wire, Plan)
     ),
     ?assertEqual(
         [{compact_codec, 1}, {encode_ping_request_compact, 1}, {decode_ping_request_compact, 1}],
-        thrift_generator_codec_common:export_entries(compact, Mod, Ctx)
+        thrift_generator_codec_common:export_entries(compact, Plan)
     ),
     ?assertEqual(
         [
@@ -127,14 +130,138 @@ export_entries_include_protocol_pairs_test() ->
             {decode_ping_request_json, 1},
             {decode_ping_request_json_body, 1}
         ],
-        thrift_generator_codec_common:export_entries(json, Mod, Ctx)
+        thrift_generator_codec_common:export_entries(json, Plan)
     ),
     ok.
 
 export_entries_empty_module_test() ->
     Mod = #tg_module{name = <<"demo">>},
     Ctx = #ectx{modules = #{<<"demo">> => Mod}, current = <<"demo">>},
-    ?assertEqual([{binary_codec, 1}], thrift_generator_codec_common:export_entries(wire, Mod, Ctx)),
-    ?assertEqual([{compact_codec, 1}], thrift_generator_codec_common:export_entries(compact, Mod, Ctx)),
-    ?assertEqual([{json_codec, 1}], thrift_generator_codec_common:export_entries(json, Mod, Ctx)),
+    Plan = thrift_generator_codec_plan:build(Mod, Ctx),
+    ?assertEqual([{binary_codec, 1}], thrift_generator_codec_common:export_entries(wire, Plan)),
+    ?assertEqual([{compact_codec, 1}], thrift_generator_codec_common:export_entries(compact, Plan)),
+    ?assertEqual([{json_codec, 1}], thrift_generator_codec_common:export_entries(json, Plan)),
+    ok.
+
+codec_plan_collects_shared_metadata_test() ->
+    Seq = #tg_field{id = 1, required = required, type = {base, i32, #{}}, name = <<"seq">>, default = undefined},
+    State = #tg_field{
+        id = 2,
+        required = default,
+        type = {resolved_ref, <<"demo">>, <<"Status">>, #{}},
+        name = <<"state">>,
+        default = undefined
+    },
+    Request = #tg_struct{kind = struct, name = <<"PingRequest">>, fields = [Seq, State]},
+    Ping = #tg_function{
+        name = <<"ping">>,
+        oneway = false,
+        return_type = {base, i32, #{}},
+        params = [Seq],
+        throws = []
+    },
+    Status = #tg_enum{name = <<"Status">>, values = [{0, <<"ACTIVE">>}]},
+    Mod = #tg_module{
+        name = <<"demo">>,
+        structs = [Request],
+        enums = [Status],
+        services = [#tg_service{name = <<"Ping">>, functions = [Ping]}]
+    },
+    Ctx = #ectx{
+        modules = #{<<"demo">> => Mod},
+        type_modules = #{<<"demo">> => demo_types},
+        current = <<"demo">>
+    },
+    Plan = thrift_generator_codec_plan:build(Mod, Ctx),
+    %% one declared entry; its field types are exactly the wire types
+    %% struct_info/1 carries in each field descriptor
+    [Declared] = Plan#tg_codec_plan.declared,
+    ?assertEqual(Request, Declared#tg_codec_struct.struct),
+    ?assertEqual(
+        [element(3, thrift_generator_ir:field_desc(F, Ctx)) || F <- Request#tg_struct.fields],
+        Declared#tg_codec_struct.field_types
+    ),
+    %% two RPC entries in params/result order
+    [Params, Result] = Plan#tg_codec_plan.rpc,
+    ?assertEqual(<<"Ping$ping$params">>, Params#tg_codec_struct.struct#tg_struct.name),
+    ?assertEqual(<<"Ping$ping$result">>, Result#tg_codec_struct.struct#tg_struct.name),
+    ?assertEqual([{base, i32}], Params#tg_codec_struct.field_types),
+    ?assertEqual([{base, i32}], Result#tg_codec_struct.field_types),
+    %% the flattened inventory keeps the declared-fields-first order
+    ?assertEqual(
+        Declared#tg_codec_struct.field_types ++
+            Params#tg_codec_struct.field_types ++
+            Result#tg_codec_struct.field_types,
+        Plan#tg_codec_plan.wire_types
+    ),
+    %% one shared enum registry over the whole inventory
+    ?assertEqual(1, map_size(Plan#tg_codec_plan.enums)),
+    ?assertEqual(
+        thrift_generator_codec_common:enum_registry(Plan#tg_codec_plan.wire_types),
+        Plan#tg_codec_plan.enums
+    ),
+    %% the existing three protocol codec names, for declared and RPC structs
+    ?assertEqual(
+        {encode_ping_request_wire, decode_ping_request_wire},
+        thrift_generator_codec_plan:codec_pair(wire, <<"PingRequest">>, Plan)
+    ),
+    ?assertEqual(
+        {encode_ping_request_compact, decode_ping_request_compact},
+        thrift_generator_codec_plan:codec_pair(compact, <<"PingRequest">>, Plan)
+    ),
+    ?assertEqual(
+        {encode_ping_request_json, decode_ping_request_json},
+        thrift_generator_codec_plan:codec_pair(json, <<"PingRequest">>, Plan)
+    ),
+    ?assertEqual(
+        {'encode_ping$ping$params_wire', 'decode_ping$ping$params_wire'},
+        thrift_generator_codec_plan:codec_pair(wire, <<"Ping$ping$params">>, Plan)
+    ),
+    ok.
+
+rpc_plan_preserves_shapes_test() ->
+    Payload = #tg_field{
+        id = 1,
+        required = required,
+        type = {base, binary, #{}},
+        name = <<"payload">>,
+        default = undefined
+    },
+    Event = #tg_struct{kind = struct, name = <<"Event">>, fields = [Payload]},
+    Note = #tg_field{
+        id = 1,
+        required = default,
+        type = {base, string, #{}},
+        name = <<"note">>,
+        default = undefined
+    },
+    Notify = #tg_function{
+        name = <<"notify">>,
+        oneway = true,
+        return_type = void,
+        params = [Note],
+        throws = []
+    },
+    Mod = #tg_module{
+        name = <<"demo">>,
+        structs = [Event],
+        services = [#tg_service{name = <<"Events">>, functions = [Notify]}]
+    },
+    Ctx = #ectx{
+        modules = #{<<"demo">> => Mod},
+        type_modules = #{<<"demo">> => demo_types},
+        current = <<"demo">>
+    },
+    Plan = thrift_generator_codec_plan:build(Mod, Ctx),
+    %% oneway contributes only the params struct
+    [OnlyParams] = Plan#tg_codec_plan.rpc,
+    ?assertEqual(<<"Events$notify$params">>, OnlyParams#tg_codec_struct.struct#tg_struct.name),
+    ?assertEqual([{base, string}], OnlyParams#tg_codec_struct.field_types),
+    %% declared structs precede RPC structs in every ordered plan view
+    Names = [
+        CS#tg_codec_struct.struct#tg_struct.name
+     || CS <- Plan#tg_codec_plan.declared ++ Plan#tg_codec_plan.rpc
+    ],
+    ?assertEqual([<<"Event">>, <<"Events$notify$params">>], Names),
+    ?assertEqual([{base, binary}, {base, string}], Plan#tg_codec_plan.wire_types),
     ok.

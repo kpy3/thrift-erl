@@ -136,6 +136,7 @@ module_sources(Mod, Ctx) ->
 -spec types_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 types_forms(Mod, Ctx) ->
     TypesMod = thrift_generator_names:types_module_atom(Mod#tg_module.name),
+    Plan = thrift_generator_codec_plan:build(Mod, Ctx),
     Exports =
         thrift_generator_emitter_syntax:exports_forms([
             {struct_info, 1},
@@ -152,17 +153,17 @@ types_forms(Mod, Ctx) ->
         ]) ++
             [thrift_generator_emitter_syntax:export_type_form(type_alias_entries(Mod))] ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec_common:export_entries(wire, Mod, Ctx)
+                thrift_generator_codec_common:export_entries(wire, Plan)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
                 thrift_generator_codec:repr_encode_export_entries(Mod, Ctx) ++
                     thrift_generator_codec:repr_index_entries(Mod)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec_common:export_entries(compact, Mod, Ctx)
+                thrift_generator_codec_common:export_entries(compact, Plan)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec_common:export_entries(json, Mod, Ctx)
+                thrift_generator_codec_common:export_entries(json, Plan)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(enum_helper_entries(Mod)) ++
             thrift_generator_emitter_syntax:exports_forms(const_entries(Mod)),
@@ -172,12 +173,12 @@ types_forms(Mod, Ctx) ->
         struct_info_forms(Mod, Ctx) ++
         enum_info_forms(Mod) ++
         function_info_forms(Mod, Ctx) ++
-        service_info_forms(Mod, Ctx) ++
+        service_info_forms(Mod, Ctx, Plan) ++
         record_fields_forms(Mod) ++
         schema_codec_forms(Mod, Ctx) ++
-        thrift_generator_codec:module_forms(Mod, Ctx) ++
-        thrift_generator_codec_compact:module_forms(Mod, Ctx) ++
-        thrift_generator_codec_json:module_forms(Mod, Ctx) ++
+        thrift_generator_codec:module_forms(Plan) ++
+        thrift_generator_codec_compact:module_forms(Plan) ++
+        thrift_generator_codec_json:module_forms(Plan) ++
         enum_helper_forms(Mod) ++
         typedef_forms(Mod, Ctx) ++
         const_forms(Mod).
@@ -1212,26 +1213,26 @@ service_functions(Mod) ->
         ),
     Kept.
 
--spec service_info_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-service_info_forms(Mod, Ctx) ->
+-spec service_info_forms(#tg_module{}, #ectx{}, #tg_codec_plan{}) -> erl_syntax:forms().
+service_info_forms(Mod, Ctx, Plan) ->
     TypesMod = thrift_generator_names:types_module_atom(Mod#tg_module.name),
     Entries = [
-        {S#tg_service.name, service_entry(S#tg_service.name, S#tg_service.functions, TypesMod, Ctx, #{})}
+        {S#tg_service.name, service_entry(S#tg_service.name, S#tg_service.functions, TypesMod, Ctx, #{}, Plan)}
      || S <- Mod#tg_module.services
     ],
     thrift_generator_emitter_syntax:fn_form(service_info, [
         thrift_generator_emitter_syntax:fn_clause([], thrift_generator_emitter_syntax:abstract(maps:from_list(Entries)))
     ]).
 
--spec service_entry(binary(), [#tg_function{}], module(), #ectx{}, map()) -> map().
-service_entry(_SvcName, [], _TypesMod, _Ctx, Acc) ->
+-spec service_entry(binary(), [#tg_function{}], module(), #ectx{}, map(), #tg_codec_plan{}) -> map().
+service_entry(_SvcName, [], _TypesMod, _Ctx, Acc, _Plan) ->
     Acc;
-service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc) ->
+service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc, Plan) ->
     Info0 = #{
         name => F#tg_function.name,
         oneway => F#tg_function.oneway,
         params => thrift_generator_ir:params_desc(F, Ctx),
-        codecs => rpc_codecs(SvcName, F, TypesMod, Ctx)
+        codecs => rpc_codecs(SvcName, F, TypesMod, Plan)
     },
     Info1 =
         case thrift_generator_ir:reply_desc(F, Ctx) of
@@ -1243,7 +1244,7 @@ service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc) ->
             [] -> Info1;
             Exceptions -> Info1#{exceptions => Exceptions}
         end,
-    service_entry(SvcName, Rest, TypesMod, Ctx, Acc#{F#tg_function.name => Info}).
+    service_entry(SvcName, Rest, TypesMod, Ctx, Acc#{F#tg_function.name => Info}, Plan).
 
 %% The specialized RPC codec hooks of one function, keyed by the
 %% runtime protocol module: the runtime picks the entry of its protocol
@@ -1251,18 +1252,18 @@ service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc) ->
 %% descriptor path when the key or the protocol is absent (hand-written
 %% service modules, custom protocols).
 
--spec rpc_codecs(binary(), #tg_function{}, module(), #ectx{}) -> map().
-rpc_codecs(SvcName, F, TypesMod, Ctx) ->
+-spec rpc_codecs(binary(), #tg_function{}, module(), #tg_codec_plan{}) -> map().
+rpc_codecs(SvcName, F, TypesMod, Plan) ->
     maps:from_list([
-        rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx)
+        rpc_codec_entry(Protocol, SvcName, F, TypesMod, Plan)
      || Protocol <- [wire, compact, json]
     ]).
 
--spec rpc_codec_entry(wire | compact | json, binary(), #tg_function{}, module(), #ectx{}) ->
+-spec rpc_codec_entry(wire | compact | json, binary(), #tg_function{}, module(), #tg_codec_plan{}) ->
     {module(), map()}.
-rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx) ->
-    {EncParams, DecParams} = thrift_generator_codec_common:codec_pair(
-        Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, params), Ctx
+rpc_codec_entry(Protocol, SvcName, F, TypesMod, Plan) ->
+    {EncParams, DecParams} = thrift_generator_codec_plan:codec_pair(
+        Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, params), Plan
     ),
     Entry = #{params => {TypesMod, EncParams, DecParams}},
     Full =
@@ -1270,8 +1271,8 @@ rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx) ->
             true ->
                 Entry;
             false ->
-                {EncResult, DecResult} = thrift_generator_codec_common:codec_pair(
-                    Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, result), Ctx
+                {EncResult, DecResult} = thrift_generator_codec_plan:codec_pair(
+                    Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, result), Plan
                 ),
                 Entry#{result => {TypesMod, EncResult, DecResult}}
         end,

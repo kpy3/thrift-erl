@@ -40,8 +40,8 @@ runtime are their only callers.
     containers/1,
     elem_type/1,
     used_helpers/2,
-    export_entries/3,
-    codec_index_forms/3
+    export_entries/2,
+    codec_index_forms/2
 ]).
 
 -export_type([wire_type/0, enum_desc/0, registry/0]).
@@ -250,8 +250,9 @@ decode_body_name(Decode) ->
     atom_concat(Decode, <<"_body">>).
 
 -doc "Returns the export entries of one protocol's specialized codecs, including the RPC params/result pairs.".
--spec export_entries(wire | compact | json, #tg_module{}, #ectx{}) -> [{atom(), arity()}].
-export_entries(Protocol, Mod, Ctx) ->
+-spec export_entries(wire | compact | json, #tg_codec_plan{}) -> [{atom(), arity()}].
+export_entries(Protocol, Plan) ->
+    Names = maps:get(Protocol, Plan#tg_codec_plan.codec_names),
     [{protocol_index(Protocol), 1}] ++
         lists:append([
             [{Encode, 1}, {Decode, 1}] ++
@@ -259,18 +260,17 @@ export_entries(Protocol, Mod, Ctx) ->
                     json -> [{decode_body_name(Decode), 1}];
                     _ -> []
                 end
-         || {Encode, Decode} <- [
-                codec_pair(Protocol, S, Ctx)
-             || S <- Mod#tg_module.structs ++ service_structs(Mod)
-            ]
+         || CS <- Plan#tg_codec_plan.declared ++ Plan#tg_codec_plan.rpc,
+            {Encode, Decode} <- [maps:get(CS#tg_codec_struct.struct#tg_struct.name, Names)]
         ]).
 
 -doc "Builds the public codec index of one protocol.".
--spec codec_index_forms(wire | compact | json, #tg_module{}, #ectx{}) -> erl_syntax:forms().
-codec_index_forms(Protocol, Mod, Ctx) ->
+-spec codec_index_forms(wire | compact | json, #tg_codec_plan{}) -> erl_syntax:forms().
+codec_index_forms(Protocol, Plan) ->
+    Names = maps:get(Protocol, Plan#tg_codec_plan.codec_names),
     Clauses =
         [
-            clause([name_lit(S#tg_struct.name)], none, [
+            clause([name_lit(CS#tg_codec_struct.struct#tg_struct.name)], none, [
                 tuple_t([
                     at(ok),
                     tuple_t([
@@ -279,7 +279,8 @@ codec_index_forms(Protocol, Mod, Ctx) ->
                     ])
                 ])
             ])
-         || {S, {Encode, Decode}} <- [{S, codec_pair(Protocol, S, Ctx)} || S <- Mod#tg_module.structs]
+         || CS <- Plan#tg_codec_plan.declared,
+            {Encode, Decode} <- [maps:get(CS#tg_codec_struct.struct#tg_struct.name, Names)]
         ] ++ [clause([v(index_unknown_name(Protocol))], none, [at(error)])],
     Index = protocol_index(Protocol),
     thrift_generator_emitter_syntax:doc_false_form() ++

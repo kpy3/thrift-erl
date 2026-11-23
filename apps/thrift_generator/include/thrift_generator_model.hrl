@@ -165,6 +165,38 @@
     qualify = false :: boolean()
 }).
 
+%% --------------------------------------------------------------------
+%% Codec emission plan: the single per-types-module inventory the
+%% specialized-codec backends (binary, compact, JSON) and the emitter
+%% share, built once per types module by
+%% thrift_generator_codec_plan:build/2. Declared structs always precede
+%% the synthetic RPC structs in every ordered view; the enum registry
+%% numbering and the container inventory derive from that order, so the
+%% backends emit byte-identical code from one shared calculation.
+%% --------------------------------------------------------------------
+
+%% One planned struct: the struct plus its per-field wire types in field
+%% order — the same wire types struct_info/1 carries in each field
+%% descriptor.
+-record(tg_codec_struct, {
+    struct :: #tg_struct{},
+    field_types :: [thrift_generator_codec_common:wire_type()]
+}).
+
+-record(tg_codec_plan, {
+    module :: #tg_module{},
+    ctx :: #ectx{},
+    declared = [] :: [#tg_codec_struct{}],
+    rpc = [] :: [#tg_codec_struct{}],
+    wire_types = [] :: [thrift_generator_codec_common:wire_type()],
+    enums = #{} :: thrift_generator_codec_common:registry(),
+    %% The binary/compact container inventory; JSON derives its own from
+    %% wire_types with the unsupported-map cutoff.
+    containers = [] :: [thrift_generator_codec_common:wire_type()],
+    %% Protocol -> wire struct name -> {Encode, Decode}.
+    codec_names = #{} :: #{wire | compact | json => #{binary() => {atom(), atom()}}}
+}).
+
 %% One entry handed from the loader to the semantic pass.
 -record(tg_loaded, {
     name :: binary(),
