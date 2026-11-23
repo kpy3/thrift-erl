@@ -335,7 +335,7 @@ strip_detached_docs([], _Depth) ->
 strip_detached_docs([{doc, Line, Text} | Rest], Depth) ->
     {Texts, Rest1} = collect_docs(Rest, [Text]),
     Merged = {doc, Line, join_docs(lists:reverse(Texts))},
-    case Depth =:= 0 andalso detached(Rest1) of
+    case (Depth =:= 0 andalso detached(Rest1)) orelse closing_delimiter(Rest1) of
         true ->
             strip_detached_docs(Rest1, Depth);
         false ->
@@ -362,7 +362,8 @@ join_docs(Texts) ->
 
 %% A doc is detached when the next meaningful token opens a header, the
 %% file marker, or nothing — everything else (a definition start, or any
-%% token inside a body) keeps it attached.
+%% token inside a body) keeps it attached. A doc before a closing delimiter
+%% has no definition to attach to either; Thrift treats it as whitespace.
 
 -spec detached([token()]) -> boolean().
 detached([{doc, _, _} | Rest]) ->
@@ -372,6 +373,12 @@ detached([{T, _} | _]) when T =:= include; T =:= cpp_include; T =:= namespace; T
 detached([]) ->
     true;
 detached(_) ->
+    false.
+
+-spec closing_delimiter([token()]) -> boolean().
+closing_delimiter([{T, _} | _]) when T =:= '}'; T =:= ')'; T =:= ']'; T =:= '>' ->
+    true;
+closing_delimiter(_) ->
     false.
 
 -doc "Reads, lexes and parses an IDL file in one step.".

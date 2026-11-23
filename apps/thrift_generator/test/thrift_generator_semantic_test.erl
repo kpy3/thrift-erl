@@ -29,6 +29,10 @@
     oneway_shape_error_test/0,
     throw_not_exception_error_test/0,
     throw_required_field_error_test/0,
+    throw_typedef_exception_test/0,
+    throw_typedef_struct_error_test/0,
+    throw_typedef_base_error_test/0,
+    throw_typedef_cycle_error_test/0,
     unknown_type_error_test/0,
     const_enum_ref_test/0,
     const_chain_and_cycle_test/0,
@@ -42,7 +46,7 @@
     generated_tag_clash_error_test/0,
     enum_prefix_clash_error_test/0,
     const_codec_clash_error_test/0,
-    const_reserved_clash_error_test/0,
+    const_facade_names_are_legal_test/0,
     struct_annotation_error_test/0,
     set_annotation_error_test/0,
     record_name_annotation_error_test/0,
@@ -117,6 +121,46 @@ throw_required_field_error_test() ->
     ?assertMatch(
         {error, [{<<"t.thrift">>, _, <<"throw field e cannot be required">>}]},
         analyze(<<"exception E { 1: string m }\nservice S { void f() throws (1: required E e) }">>)
+    ),
+    ok.
+
+throw_typedef_exception_test() ->
+    {ok, Model} = analyze(
+        <<
+            "exception E {}\n"
+            "typedef E Alias1\n"
+            "typedef Alias1 Alias2\n"
+            "service S { void f() throws (1: Alias2 e) }"
+        >>
+    ),
+    [#tg_service{functions = [Function]}] = (model_module(Model))#tg_module.services,
+    [#tg_field{type = {ref, <<"Alias2">>, #{}}}] = Function#tg_function.throws,
+    ok.
+
+throw_typedef_struct_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"throw field must be an exception, got Alias">>}]},
+        analyze(<<"struct T { 1: i32 x }\ntypedef T Alias\nservice S { void f() throws (1: Alias e) }">>)
+    ),
+    ok.
+
+throw_typedef_base_error_test() ->
+    ?assertMatch(
+        {error, [{<<"t.thrift">>, _, <<"throw field must be an exception, got Alias">>}]},
+        analyze(<<"typedef i32 Alias\nservice S { void f() throws (1: Alias e) }">>)
+    ),
+    ok.
+
+throw_typedef_cycle_error_test() ->
+    {error, Errors} = analyze(
+        <<"typedef A B\ntypedef B A\nservice S { void f() throws (1: A e) }">>
+    ),
+    %% The existing cycle pass reports one entry point per typedef in the
+    %% cycle; throws validation must add no error of its own.
+    ?assertEqual(2, length(Errors)),
+    ?assertEqual(
+        [<<"typedef cycle through A">>, <<"typedef cycle through B">>],
+        lists:sort([Msg || {_, _, Msg} <- Errors])
     ),
     ok.
 
@@ -245,22 +289,34 @@ enum_prefix_clash_error_test() ->
     ok.
 
 const_codec_clash_error_test() ->
-    %% encode_foo/1 is generated for struct Foo; a constant would shadow it.
+    %% color_to_int/1 is generated for enum Color; a constant would
+    %% shadow the enum helper name.
     ?assertMatch(
-        {error, [{<<"t.thrift">>, _, <<"constant encode_foo collides with a generated function name">>}]},
+        {error, [{<<"t.thrift">>, _, <<"constant color_to_int collides with a generated function name">>}]},
         analyze(
-            "struct Foo { 1: i32 x }\n"
-            "const i32 encode_foo = 1\n"
+            "enum Color { RED }\n"
+            "const i32 color_to_int = 1\n"
         )
     ),
     ok.
 
-const_reserved_clash_error_test() ->
-    ?assertMatch(
-        {error, [{<<"t.thrift">>, _, <<"constant tag_index collides with a generated function name">>}]},
-        analyze(<<"const i32 tag_index = 1">>)
+%% The removed per-struct wrappers (encode_<n>/decode_<n>/<n>_from_map),
+%% the tag index and the old convert/2 are gone; constants are arity-0
+%% functions and the schema facade carries arities 1–3, so constants
+%% named like the facade are legal — the analysis must accept them.
+
+const_facade_names_are_legal_test() ->
+    {ok, _} = analyze(
+        "struct Foo { 1: i32 x }\n"
+        "const i32 encode = 1\n"
+        "const i32 decode = 2\n"
+        "const i32 convert = 3\n"
+        "const i32 descriptor = 4\n"
+        "const i32 tag_index = 5\n"
+        "const i32 encode_foo = 6\n"
+        "const i32 decode_foo = 7\n"
+        "const i32 foo_from_map = 8\n"
     ),
-    {ok, _} = analyze("struct Foo { 1: i32 x }\nconst i32 encode_bar = 1"),
     ok.
 
 struct_annotation_error_test() ->

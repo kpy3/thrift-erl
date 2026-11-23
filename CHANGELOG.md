@@ -1,14 +1,67 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [Unreleased]
+
+### Breaking changes
+
+The public codec API is finalized as one coherent, type-first surface;
+the transitional legacy forms are removed with no compatibility shims
+(see `docs/public-api-migration.md` for old → new call tables):
+
+- Generated `<mod>_types` modules expose a type-first schema facade:
+  `encode(Type, Value[, Options])`, `decode(Type, Binary[, Options])`,
+  `convert(Type, Value, Repr)` and `descriptor(Type)`, where `Type` is
+  the canonical snake-cased IDL struct name. The per-struct wrappers
+  `encode_<name>/1,2`, `decode_<name>/1,2,3`, `<name>_from_map/1`,
+  `convert/2` and `tag_index/0` are removed. Options maps accept
+  `protocol` (encode/decode) and `strict` (encode) / `repr` (decode,
+  filled from the schema default when absent); a non-map options
+  argument answers `{error, {bad_option, {options, Value, [map]}}}`.
+- `thrift_runtime` keeps the advanced descriptor facade only:
+  `encode(Desc, Value[, Options])`, `decode(Desc, Binary, Options)`
+  with a required `repr` option, and `convert(Desc, Value, Repr)` with
+  an explicit type descriptor. `encode/4`, `decode/4`, the positional
+  protocol/repr variants and the tag-index `convert/3` input (with the
+  exported `tag_index/0` type) are removed; a non-map options argument
+  answers the same documented `bad_option` error.
+- `struct_info/1`, `enum_info/1`, `function_info/2` and `service_info/0`
+  remain advanced-public with unchanged shapes. The direct codec
+  entries (`binary_codec/1`, `compact_codec/1`, `json_codec/1`,
+  `binary_repr_codec/2`, all `*_wire`/`*_compact`/`*_json` functions),
+  `record_fields/1` and `<mod>_types_repr` stay exported for the
+  runtime's dispatch but are now classified internal (`-doc false`) in
+  the generated docs.
+- Constants may reuse the facade names (`encode`, `decode`, `convert`,
+  `descriptor`, …): constants are arity-0 functions, the facade starts
+  at arity 1. Semantic analysis stops reserving the removed wrapper and
+  tag-index names; enum-helper names remain reserved.
 
 ### Generator (`thrift_generator`)
 
+- Repr-native one-pass binary codecs: generated types modules encode
+  tuple records and maps directly to wire bytes and decode wire bytes
+  straight into record/map/struct/native values, skipping the
+  intermediate wire map; tagged unions join the family with
+  encode-side exactly-one-field checks (decode accepts what the wire
+  carries, exactly like the two-pass path). Through the
+  `thrift_runtime` facade the
+  measured medians against the explicit two-pass baseline are
+  +60.5/+68.3% (record encode/decode), +43.7/+80.9% (map),
+  +42.6/+58.7% (struct) and +24.2% (native decode, OTP 29+); bytes,
+  error terms and APIs are unchanged.
+- Fixed generator crashes on compact enum/header bytes `0x80..0xFF` by
+  emitting raw binary literals as bytes, restoring large enum values and
+  field ids without changing wire output.
+- Doc comments directly before closing delimiters are parsed as
+  whitespace, matching the official grammar and fixing IDL bodies that
+  end with a commented-out member.
+- `throws` clauses accept typedef aliases that resolve to exceptions,
+  including cross-module chains; aliases to non-exception types and
+  typedef cycles remain rejected.
+- Namespace-derived module-key collisions resolve through atom-safe
+  normalized file basenames while identifier prefixes stay shared;
+  unresolved basename collisions keep the existing `duplicate_module`
+  error.
 - `scripts/bench-regression`: paired historical benchmark of generated
   code against a git ref (defaults to `v0.8.0`), per-cell 0.99 gate,
   direct/public entries, cross-module and representation-conversion
@@ -37,8 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct representation converters (`repr_index/1`, literal atoms; the
   types module stays byte-identical — layout is a measured variable):
   `from_wire` +113..+152% (map/struct), +67..+97% (native), +25..+55%
-  (record), `to_wire` up to +59% on nested values. Malformed inputs
-  meet deliberately stricter converters.
+  (record), tuple `to_wire` up to +59% on nested values; map-shaped
+  `to_wire` keeps the faster descriptor `maps:from_list` path.
+  Malformed inputs meet deliberately stricter converters.
 - Compact enum payloads and statically-known field headers are computed
   at generation (iodata term shape preserved — map key order depends on
   it): direct compact encode +2.5..+36% (CrossModule +36%).
@@ -47,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Runtime (`thrift_runtime`)
 
+- `encode/2,3` and `decode/3` route binary-protocol struct calls
+  through the generated repr-native codecs (persistent_term-cached
+  probe, the same pattern as the codec dispatch); any fast-path failure
+  retries the two-pass path, so mixed nesting and every error term
+  answer exactly as before. Native values take the fast path on OTP 29+
+  only.
 - `thrift_runtime_client`/`thrift_runtime_connection` use the
   `codecs` hooks for RPC params/results, skipping descriptor
   interpretation; missing hooks or stale codecs fall back to the

@@ -14,7 +14,20 @@
 
 -module(thrift_generator_codec_common).
 
--moduledoc "Protocol-independent wire types and helper naming for codec emitters.".
+-moduledoc """
+Protocol-independent wire types and helper naming for codec emitters.
+
+The generated per-protocol codec indexes (`binary_codec/1`,
+`compact_codec/1`, `json_codec/1`) answer `{ok, {Encode, Decode}}` by
+wire struct name, where `Encode/1` takes the wire map to `{ok,
+iodata()} | {error, _}` and `Decode/1` takes a binary to `{ok, WireMap,
+Rest} | more | {error, _}` -- the same contracts as the corresponding
+`thrift_runtime_*:encode/2` and `decode/2`. Unknown names answer
+`error`; the runtime probes these exports to dispatch named-struct
+references to the specialized code. The indexes are internal
+(`-doc false` in the generated module): the generated facade and the
+runtime are their only callers.
+""".
 
 -export([
     enum_registry/1,
@@ -281,7 +294,7 @@ codec_index_forms(Protocol, Mod, Ctx) ->
          || {S, {Encode, Decode}} <- [{S, codec_pair(Protocol, S, Ctx)} || S <- Mod#tg_module.structs]
         ] ++ [clause([v(index_unknown_name(Protocol))], none, [at(error)])],
     Index = protocol_index(Protocol),
-    thrift_generator_emitter_syntax:doc_form(undefined, codec_index_doc(Protocol)) ++
+    thrift_generator_emitter_syntax:doc_false_form() ++
         [codec_index_spec(Protocol, Index), {function, ?ANNO, Index, 1, Clauses}].
 
 -spec protocol_index(wire | compact | json) -> atom().
@@ -323,35 +336,3 @@ codec_index_spec(_, Index) ->
             ])
         )
     ]).
-
--spec codec_index_doc(wire | compact | json) -> binary().
-codec_index_doc(wire) ->
-    <<
-        "The binary-protocol wire codecs of this module's structs, by wire"
-        " struct name: `{ok, {Encode, Decode}}` where `Encode/1` takes the"
-        " wire map to `{ok, iodata()} | {error, _}` and `Decode/1` takes a"
-        " binary to `{ok, WireMap, Rest} | more | {error, _}` -- the same"
-        " contracts as `thrift_runtime_binary:encode/2` and `decode/2`."
-        " Unknown names answer `error`; `thrift_runtime_binary` probes this"
-        " export to dispatch named-struct references to the specialized"
-        " code."
-    >>;
-codec_index_doc(compact) ->
-    <<
-        "The compact-protocol wire codecs of this module's structs, by wire"
-        " struct name: `{ok, {Encode, Decode}}` where `Encode/1` takes the"
-        " wire map to `{ok, iodata()} | {error, _}` and `Decode/1` takes a"
-        " binary to `{ok, WireMap, Rest} | more | {error, _}` -- the same"
-        " contracts as `thrift_runtime_compact:encode/2` and `decode/2`."
-        " Unknown names answer `error`; `thrift_runtime_compact` probes this"
-        " export to dispatch named-struct references to the specialized"
-        " code."
-    >>;
-codec_index_doc(json) ->
-    <<
-        "The specialized JSON codec pair by wire struct name:"
-        " `error` for names this module does not define. The decode"
-        " side is the non-folding struct body: folding the envelope's"
-        " closing `]` is the caller's (the runtime's top-level entry"
-        " points') job."
-    >>.

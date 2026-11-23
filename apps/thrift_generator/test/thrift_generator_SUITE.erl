@@ -31,7 +31,10 @@
     reject_syntax_error/1,
     semantic_pipeline/1,
     loader_cycle/1,
-    loader_duplicate_module/1,
+    loader_shared_namespace_modules/1,
+    loader_shared_namespace_module_key_normalization/1,
+    loader_shared_namespace_module_key_collision_after_normalization/1,
+    loader_unresolved_duplicate_module/1,
     loader_missing_include/1,
     loader_namespace_prefix/1,
     loader_namespace_error/1,
@@ -39,6 +42,7 @@
     utf8_invalid_file_rejected/1,
     same_struct_names_coexist/1,
     cross_module_typedef/1,
+    cross_module_exception_typedef/1,
     cross_module_include_qualifier/1,
     cross_module_direct_dispatch/1,
     base_fields_guarded_encode/1,
@@ -49,6 +53,11 @@
     empty_union_no_dead_code/1,
     json_fast_path_helpers/1,
     repr_direct_converters/1,
+    onepass_cells_exist/1,
+    repr_native_binary_encoders/1,
+    repr_native_binary_decoders/1,
+    repr_native_native_and_index/1,
+    repr_native_facade_routing/1,
     repr_wide_struct/1,
     compact_enum_literals/1,
     compact_static_headers/1,
@@ -57,6 +66,7 @@
     rpc_loopback_fallback/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
+    getting_started_example/1,
     generated_map_mode/1,
     generated_native_repr/1,
     generated_set_impl/1
@@ -70,7 +80,10 @@ all() ->
         reject_syntax_error,
         semantic_pipeline,
         loader_cycle,
-        loader_duplicate_module,
+        loader_shared_namespace_modules,
+        loader_shared_namespace_module_key_normalization,
+        loader_shared_namespace_module_key_collision_after_normalization,
+        loader_unresolved_duplicate_module,
         loader_missing_include,
         loader_namespace_prefix,
         loader_namespace_error,
@@ -78,6 +91,7 @@ all() ->
         utf8_invalid_file_rejected,
         same_struct_names_coexist,
         cross_module_typedef,
+        cross_module_exception_typedef,
         cross_module_include_qualifier,
         cross_module_direct_dispatch,
         base_fields_guarded_encode,
@@ -88,6 +102,11 @@ all() ->
         empty_union_no_dead_code,
         json_fast_path_helpers,
         repr_direct_converters,
+        onepass_cells_exist,
+        repr_native_binary_encoders,
+        repr_native_binary_decoders,
+        repr_native_native_and_index,
+        repr_native_facade_routing,
         repr_wide_struct,
         compact_enum_literals,
         compact_static_headers,
@@ -96,6 +115,7 @@ all() ->
         rpc_loopback_fallback,
         generated_loopback_buffered,
         generated_loopback_framed,
+        getting_started_example,
         generated_map_mode,
         generated_native_repr,
         generated_set_impl
@@ -299,6 +319,32 @@ cross_module_typedef(Config) ->
     {struct, Fields} = 'main_types':struct_info(<<"Outer">>),
     SeenAt = lists:keyfind(3, 1, Fields),
     ?assertEqual({base, i64}, element(3, SeenAt)),
+    ok.
+
+%% A typedef alias to a cross-module exception stays an alias in the
+%% semantic model, but the emitted throw descriptor resolves to the
+%% defining exception's types module.
+cross_module_exception_typedef(Config) ->
+    _ = write_snippet(
+        Config,
+        "throw_alias_included.thrift",
+        <<"namespace erl included\nexception E {}\n">>
+    ),
+    Root = write_snippet(
+        Config,
+        "throw_alias_root.thrift",
+        <<
+            "include \"throw_alias_included.thrift\"\n"
+            "namespace erl root\n"
+            "typedef included.E E\n"
+            "service Api { void f() throws (1: E e) }\n"
+        >>
+    ),
+    ok = generate_modules(Root),
+    ?assertMatch(
+        [{1, _, {struct, {ref, 'included_types', <<"E">>}}, <<"e">>, _}],
+        root_types:function_info(<<"f">>, exceptions)
+    ),
     ok.
 
 loader_cycle(Config) ->
@@ -561,11 +607,13 @@ required_decode_bitmask(Config) ->
     [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
     %% full mask literal (fields s=bit 1, n=bit 2) at the stop byte:
     %% binary and compact loops close on it, json closes in _done
-    ?assertMatch({match, [_, _]}, re:run(Src, <<"<<0,\\s*Rest\\/binary>>, 3, Acc">>, [global])),
+    %% the wire decoder and every repr decoder share the bitmask STOP
+    %% clauses, so the count is at least the two wire shapes
+    ?assertMatch({match, [_, _ | _]}, re:run(Src, <<"<<0,\\s*Rest\\/binary>>, 3, Acc">>, [global])),
     ?assertMatch({match, _}, re:run(Src, <<"_done\\(3, Acc, Rest\\)">>, [])),
     %% decoded required fields set their bit
-    ?assertMatch({match, [_, _, _]}, re:run(Src, <<"Req bor 1">>, [global])),
-    ?assertMatch({match, [_, _, _]}, re:run(Src, <<"Req bor 2">>, [global])),
+    ?assertMatch({match, [_, _, _ | _]}, re:run(Src, <<"Req bor 1">>, [global])),
+    ?assertMatch({match, [_, _, _ | _]}, re:run(Src, <<"Req bor 2">>, [global])),
     %% missing names are rebuilt from the mask only on the error branch
     ?assertMatch({match, _}, re:run(Src, <<"Req band B\\s*=:=\\s*0">>, [dotall])),
     %% the list/map tracking is gone
@@ -711,8 +759,12 @@ repr_direct_converters(Config) ->
     CacheKey = {thrift_runtime_record, repr_mfa, reprdirect_types},
     _ = persistent_term:erase(CacheKey),
     Outer = {struct, {ref, reprdirect_types, <<"Outer">>}},
-    %% tuple record input, nested tuple converted too
     Wire = #{<<"s">> => <<"a">>, <<"n">> => 3, <<"inner">> => #{<<"s">> => <<"b">>}},
+    %% map-shaped inputs keep the descriptor's maps:from_list path: it is
+    %% faster than the generated map_put chain and must not probe repr_index
+    ?assertEqual(Wire, thrift_runtime_record:to_wire(Outer, Wire)),
+    ?assertEqual(undefined, persistent_term:get(CacheKey, undefined)),
+    %% tuple record input, nested tuple converted too
     ?assertEqual(
         Wire,
         thrift_runtime_record:to_wire(Outer, {reprdirect_outer, <<"a">>, 3, {reprdirect_inner, <<"b">>}, undefined})
@@ -820,7 +872,9 @@ compact_enum_literals(Config) ->
             "namespace erl enumlit\n"
             "enum Color {\n"
             "  RED = 1,\n"
-            "  BLUE = -2\n"
+            "  BLUE = -2,\n"
+            "  HIGH = 64,\n"
+            "  NEGATIVE = -65\n"
             "}\n"
             "struct Paint {\n"
             "  1: optional Color c,\n"
@@ -837,7 +891,23 @@ compact_enum_literals(Config) ->
     %% known values never reach the runtime varint call
     ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(1\\)">>, [])),
     ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(-2\\)">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(64\\)">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_varint_z\\(-65\\)">>, [])),
     ?assertMatch([{ok, _, _}, {ok, _, _}], lists:sort(thrift_generator_emitter:compile_sources(Model))),
+    ok = generate_modules(Path),
+    Paint = {struct, enumlit_types:struct_info(<<"Paint">>)},
+    lists:foreach(
+        fun(Atom) ->
+            Value = #{<<"c">> => Atom},
+            {ok, GenericIo} = thrift_runtime_compact:encode(Paint, Value),
+            {ok, DirectIo} = enumlit_types:encode_enumlit_paint_compact(Value),
+            Wire = iolist_to_binary(GenericIo),
+            ?assertEqual(Wire, iolist_to_binary(DirectIo)),
+            ?assertEqual({ok, Value, <<>>}, enumlit_types:decode_enumlit_paint_compact(Wire)),
+            ?assertEqual({ok, Value, <<>>}, thrift_runtime_compact:decode(Paint, Wire))
+        end,
+        ['RED', 'BLUE', 'HIGH', 'NEGATIVE']
+    ),
     ok.
 
 %% Compact field headers: when the previous field is required (or the
@@ -868,6 +938,10 @@ compact_static_headers(Config) ->
             "  5: required i32 x,\n"
             "  6: optional i32 y\n"
             "}\n"
+            "struct High {\n"
+            "  9: required i32 high,\n"
+            "  64: required i64 wide\n"
+            "}\n"
         >>
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
@@ -897,7 +971,357 @@ compact_static_headers(Config) ->
     ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\022\">>">>)),
     ?assertNotEqual(nomatch, binary:match(Src, <<"<<\"\\031\">>">>)),
     ?assertNotEqual(nomatch, binary:match(Src, <<"encode_statichead_b_compact_fields_f4(Value, _LastId)">>)),
+    %% struct High crosses both varint boundaries without a runtime fallback
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(9,">>, [])),
+    ?assertEqual(nomatch, re:run(Src, <<"enc_header\\(64,">>, [])),
     ?assertMatch([{ok, _, _}, {ok, _, _}], lists:sort(thrift_generator_emitter:compile_sources(Model))),
+    ok = generate_modules(Path),
+    High = {struct, statichead_types:struct_info(<<"High">>)},
+    HighValue = #{<<"high">> => 7, <<"wide">> => 1000000},
+    {ok, HighGenericIo} = thrift_runtime_compact:encode(High, HighValue),
+    {ok, HighDirectIo} = statichead_types:encode_statichead_high_compact(HighValue),
+    HighWire = iolist_to_binary(HighGenericIo),
+    ?assertEqual(HighWire, iolist_to_binary(HighDirectIo)),
+    ?assertEqual({ok, HighValue, <<>>}, statichead_types:decode_statichead_high_compact(HighWire)),
+    ?assertEqual({ok, HighValue, <<>>}, thrift_runtime_compact:decode(High, HighWire)),
+    ok.
+
+%% Facade-level one-pass measurement cells exist: the bench harness
+%% exposes an `onepass` case family keyed {Id, Repr, onepass, Op},
+%% pairing the explicit two-pass baseline with the facade fast path.
+%% The cells exist before the fast path does; head then measures the
+%% same code, so the baseline run must read ratio ~= 1.00.
+
+onepass_cells_exist(Config) ->
+    Path = write_snippet(
+        Config,
+        "onepasspin.thrift",
+        <<
+            "namespace erl onepasspin\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Spec = #{
+        id => <<"Outer">>,
+        struct => <<"Outer">>,
+        value => #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}},
+        base_prefix => <<"onepasspin">>,
+        base_module => onepasspin_types,
+        head_prefix => <<"onepasspin">>,
+        head_module => onepasspin_types
+    },
+    CellKeys = [maps:get(key, C) || C <- thrift_bench_regression:onepass_cases(Spec)],
+    ?assertMatch(
+        [{<<"Outer">>, record, onepass, decode} | _],
+        [K || K = {_, record, onepass, decode} <- CellKeys]
+    ),
+    ok.
+
+%% Repr-native binary encoders read the record tuple or the map
+%% directly: no wire-map materialization. Bytes must equal the
+%% wire-map encode for every accepted input shape; wrong shapes answer
+%% the same unwrapped {error, {value_does_not_match_type, V}} the
+%% conversion layer raises today.
+
+repr_native_binary_encoders(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativeenc.thrift",
+        <<
+            "namespace erl reprnativeenc\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner,\n"
+            "  3: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    ?assertMatch({match, _}, re:run(Src, <<"encode_reprnativeenc_outer_wire_from_record\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"encode_reprnativeenc_outer_wire_from_map\\(">>)),
+    ?assertNotEqual(nomatch, binary:match(Src, <<"{reprnativeenc_outer,">>)),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativeenc_types,
+    Name = <<"Outer">>,
+    Desc = {struct, {ref, Mod, Name}},
+    Wire = #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}, <<"n">> => 7},
+    {ok, ExpectedIo} = thrift_runtime_binary:encode(Desc, Wire),
+    Expected = iolist_to_binary(ExpectedIo),
+    %% record input
+    {ok, RecIo} = Mod:encode_reprnativeenc_outer_wire_from_record(
+        {reprnativeenc_outer, <<"o-1">>, {reprnativeenc_inner, <<"v">>}, 7}
+    ),
+    ?assertEqual(Expected, iolist_to_binary(RecIo)),
+    %% atom-keyed map input: the absent optional key is skipped, so
+    %% the bytes equal the wire encode of the map WITHOUT field 3
+    {ok, MapIo} = Mod:encode_reprnativeenc_outer_wire_from_map(#{id => <<"o-1">>, inner => #{s => <<"v">>}}),
+    {ok, NoNOk} = thrift_runtime_binary:encode(Desc, maps:remove(<<"n">>, Wire)),
+    ?assertEqual(iolist_to_binary(NoNOk), iolist_to_binary(MapIo)),
+    %% binary-keyed map input accepted with identical bytes
+    {ok, BinMapIo} = Mod:encode_reprnativeenc_outer_wire_from_map(Wire),
+    ?assertEqual(Expected, iolist_to_binary(BinMapIo)),
+    %% __struct__ map input: tag dropped, declared fields encoded
+    {ok, StructIo} = Mod:encode_reprnativeenc_outer_wire_from_map(
+        #{'__struct__' => reprnativeenc_outer, id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}
+    ),
+    ?assertEqual(Expected, iolist_to_binary(StructIo)),
+    %% wrong tag: unwrapped conversion-style error
+    ?assertEqual(
+        {error, {value_does_not_match_type, {wrong_tag, <<"o-1">>, {reprnativeenc_inner, <<"v">>}, 7}}},
+        Mod:encode_reprnativeenc_outer_wire_from_record({wrong_tag, <<"o-1">>, {reprnativeenc_inner, <<"v">>}, 7})
+    ),
+    %% nested value in the wrong shape: unwrapped error with the nested value
+    ?assertEqual(
+        {error, {value_does_not_match_type, #{<<"s">> => <<"v">>}}},
+        Mod:encode_reprnativeenc_outer_wire_from_record(
+            {reprnativeenc_outer, <<"o-1">>, #{<<"s">> => <<"v">>}, 7}
+        )
+    ),
+    %% non-tuple/non-map input: unwrapped error
+    ?assertEqual(
+        {error, {value_does_not_match_type, not_a_value}},
+        Mod:encode_reprnativeenc_outer_wire_from_record(not_a_value)
+    ),
+    ok.
+
+%% Repr-native binary decoders build the record tuple / atom-keyed
+%% map / struct map directly from the wire bytes, with the wire
+%% chain's skip, `more` and required-bitmask semantics.
+
+repr_native_binary_decoders(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativedec.thrift",
+        <<
+            "namespace erl reprnativedec\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner,\n"
+            "  3: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativedec_outer_wire_record\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativedec_outer_wire_map\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativedec_outer_wire_struct\\(">>)),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativedec_types,
+    Desc = {struct, {ref, Mod, <<"Outer">>}},
+    Wire = #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}, <<"n">> => 7},
+    {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
+    Bin = iolist_to_binary(Io),
+    {ok, WireBack, <<>>} = thrift_runtime_binary:decode(Desc, Bin),
+    %% record: tuple, absent optionals as undefined
+    {ok, Rec, <<>>} = Mod:decode_reprnativedec_outer_wire_record(Bin),
+    ?assertEqual({reprnativedec_outer, <<"o-1">>, {reprnativedec_inner, <<"v">>}, 7}, Rec),
+    {ok, RecNoN, <<>>} = Mod:decode_reprnativedec_outer_wire_record(
+        iolist_to_binary(element(2, thrift_runtime_binary:encode(Desc, maps:remove(<<"n">>, Wire))))
+    ),
+    ?assertEqual({reprnativedec_outer, <<"o-1">>, {reprnativedec_inner, <<"v">>}, undefined}, RecNoN),
+    %% map: atom keys, present only
+    {ok, MapBack, <<>>} = Mod:decode_reprnativedec_outer_wire_map(Bin),
+    ?assertEqual(#{id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}, MapBack),
+    %% struct: atom map plus the identity tag
+    {ok, StructBack, <<>>} = Mod:decode_reprnativedec_outer_wire_struct(Bin),
+    ?assertEqual(
+        #{
+            '__struct__' => reprnativedec_outer,
+            id => <<"o-1">>,
+            inner => #{'__struct__' => reprnativedec_inner, s => <<"v">>},
+            n => 7
+        },
+        StructBack
+    ),
+    %% truncated input asks for more, exactly like the wire decoder
+    ?assertEqual(more, Mod:decode_reprnativedec_outer_wire_record(binary:part(Bin, 0, byte_size(Bin) - 1))),
+    ?assertEqual(WireBack, thrift_runtime_record:to_wire(Desc, Rec)),
+    ok.
+
+%% The repr index hands out the per-repr encoder/decoder pair by
+%% struct name; the native decoder builds the EEP-79 record at the STOP
+%% byte with literal field atoms (OTP 29+).
+
+repr_native_native_and_index(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativenative.thrift",
+        <<
+            "namespace erl reprnativenative\n"
+            "struct Item {\n"
+            "  1: required string s,\n"
+            "  2: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [#{source := Src} | _] = thrift_generator_emitter:sources(Model),
+    ?assertMatch({match, _}, re:run(Src, <<"binary_repr_codec\\(">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"decode_reprnativenative_item_wire_native\\(">>)),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativenative_types,
+    {ok, {EncRec, DecRec}} = Mod:binary_repr_codec(<<"Item">>, record),
+    ?assertEqual(encode_reprnativenative_item_wire_from_record, EncRec),
+    ?assertEqual(decode_reprnativenative_item_wire_record, DecRec),
+    {ok, {_EncMap, DecStruct}} = Mod:binary_repr_codec(<<"Item">>, struct),
+    ?assertEqual(decode_reprnativenative_item_wire_struct, DecStruct),
+    %% the native pair exists on every OTP: the OTP-28 unsupported_repr
+    %% gate lives in the facade, not the index
+    {ok, {_, DecNative0}} = Mod:binary_repr_codec(<<"Item">>, native),
+    ?assertEqual(decode_reprnativenative_item_wire_native, DecNative0),
+    ?assertEqual(error, Mod:binary_repr_codec(<<"Nope">>, record)),
+    case thrift_runtime_native:supported() of
+        true ->
+            Desc = {struct, {ref, Mod, <<"Item">>}},
+            Wire = #{<<"s">> => <<"v">>, <<"n">> => 1},
+            {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
+            Bin = iolist_to_binary(Io),
+            {ok, Native, <<>>} = Mod:decode_reprnativenative_item_wire_native(Bin),
+            ?assert(thrift_runtime_native:is_native(Native)),
+            ?assertEqual(Wire, thrift_runtime_record:to_wire(Desc, Native)),
+            ?assertEqual(Wire, thrift_runtime_record:to_wire(Desc, Native));
+        false ->
+            ok
+    end,
+    ok.
+
+%% Facade routing: thrift_runtime decode/3 and encode/2 take the
+%% one-pass path underneath for eligible inputs and fall back to the
+%% two-pass conversion otherwise, with identical bytes, values and
+%% error terms on every shape.
+
+repr_native_facade_routing(Config) ->
+    Path = write_snippet(
+        Config,
+        "reprnativefacade.thrift",
+        <<
+            "namespace erl reprnativefacade\n"
+            "struct Inner {\n"
+            "  1: required string s\n"
+            "}\n"
+            "struct Outer {\n"
+            "  1: required string id,\n"
+            "  2: required Inner inner,\n"
+            "  3: optional i32 n\n"
+            "}\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Path),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Compiled = thrift_generator_emitter:compile_sources(Model),
+    lists:foreach(
+        fun({ok, Name, Beam}) ->
+            {module, Name} = code:load_binary(Name, atom_to_list(Name) ++ ".erl", Beam)
+        end,
+        Compiled
+    ),
+    Mod = reprnativefacade_types,
+    Desc = {struct, {ref, Mod, <<"Outer">>}},
+    Wire = #{<<"id">> => <<"o-1">>, <<"inner">> => #{<<"s">> => <<"v">>}, <<"n">> => 7},
+    {ok, Io} = thrift_runtime_binary:encode(Desc, Wire),
+    Bin = iolist_to_binary(Io),
+    %% the facade decode equals the two-pass result
+    {ok, Rec} = thrift_runtime:decode(Desc, Bin, #{repr => record}),
+    ?assertEqual({reprnativefacade_outer, <<"o-1">>, {reprnativefacade_inner, <<"v">>}, 7}, Rec),
+    {ok, Map} = thrift_runtime:decode(Desc, Bin, #{repr => map}),
+    ?assertEqual(#{id => <<"o-1">>, inner => #{s => <<"v">>}, n => 7}, Map),
+    {ok, Struct} = thrift_runtime:decode(Desc, Bin, #{repr => struct}),
+    ?assertEqual(
+        #{
+            '__struct__' => reprnativefacade_outer,
+            id => <<"o-1">>,
+            inner => #{'__struct__' => reprnativefacade_inner, s => <<"v">>},
+            n => 7
+        },
+        Struct
+    ),
+    %% decode of a record-mode struct under map mode keeps working;
+    %% truncated and trailing behave as today
+    {error, truncated} = thrift_runtime:decode(Desc, binary:part(Bin, 0, byte_size(Bin) - 1), #{
+        repr => record
+    }),
+    {error, trailing} = thrift_runtime:decode(Desc, <<Bin/binary, 0>>, #{repr => record}),
+    %% encode/2 from every accepted shape equals the wire encode
+    {ok, EncRec} = thrift_runtime:encode(Desc, Rec),
+    ?assertEqual(Bin, EncRec),
+    {ok, EncMap} = thrift_runtime:encode(Desc, Map),
+    ?assertEqual(Bin, EncMap),
+    %% binary-keyed wire map input keeps identical bytes (Review Focus 1)
+    {ok, EncWire} = thrift_runtime:encode(Desc, Wire),
+    ?assertEqual(Bin, EncWire),
+    %% __struct__ map input encodes identically (Review Focus 2)
+    {ok, EncStruct} = thrift_runtime:encode(Desc, Struct),
+    ?assertEqual(Bin, EncStruct),
+    %% wrong-tag tuple: the unwrapped conversion error (Review Focus 5)
+    ?assertEqual(
+        {error, {value_does_not_match_type, {wrong, <<"o-1">>, {reprnativefacade_inner, <<"v">>}, 7}}},
+        thrift_runtime:encode(Desc, {wrong, <<"o-1">>, {reprnativefacade_inner, <<"v">>}, 7})
+    ),
+    %% mixed nesting (record holding a wire-map nested value): the
+    %% fast path rejects it, the facade retries two-pass and answers
+    %% exactly what the two-pass path answers today — success
+    Mixed = {reprnativefacade_outer, <<"o-1">>, #{<<"s">> => <<"v">>}, 7},
+    {ok, EncMixed} = thrift_runtime:encode(Desc, Mixed),
+    TwoPassMixed = begin
+        WireMixed = thrift_runtime_record:to_wire(Desc, Mixed),
+        iolist_to_binary(element(2, thrift_runtime_binary:encode(Desc, WireMixed)))
+    end,
+    ?assertEqual(TwoPassMixed, EncMixed),
+    %% non-eligible input falls back with today's error
+    ?assertEqual(
+        {error, {value_does_not_match_type, not_a_value}},
+        thrift_runtime:encode(Desc, not_a_value)
+    ),
+    %% the fast path left its verdicts in the dispatch cache
+    CacheKey = {thrift_runtime_binary, repr_codec_mfa, Mod},
+    Cache = persistent_term:get(CacheKey),
+    ?assertMatch(#{{<<"Outer">>, record} := {_, _}}, Cache),
+    ?assertMatch(#{{<<"Outer">>, map} := {_, _}}, Cache),
+    _ = persistent_term:erase(CacheKey),
     ok.
 
 %% RPC params/result hooks: the generated service info carries
@@ -1065,13 +1489,115 @@ rpc_loopback_fallback(Config) ->
         thrift_runtime_server:stop(Server)
     end.
 
-loader_duplicate_module(Config) ->
+%% Two files may share a namespace for generated identifiers. Their module
+%% keys disambiguate by basename, while prefixes, include qualifiers and
+%% record tags keep the shared namespace value.
+loader_shared_namespace_modules(Config) ->
     One = data_file(Config, "semantic/dup_one.thrift"),
-    Two = data_file(Config, "semantic/dup_two.thrift"),
+    {ok, Loaded} = thrift_generator_loader:load(One),
+    ?assertEqual([<<"dup_one">>, <<"dup_two">>], [E#tg_loaded.name || E <- Loaded]),
+    ?assertEqual([<<"duplicated">>, <<"duplicated">>], [E#tg_loaded.prefix || E <- Loaded]),
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    [OneMod, TwoMod] = Model#tg_model.modules,
+    ?assertEqual([<<"duplicated">>, <<"duplicated">>], [OneMod#tg_module.prefix, TwoMod#tg_module.prefix]),
+    ok = generate_modules(One),
+    {struct, Fields} = dup_one_types:struct_info(<<"One">>),
+    OtherField = lists:keyfind(2, 1, Fields),
+    ?assertEqual({struct, {ref, dup_two_types, <<"Two">>}}, element(3, OtherField)),
+    ?assertEqual({duplicated_one, [x, other]}, dup_one_types:record_fields(<<"One">>)),
+    ?assertEqual({duplicated_two, [y]}, dup_two_types:record_fields(<<"Two">>)),
+    ok.
+
+%% When even file basenames cannot make module keys unique, the original
+%% duplicate error remains — silently choosing either file would make
+%% cross-file references ambiguous.
+%% Collision-fallback module keys use the same atom-safe normalization as
+%% identifier prefixes, scoped to the basename candidate: hyphens/spaces
+%% collapse, a leading digit is guarded, and the shared identifier prefix
+%% remains untouched.
+loader_shared_namespace_module_key_normalization(Config) ->
+    Content = <<"namespace erl shared\nstruct Thing { 1: i32 value }\n">>,
+    First = write_nested_snippet(Config, "normal_a/hy-phen.thrift", Content),
+    Second = write_nested_snippet(Config, "normal_b/space name.thrift", Content),
+    Third = write_nested_snippet(Config, "normal_c/2fast.thrift", Content),
+    Root = write_snippet(
+        Config,
+        "normalized_root.thrift",
+        <<
+            "include \"normal_a/hy-phen.thrift\"\n"
+            "include \"normal_b/space name.thrift\"\n"
+            "include \"normal_c/2fast.thrift\"\n"
+            "namespace erl root\n"
+        >>
+    ),
+    {ok, Loaded} = thrift_generator_loader:load(Root),
+    ?assertEqual(<<"hy-phen">>, thrift_generator_loader:include_qualifier(First)),
+    ?assertEqual(<<"space name">>, thrift_generator_loader:include_qualifier(Second)),
+    ?assertEqual(<<"2fast">>, thrift_generator_loader:include_qualifier(Third)),
+    ?assertEqual(
+        [<<"root">>, <<"hy_phen">>, <<"space_name">>, <<"_2fast">>],
+        [E#tg_loaded.name || E <- Loaded]
+    ),
+    ?assertEqual(
+        [<<"root">>, <<"shared">>, <<"shared">>, <<"shared">>],
+        [E#tg_loaded.prefix || E <- Loaded]
+    ),
+    ok = generate_modules(Root),
+    ?assertMatch({file, _}, code:is_loaded(hy_phen_types)),
+    ?assertMatch({file, _}, code:is_loaded(space_name_types)),
+    ?assertMatch({file, _}, code:is_loaded('_2fast_types')),
+    ?assertEqual({shared_thing, [value]}, hy_phen_types:record_fields(<<"Thing">>)),
+    ok.
+
+%% Normalization may itself collide. That stays conservative: the original
+%% namespace collision is rejected rather than inventing a second naming
+%% scheme or choosing an arbitrary winner.
+loader_shared_namespace_module_key_collision_after_normalization(Config) ->
+    Content = <<"namespace erl shared\nstruct Thing { 1: i32 value }\n">>,
+    First = write_nested_snippet(Config, "normalized_collision_a/a-b.thrift", Content),
+    Second = write_nested_snippet(Config, "normalized_collision_b/a b.thrift", Content),
+    Root = write_snippet(
+        Config,
+        "normalized_collision_root.thrift",
+        <<
+            "include \"normalized_collision_a/a-b.thrift\"\n"
+            "include \"normalized_collision_b/a b.thrift\"\n"
+            "namespace erl root\n"
+        >>
+    ),
+    FirstAbs = unicode:characters_to_binary(filename:absname(First)),
+    SecondAbs = unicode:characters_to_binary(filename:absname(Second)),
     ?assertMatch(
-        {error, {duplicate_module, <<"duplicated">>, One, Two}},
-        thrift_generator_loader:load(One)
-    ).
+        {error, {duplicate_module, <<"shared">>, FirstAbs, SecondAbs}},
+        thrift_generator_loader:load(Root)
+    ),
+    ok.
+
+loader_unresolved_duplicate_module(Config) ->
+    Priv = proplists:get_value(priv_dir, Config),
+    First = filename:join(Priv, "same_ns_a/shared.thrift"),
+    Second = filename:join(Priv, "same_ns_b/shared.thrift"),
+    ok = filelib:ensure_dir(First),
+    ok = filelib:ensure_dir(Second),
+    Content = <<"namespace erl shared\nstruct Thing { 1: i32 value }\n">>,
+    ok = file:write_file(First, Content),
+    ok = file:write_file(Second, Content),
+    Root = write_snippet(
+        Config,
+        "same_ns_root.thrift",
+        <<
+            "include \"same_ns_a/shared.thrift\"\n"
+            "include \"same_ns_b/shared.thrift\"\n"
+            "namespace erl root\n"
+        >>
+    ),
+    FirstAbs = unicode:characters_to_binary(filename:absname(First)),
+    SecondAbs = unicode:characters_to_binary(filename:absname(Second)),
+    ?assertMatch(
+        {error, {duplicate_module, <<"shared">>, FirstAbs, SecondAbs}},
+        thrift_generator_loader:load(Root)
+    ),
+    ok.
 
 loader_missing_include(Config) ->
     Missing = data_file(Config, "semantic/does_not_exist.thrift"),
@@ -1160,9 +1686,11 @@ utf8_doc_and_const(Config) ->
     ),
     {ok, Loaded} = thrift_generator_loader:load(Path),
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
-    %% single-file document: exactly one types module comes back
-    #{source := Src} = hd(thrift_generator_emitter:sources(Model)),
-    ?assertMatch({_, _}, binary:match(Src, <<"-doc(\"Значение в JSON"/utf8>>)),
+    %% single-file document: exactly one types module comes back; the
+    %% struct's IDL doc comment lands above its hrl record declaration
+    %% (the direct codec functions are internal, the facade module-level)
+    #{source := Src, hrl := Hrl} = hd(thrift_generator_emitter:sources(Model)),
+    ?assertMatch({_, _}, binary:match(Hrl, <<"% Значение в JSON"/utf8>>)),
     ?assertMatch({_, _}, binary:match(Src, <<"demo_greeting() -> <<\"привет\">>."/utf8>>)),
     ok.
 
@@ -1220,10 +1748,10 @@ same_struct_names_coexist(Config) ->
     ),
     ?assertEqual({first_point, [x]}, first_types:record_fields(<<"Point">>)),
     ?assertEqual({second_point, [y]}, second_types:record_fields(<<"Point">>)),
-    {ok, Bin1} = first_types:encode_first_point({first_point, 7}),
-    {ok, Bin2} = second_types:encode_second_point({second_point, <<"hey">>}),
-    ?assertEqual({ok, {first_point, 7}}, first_types:decode_first_point(Bin1)),
-    ?assertEqual({ok, {second_point, <<"hey">>}}, second_types:decode_second_point(Bin2)),
+    {ok, Bin1} = first_types:encode(point, {first_point, 7}),
+    {ok, Bin2} = second_types:encode(point, {second_point, <<"hey">>}),
+    ?assertEqual({ok, {first_point, 7}}, first_types:decode(point, Bin1)),
+    ?assertEqual({ok, {second_point, <<"hey">>}}, second_types:decode(point, Bin2)),
     ok.
 
 %% End-to-end through the generated stack: main.thrift → compiled
@@ -1266,6 +1794,119 @@ generated_loopback(Config, Transport) ->
         end
     after
         main_main_service_server:stop(Server)
+    end.
+
+%% The root README's Getting Started example, compiled and executed so
+%% its names cannot drift: the ping.thrift IDL and the ping_handler
+%% module are the README's verbatim sources, and every codec call below
+%% is a README snippet (record values are plain tuples here because the
+%% suite cannot include the generated hrl at its own compile time; the
+%% README spells them with record syntax).
+
+-spec getting_started_example(ct:config()) -> ok.
+getting_started_example(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    Path = write_snippet(
+        Config,
+        "ping.thrift",
+        <<
+            "namespace erl ping.api\n"
+            "\n"
+            "struct PingRequest {\n"
+            "  1: required string message\n"
+            "}\n"
+            "\n"
+            "struct PingReply {\n"
+            "  1: required string message,\n"
+            "  2: i64 at_millis\n"
+            "}\n"
+            "\n"
+            "exception NoSuchMessage {\n"
+            "  1: string text\n"
+            "}\n"
+            "\n"
+            "service Ping {\n"
+            "  PingReply ping(1: PingRequest request) throws(1: NoSuchMessage err),\n"
+            "  oneway void poke()\n"
+            "}\n"
+        >>
+    ),
+    {ok, _} = thrift_generator:generate(Path, PrivDir, #{}),
+    lists:foreach(
+        fun(File) ->
+            {ok, Mod, Beam} = compile:file(filename:join(PrivDir, File), [binary, {i, PrivDir}]),
+            {module, Mod} = code:load_binary(Mod, File, Beam)
+        end,
+        [
+            "ping_api_types.erl",
+            "ping_api_ping_client.erl",
+            "ping_api_ping_server.erl",
+            "ping_api_ping_handler.erl"
+        ]
+    ),
+    ok = file:write_file(
+        filename:join(PrivDir, "ping_handler.erl"),
+        <<
+            "-module(ping_handler).\n"
+            "-include(\"ping_api_types.hrl\").\n"
+            "\n"
+            "-behaviour(ping_api_ping_handler).\n"
+            "\n"
+            "-export([ping/1, poke/0]).\n"
+            "\n"
+            "ping(#ping_api_ping_request{message = <<\"bad\">>}) ->\n"
+            "    {error, {exception, #ping_api_no_such_message{text = <<\"nope\">>}}};\n"
+            "ping(#ping_api_ping_request{message = Msg}) ->\n"
+            "    {ok, #ping_api_ping_reply{message = <<\"pong: \", Msg/binary>>, at_millis = 0}}.\n"
+            "\n"
+            "poke() -> {ok, undefined}.\n"
+        >>
+    ),
+    {ok, ping_handler, HandlerBeam} = compile:file(
+        filename:join(PrivDir, "ping_handler.erl"), [binary, {i, PrivDir}]
+    ),
+    {module, ping_handler} = code:load_binary(ping_handler, "ping_handler.erl", HandlerBeam),
+    %% the README codec facade snippets
+    Req = {ping_api_ping_request, <<"hi">>},
+    {ok, Bin} = ping_api_types:encode(ping_request, Req),
+    {ok, Req} = ping_api_types:decode(ping_request, Bin),
+    {ok, Map} = ping_api_types:decode(ping_request, Bin, #{repr => map}),
+    ?assertEqual(#{message => <<"hi">>}, Map),
+    {ok, Struct} = ping_api_types:decode(ping_request, Bin, #{repr => struct}),
+    ?assertEqual(ping_api_ping_request, maps:get('__struct__', Struct)),
+    {ok, Req} = ping_api_types:convert(ping_request, Struct, record),
+    ?assertEqual(
+        {error, {unknown_fields, [extra]}},
+        ping_api_types:encode(ping_request, #{message => <<"hi">>, extra => 1}, #{strict => true})
+    ),
+    {ok, Compact} = ping_api_types:encode(ping_request, Req, #{protocol => compact}),
+    {ok, Req} = ping_api_types:decode(ping_request, Compact, #{protocol => compact}),
+    {ok, Json} = ping_api_types:encode(ping_request, Req, #{protocol => json}),
+    {ok, Req} = ping_api_types:decode(ping_request, Json, #{protocol => json}),
+    {ok, Desc} = ping_api_types:descriptor(ping_request),
+    ?assertEqual({ok, Compact}, thrift_runtime:encode(Desc, Req, #{protocol => compact})),
+    ?assertEqual({ok, Map}, thrift_runtime:decode(Desc, Bin, #{repr => map})),
+    ?assertEqual({ok, Struct}, thrift_runtime:convert(Desc, Map, struct)),
+    %% the README server/client snippet (an ephemeral port instead of 9090)
+    {ok, Server} = ping_api_ping_server:start_link(#{port => 0, handler => ping_handler}),
+    try
+        {ok, Port} = ping_api_ping_server:port(Server),
+        {ok, Client} = ping_api_ping_client:start_link(#{host => "127.0.0.1", port => Port}),
+        try
+            ?assertEqual(
+                {ok, {ping_api_ping_reply, <<"pong: hi">>, 0}},
+                ping_api_ping_client:ping(Client, {ping_api_ping_request, <<"hi">>})
+            ),
+            ?assertEqual(
+                {error, {exception, {ping_api_no_such_message, <<"nope">>}}},
+                ping_api_ping_client:ping(Client, {ping_api_ping_request, <<"bad">>})
+            ),
+            ok = ping_api_ping_client:poke(Client)
+        after
+            ok = ping_api_ping_client:stop(Client)
+        end
+    after
+        ok = ping_api_ping_server:stop(Server)
     end.
 
 -spec check_oneway(pid()) -> ok.
@@ -1328,37 +1969,37 @@ generated_map_mode(Config) ->
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_point">>)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(mapmode_binpoint">>)),
     %% the codec axis on a map-mode struct: the default target is the map
-    {ok, PointBin} = mapmode_types:encode_mapmode_point(#{x => 1, y => 2}),
-    ?assertEqual({ok, #{x => 1, y => 2}}, mapmode_types:decode_mapmode_point(PointBin)),
+    {ok, PointBin} = mapmode_types:encode(point, #{x => 1, y => 2}),
+    ?assertEqual({ok, #{x => 1, y => 2}}, mapmode_types:decode(point, PointBin)),
     ?assertEqual(
         %% struct maps are tagged by the wire name — map-mode structs
         %% have no record tag
         {ok, #{'__struct__' => point, x => 1, y => 2}},
-        mapmode_types:decode_mapmode_point(PointBin, struct)
+        mapmode_types:decode(point, PointBin, #{repr => struct})
     ),
     %% native records (EEP-79, OTP 29+): the generated codec forwards the
     %% axis to the runtime engine untouched
     case native_supported() of
         true ->
-            {ok, PointNative} = mapmode_types:decode_mapmode_point(PointBin, native),
+            {ok, PointNative} = mapmode_types:decode(point, PointBin, #{repr => native}),
             ?assertEqual(mapmode_types, records:get_module(PointNative)),
             ?assertEqual(point, records:get_name(PointNative)),
-            ?assertEqual({ok, PointBin}, mapmode_types:encode_mapmode_point(PointNative));
+            ?assertEqual({ok, PointBin}, mapmode_types:encode(point, PointNative));
         false ->
             ?assertEqual(
                 {error, {unsupported_repr, native}},
-                mapmode_types:decode_mapmode_point(PointBin, native)
+                mapmode_types:decode(point, PointBin, #{repr => native})
             )
     end,
     ?assertEqual(
         {error, {no_record, point}},
-        mapmode_types:convert(#{'__struct__' => point, x => 1, y => 2}, record)
+        mapmode_types:convert(point, #{'__struct__' => point, x => 1, y => 2}, record)
     ),
     {ok, NestBin} =
-        mapmode_types:encode_mapmode_nest({mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}),
+        mapmode_types:encode(nest, {mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}),
     ?assertEqual(
         {ok, {mapmode_nest, #{x => 1, y => 2}, #{<<"x">> => 5}}},
-        mapmode_types:decode_mapmode_nest(NestBin)
+        mapmode_types:decode(nest, NestBin)
     ),
     %% e2e: maps over the wire, both key types, declared exception
     {ok, Server} =
@@ -1424,14 +2065,14 @@ generated_native_repr(Config) ->
     ?assertMatch(nomatch, re:run(Hrl, <<"-record\\(nativedemo_point">>)),
     ?assertMatch(nomatch, re:run(Hrl, <<"-type nativedemo_point\\(\\)">>)),
     %% codec roundtrip: map and record axes on every release
-    {ok, PointBin} = nativedemo_types:encode_nativedemo_point(#{x => 1, label => <<"p">>}),
+    {ok, PointBin} = nativedemo_types:encode(point, #{x => 1, label => <<"p">>}),
     ?assertEqual(
         {ok, #{x => 1, label => <<"p">>}},
-        nativedemo_types:decode_nativedemo_point(PointBin, map)
+        nativedemo_types:decode(point, PointBin, #{repr => map})
     ),
     ?assertEqual(
         {error, {no_record, point}},
-        nativedemo_types:decode_nativedemo_point(PointBin, record)
+        nativedemo_types:decode(point, PointBin, #{repr => record})
     ),
     {ok, Server} =
         nativedemo_nat_svc_server:start_link(#{port => 0, handler => thrift_generator_nativedemo_handler}),
@@ -1443,19 +2084,19 @@ generated_native_repr(Config) ->
             ?assertEqual({ok, 12}, nativedemo_nat_svc_client:area(Client, 3, 4)),
             case native_supported() of
                 true ->
-                    {ok, PointNative} = nativedemo_types:decode_nativedemo_point(PointBin),
+                    {ok, PointNative} = nativedemo_types:decode(point, PointBin),
                     ?assertEqual(nativedemo_types, records:get_module(PointNative)),
                     ?assertEqual(point, records:get_name(PointNative)),
                     ?assertEqual(
-                        {ok, PointBin}, nativedemo_types:encode_nativedemo_point(PointNative)
+                        {ok, PointBin}, nativedemo_types:encode(point, PointNative)
                     ),
                     ?assertEqual(
                         {ok, #{x => 1, label => <<"p">>}},
-                        nativedemo_types:convert(PointNative, map)
+                        nativedemo_types:convert(point, PointNative, map)
                     ),
                     ?assertEqual(
                         {error, {no_record, point}},
-                        nativedemo_types:convert(PointNative, record)
+                        nativedemo_types:convert(point, PointNative, record)
                     ),
                     %% e2e: generated clients decode replies through the
                     %% low-level record axis (atom-key maps for native
@@ -1472,7 +2113,7 @@ generated_native_repr(Config) ->
                 false ->
                     ?assertEqual(
                         {error, {unsupported_repr, native}},
-                        nativedemo_types:decode_nativedemo_point(PointBin)
+                        nativedemo_types:decode(point, PointBin)
                     )
             end
         after
@@ -1520,10 +2161,10 @@ generated_set_impl(Config) ->
         list_field => [],
         binary_field => <<"b">>
     },
-    {ok, Bin} = test_types:encode_test_crazy_nesting(Value),
-    {ok, #{set_field := MapOrdset}} = test_types:decode_test_crazy_nesting(Bin, map),
+    {ok, Bin} = test_types:encode(crazy_nesting, Value),
+    {ok, #{set_field := MapOrdset}} = test_types:decode(crazy_nesting, Bin, #{repr => map}),
     ?assertEqual(lists:usort([Full, Empty]), MapOrdset),
-    {ok, Rec} = test_types:decode_test_crazy_nesting(Bin),
+    {ok, Rec} = test_types:decode(crazy_nesting, Bin),
     {test_crazy_nesting, <<"s">>, RecOrdset, [], <<"b">>, undefined} = Rec,
     ?assertEqual(
         lists:usort([{test_insanity, #{'ONE' => 1}, []}, {test_insanity, #{}, []}]),
@@ -1532,7 +2173,8 @@ generated_set_impl(Config) ->
     %% encode passes values through as given, so the duplicated wire
     %% above does not reproduce verbatim; the normalized value does
     {ok, NormBin} =
-        test_types:encode_test_crazy_nesting(
+        test_types:encode(
+            crazy_nesting,
             #{
                 string_field => <<"s">>,
                 set_field => lists:usort([Full, Empty]),
@@ -1540,13 +2182,13 @@ generated_set_impl(Config) ->
                 binary_field => <<"b">>
             }
         ),
-    ?assertEqual({ok, NormBin}, test_types:encode_test_crazy_nesting(Rec)),
+    ?assertEqual({ok, NormBin}, test_types:encode(crazy_nesting, Rec)),
     %% the file-wide sets default: unannotated sets decode as sets
     %% collections, encode takes them back (a sets input — no coercion)
-    {ok, VBin} = test_types:encode_test_versioning_test_v2(#{newset => sets:from_list([3, 1, 2])}),
-    {ok, #{newset := NewSet}} = test_types:decode_test_versioning_test_v2(VBin, map),
+    {ok, VBin} = test_types:encode(versioning_test_v2, #{newset => sets:from_list([3, 1, 2])}),
+    {ok, #{newset := NewSet}} = test_types:decode(versioning_test_v2, VBin, #{repr => map}),
     ?assertEqual(sets:from_list([1, 2, 3]), NewSet),
-    ?assertEqual({ok, VBin}, test_types:encode_test_versioning_test_v2(#{newset => NewSet})),
+    ?assertEqual({ok, VBin}, test_types:encode(versioning_test_v2, #{newset => NewSet})),
     ok.
 
 %% Generates and loads the modules for the semantic fixture. Safe to
@@ -1586,6 +2228,12 @@ data_file(Config, Relative) ->
 
 write_snippet(Config, Name, Content) ->
     Path = filename:join(proplists:get_value(priv_dir, Config), Name),
+    ok = file:write_file(Path, Content),
+    Path.
+
+write_nested_snippet(Config, RelativePath, Content) ->
+    Path = filename:join(proplists:get_value(priv_dir, Config), RelativePath),
+    ok = filelib:ensure_dir(Path),
     ok = file:write_file(Path, Content),
     Path.
 

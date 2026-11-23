@@ -43,8 +43,12 @@ erlperf continuous mode: one discarded warmup sample followed by three
 500 ms samples, concurrency 1; the reported number is erlperf's
 average iterations per second with the sample stddev.
 
-The report has two blocks. The `ours` vs `reference` rows measure the
-specialized path against the official runtime. The trailing
+The report has three blocks. The `ours` vs `reference` rows measure the
+specialized wire path against the official runtime. The trailing
+`facade (record repr) vs reference` rows measure the binary-protocol
+facade (`thrift_runtime:encode/2` and `decode/3`) over the record
+representation — the path applications actually call, which engages
+the repr-native one-pass codecs — against the same official rows. The
 `specialized vs generic` rows isolate the codec-emission axis inside
 our own runtime: the ref descriptor (the specialized codec probe)
 against the same protocol engine over an inline descriptor (always the
@@ -203,6 +207,15 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     ?assertEqual(OurValue, OurJsonDecoded),
     {_, {ok, JsonDecoded}} = official_decode_message(JsonMessage, OfficialName),
     Check(JsonDecoded),
+    %% The facade path applications call: record-representation values
+    %% straight to wire bytes and back through the repr-native one-pass
+    %% codecs. Its bytes must equal the wire path's and it must
+    %% round-trip to the identical record.
+    RecordValue = thrift_runtime_record:from_wire(BinDesc, OurValue, record),
+    {ok, FacadeBinary} = thrift_runtime:encode(BinDesc, RecordValue),
+    ?assertEqual(BinaryWire, FacadeBinary),
+    {ok, FacadeDecoded} = thrift_runtime:decode(BinDesc, BinaryWire, #{repr => record}),
+    ?assertEqual(RecordValue, FacadeDecoded),
 
     %% Ours: the specialized codecs (ref descriptors).
     SpecBinaryEncode = erlbench(fun() -> {ok, _} = thrift_runtime_binary:encode(BinDesc, OurValue) end),
@@ -242,6 +255,12 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     ReferenceJsonEncode =
         erlbench(fun() -> ok = official_write(OfficialValue, OfficialName, json) end),
     ReferenceJsonDecode = erlbench(fun() -> {_, {ok, _}} = official_decode_message(JsonMessage, OfficialName) end),
+    %% Facade over the record representation — the repr-native fast
+    %% path (binary protocol only; other protocols route two-pass).
+    FacadeBinaryEncode =
+        erlbench(fun() -> {ok, _} = thrift_runtime:encode(BinDesc, RecordValue) end),
+    FacadeBinaryDecode =
+        erlbench(fun() -> {ok, _} = thrift_runtime:decode(BinDesc, BinaryWire, #{repr => record}) end),
 
     Rows = [
         {<<"binary/encode">>, {measured, SpecBinaryEncode}, {measured, ReferenceBinaryEncode}},
@@ -250,6 +269,10 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
         {<<"compact/decode">>, {measured, SpecCompactDecode}, {measured, ReferenceCompactDecode}},
         {<<"json/encode">>, {measured, SpecJsonEncode}, {measured, ReferenceJsonEncode}},
         {<<"json/decode">>, {measured, SpecJsonDecode}, {measured, ReferenceJsonDecode}}
+    ],
+    FacadeRows = [
+        {<<"binary/encode">>, {measured, FacadeBinaryEncode}, {measured, ReferenceBinaryEncode}},
+        {<<"binary/decode">>, {measured, FacadeBinaryDecode}, {measured, ReferenceBinaryDecode}}
     ],
     AxisRows = [
         {<<"binary/encode">>, {measured, SpecBinaryEncode}, {measured, GenBinaryEncode}},
@@ -268,7 +291,8 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
                 {json, byte_size(JsonWire)}
             ],
             Rows,
-            AxisRows
+            AxisRows,
+            FacadeRows
         ),
         $\n
     ]),
@@ -397,9 +421,9 @@ erlbench(Fun) ->
     #{average => Average, stddev => StdDev}.
 
 -spec format_report(
-    binary(), [{binary | compact | json, non_neg_integer()}], [row()], [row()]
+    binary(), [{binary | compact | json, non_neg_integer()}], [row()], [row()], [row()]
 ) -> string().
-format_report(Name, WireSizes, Rows, AxisRows) ->
+format_report(Name, WireSizes, Rows, AxisRows, FacadeRows) ->
     Sizes = [
         io_lib:format("~ts ~p B", [Proto, Size])
      || {Proto, Size} <- WireSizes
@@ -408,15 +432,27 @@ format_report(Name, WireSizes, Rows, AxisRows) ->
         io_lib:format("thrift_bench[~ts: ~ts]", [Name, lists:join(", ", Sizes)]),
     Lines = [row_line(Row) || Row <- Rows],
     AxisLines = [axis_line(Row) || Row <- AxisRows],
+    FacadeLines = [facade_line(Row) || Row <- FacadeRows],
     lists:flatten([
         Header,
         $\n,
         lists:join($\n, Lines),
         $\n,
+        "  facade (record repr) vs reference:",
+        $\n,
+        lists:join($\n, FacadeLines),
+        $\n,
         "  specialized vs generic (ref descriptor vs inline):",
         $\n,
         lists:join($\n, AxisLines)
     ]).
+
+%% The application-facing facade over the record representation
+%% against the official runtime.
+
+-spec facade_line(row()) -> string().
+facade_line({Label, Facade, Reference}) ->
+    labelled_line(Label, facade, Facade, reference, Reference).
 
 -type row() :: {binary(), {measured, throughput()}, {measured, throughput()}}.
 
@@ -433,9 +469,9 @@ axis_line({Label, Specialized, Generic}) ->
 
 -spec labelled_line(
     binary(),
-    ours | reference | generic | specialized,
+    ours | reference | generic | specialized | facade,
     {measured, throughput()},
-    ours | reference | generic | specialized,
+    ours | reference | generic | specialized | facade,
     {measured, throughput()}
 ) ->
     string().

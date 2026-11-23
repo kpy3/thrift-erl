@@ -25,8 +25,13 @@
 -export([
     protocol_module_axis_test/0,
     facade_roundtrip_test/0,
+    facade_options_map_test/0,
+    facade_options_validation_test/0,
+    facade_protocol_resolved_once_test/0,
     facade_strict_decode_test/0,
+    facade_no_positional_legacy_test/0,
     facade_convert_test/0,
+    facade_convert_descriptor_test/0,
     record_engine_autodetect_test/0,
     record_engine_repr_test/0,
     record_engine_map_mode_test/0,
@@ -85,64 +90,253 @@ facade_roundtrip_test() ->
         {ok, FromRecord},
         thrift_runtime:encode(Desc, #{'__struct__' => point, x => 1, y => 2})
     ),
-    %% the protocol module axis drives the same codec
-    ?assertEqual({ok, FromRecord}, thrift_runtime:encode(Desc, Record, thrift_runtime_binary)),
-    ?assertEqual({ok, Record}, thrift_runtime:decode(Desc, FromRecord, record)),
-    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:decode(Desc, FromRecord, map)),
+    %% the protocol option drives the same codec
+    ?assertEqual({ok, FromRecord}, thrift_runtime:encode(Desc, Record, #{protocol => binary})),
+    ?assertEqual({ok, Record}, thrift_runtime:decode(Desc, FromRecord, #{repr => record})),
+    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:decode(Desc, FromRecord, #{repr => map})),
     Struct = #{'__struct__' => point, x => 1, y => 2},
-    ?assertEqual({ok, Struct}, thrift_runtime:decode(Desc, FromRecord, struct)),
+    ?assertEqual({ok, Struct}, thrift_runtime:decode(Desc, FromRecord, #{repr => struct})),
     case otp_release() >= 29 of
         true ->
-            {ok, Native} = thrift_runtime:decode(Desc, FromRecord, native),
+            {ok, Native} = thrift_runtime:decode(Desc, FromRecord, #{repr => native}),
             ?assert(thrift_runtime_native:is_native(Native)),
             %% a native record encodes back to the same bytes
             ?assertEqual({ok, FromRecord}, thrift_runtime:encode(Desc, Native));
         false ->
             ?assertEqual(
                 {error, {unsupported_repr, native}},
-                thrift_runtime:decode(Desc, FromRecord, native)
+                thrift_runtime:decode(Desc, FromRecord, #{repr => native})
             )
     end,
+    ok.
+
+%% The advanced facade takes the protocol and strictness as an option
+%% map: the same axes as data, normalized by
+%% `thrift_runtime_options:codec_options/2`.
+
+facade_options_map_test() ->
+    Desc = point_desc(),
+    Record = {point, 1, 2},
+    {ok, CompactBin} = thrift_runtime:encode(Desc, Record, #{protocol => compact}),
+    ?assertEqual(
+        {ok, Record},
+        thrift_runtime:decode(Desc, CompactBin, #{protocol => compact, repr => record})
+    ),
+    ?assertEqual(
+        {ok, #{x => 1, y => 2}},
+        thrift_runtime:decode(Desc, CompactBin, #{protocol => compact, repr => map})
+    ),
+    %% the defaults: binary protocol, non-strict encode
+    {ok, Bin} = thrift_runtime:encode(Desc, Record, #{}),
+    ?assertEqual({ok, Bin}, thrift_runtime:encode(Desc, Record)),
+    ?assertEqual({ok, Record}, thrift_runtime:decode(Desc, Bin, #{repr => record})),
+    %% strict => true retains the strict encode check
+    ?assertMatch(
+        {error, {unknown_fields, [zzz]}},
+        thrift_runtime:encode(Desc, #{x => 1, y => 2, zzz => 3}, #{strict => true})
+    ),
+    ?assertMatch(
+        {ok, _},
+        thrift_runtime:encode(Desc, #{x => 1, y => 2, zzz => 3}, #{})
+    ),
+    ok.
+
+%% Option maps are validated, not silently ignored: exactly the allowed
+%% keys, a required repr for decode, boolean strictness, and the
+%% existing bad_protocol/bad_repr vocabulary for the axis values.
+
+facade_options_validation_test() ->
+    Desc = point_desc(),
+    Value = #{x => 1, y => 2},
+    {ok, Bin} = thrift_runtime:encode(Desc, Value),
+    ?assertEqual({error, {unknown_option, typo}}, thrift_runtime:encode(Desc, Value, #{typo => true})),
+    ?assertEqual({error, {unknown_option, repr}}, thrift_runtime:encode(Desc, Value, #{repr => map})),
+    ?assertEqual(
+        {error, {unknown_option, strict}},
+        thrift_runtime:decode(Desc, Bin, #{repr => record, strict => true})
+    ),
+    ?assertEqual({error, {missing_option, repr}}, thrift_runtime:decode(Desc, Bin, #{})),
+    ?assertEqual(
+        {error, {bad_option, {strict, yes, [true, false]}}},
+        thrift_runtime:encode(Desc, Value, #{strict => yes})
+    ),
+    %% a non-map options argument is a bad options value, not a protocol
+    ?assertEqual(
+        {error, {bad_option, {options, strict, [map]}}},
+        thrift_runtime_options:codec_options(strict, encode)
+    ),
+    %% the axis values keep their existing error forms
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        thrift_runtime:encode(Desc, Value, #{protocol => <<"binary">>})
+    ),
+    ?assertEqual(
+        {error, {bad_repr, maps}},
+        thrift_runtime:decode(Desc, Bin, #{repr => maps})
+    ),
+    %% normalization fills the defaults, resolves the protocol once and
+    %% keeps valid entries
+    ?assertEqual(
+        {ok, #{protocol => thrift_runtime_binary, strict => false}},
+        thrift_runtime_options:codec_options(#{}, encode)
+    ),
+    ?assertEqual(
+        {ok, #{protocol => thrift_runtime_compact, strict => true}},
+        thrift_runtime_options:codec_options(#{protocol => compact, strict => true}, encode)
+    ),
+    ?assertEqual(
+        {ok, #{protocol => thrift_runtime_binary, repr => record}},
+        thrift_runtime_options:codec_options(#{repr => record}, decode)
+    ),
+    ok.
+
+%% The normalized options carry the resolved protocol module, so the
+%% facade dispatches on the module directly instead of resolving the axis
+%% a second time. The public option vocabulary is unchanged — callers
+%% still name `binary'/`compact'/`json' or an implementation module — and
+%% the axis errors keep their existing forms.
+
+facade_protocol_resolved_once_test() ->
+    Desc = point_desc(),
+    Value = {point, 1, 2},
+    ?assertEqual(
+        {ok, #{protocol => thrift_runtime_json, strict => false}},
+        thrift_runtime_options:codec_options(#{protocol => json}, encode)
+    ),
+    ?assertEqual(
+        {ok, #{protocol => thrift_runtime_compact, repr => map}},
+        thrift_runtime_options:codec_options(#{protocol => compact, repr => map}, decode)
+    ),
+    %% an already-resolved module names the axis itself: normalization is
+    %% idempotent on it and the facade routes the call to that module
+    {ok, Compact} = thrift_runtime:encode(Desc, Value, #{protocol => compact}),
+    ?assertEqual(
+        {ok, #{x => 1, y => 2}},
+        thrift_runtime:decode(Desc, Compact, #{protocol => thrift_runtime_compact, repr => map})
+    ),
+    %% bad axis values still answer through the facade, before any wire work
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        thrift_runtime_options:codec_options(#{protocol => <<"binary">>}, encode)
+    ),
     ok.
 
 facade_strict_decode_test() ->
     Desc = point_desc(),
     {ok, Bin} = thrift_runtime:encode(Desc, {point, 1, 2}),
-    ?assertEqual({error, trailing}, thrift_runtime:decode(Desc, <<Bin/binary, 0>>, record)),
+    ?assertEqual({error, trailing}, thrift_runtime:decode(Desc, <<Bin/binary, 0>>, #{repr => record})),
     ?assertEqual(
         {error, truncated},
-        thrift_runtime:decode(Desc, binary:part(Bin, 0, byte_size(Bin) - 1), record)
+        thrift_runtime:decode(Desc, binary:part(Bin, 0, byte_size(Bin) - 1), #{repr => record})
     ),
     ok.
 
+%% The final surface has no transitional entry points: a positional
+%% protocol or repr argument is a non-map options value and answers the
+%% documented bad_option error, encode/4 and decode/4 are not exported,
+%% and the removed tag-index convert input (a map is never a type
+%% descriptor) crashes as the programming error it is. The retained
+%% facade and protocol/introspection exports stay available.
+
+facade_no_positional_legacy_test() ->
+    Desc = point_desc(),
+    Record = {point, 1, 2},
+    {ok, Bin} = thrift_runtime:encode(Desc, Record),
+    %% the old positional protocol/repr forms are rejected, not routed
+    ?assertEqual(
+        {error, {bad_option, {options, compact, [map]}}},
+        thrift_runtime:encode(Desc, Record, compact)
+    ),
+    ?assertEqual(
+        {error, {bad_option, {options, record, [map]}}},
+        thrift_runtime:decode(Desc, Bin, record)
+    ),
+    ?assertEqual(
+        {error, {bad_option, {options, thrift_runtime_binary, [map]}}},
+        thrift_runtime:encode(Desc, Record, thrift_runtime_binary)
+    ),
+    %% encode/4 and decode/4 no longer exist
+    ?assertNot(erlang:function_exported(thrift_runtime, encode, 4)),
+    ?assertNot(erlang:function_exported(thrift_runtime, decode, 4)),
+    %% the map-based tag-index convert input is gone: a map is not a
+    %% descriptor tuple, so the call crashes instead of converting
+    TagIndex = #{point => Desc},
+    ?assertError(function_clause, thrift_runtime:convert(TagIndex, Record, map)),
+    %% the retained facade and protocol/introspection exports
+    ?assert(erlang:function_exported(thrift_runtime, encode, 2)),
+    ?assert(erlang:function_exported(thrift_runtime, encode, 3)),
+    ?assert(erlang:function_exported(thrift_runtime, decode, 3)),
+    ?assert(erlang:function_exported(thrift_runtime, convert, 3)),
+    ?assert(erlang:function_exported(thrift_runtime, protocol_module, 1)),
+    ?assert(erlang:function_exported(thrift_runtime, repr_supported, 1)),
+    ok.
+
+%% Conversion is descriptor-directed: the caller supplies the schema and
+%% the value brings any record, map or struct-map shape.
+
 facade_convert_test() ->
-    TagIndex = #{
-        point => point_desc(),
-        wrap => {struct, {ref, ?FIXTURE, <<"Wrap">>}},
-        loose => {struct, {ref, ?FIXTURE, <<"Loose">>}}
-    },
-    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:convert(TagIndex, {point, 1, 2}, map)),
+    Desc = point_desc(),
+    Wrap = {struct, {ref, ?FIXTURE, <<"Wrap">>}},
+    Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
+    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:convert(Desc, {point, 1, 2}, map)),
     ?assertEqual(
         {ok, {point, 1, 2}},
-        thrift_runtime:convert(TagIndex, #{'__struct__' => point, x => 1, y => 2}, record)
+        thrift_runtime:convert(Desc, #{'__struct__' => point, x => 1, y => 2}, record)
     ),
     %% conversion recurses into nested structs
-    {ok, Nested} = thrift_runtime:convert(TagIndex, {wrap, {point, 1, 2}}, struct),
+    {ok, Nested} = thrift_runtime:convert(Wrap, {wrap, {point, 1, 2}}, struct),
     ?assertEqual(wrap, maps:get('__struct__', Nested)),
     ?assertEqual(point, maps:get('__struct__', maps:get(p, Nested))),
     %% a map-mode struct has no record to produce
     ?assertEqual(
         {error, {no_record, loose}},
-        thrift_runtime:convert(TagIndex, #{'__struct__' => loose, s => <<"v">>}, record)
+        thrift_runtime:convert(Loose, #{'__struct__' => loose, s => <<"v">>}, record)
     ),
     case otp_release() >= 29 of
         true ->
-            {ok, Native} = thrift_runtime:convert(TagIndex, {point, 1, 2}, native),
+            {ok, Native} = thrift_runtime:convert(Desc, {point, 1, 2}, native),
             ?assertEqual(1, records:get(x, Native));
         false ->
             ?assertEqual(
                 {error, {unsupported_repr, native}},
-                thrift_runtime:convert(TagIndex, {point, 1, 2}, native)
+                thrift_runtime:convert(Desc, {point, 1, 2}, native)
+            )
+    end,
+    ok.
+
+%% The descriptor form needs no source identity: a plain map converts to
+%% a tagged struct map without a __struct__ key, so generated code can
+%% reshape values it only knows by type.
+
+facade_convert_descriptor_test() ->
+    Desc = point_desc(),
+    ?assertEqual({ok, #{x => 1, y => 2}}, thrift_runtime:convert(Desc, {point, 1, 2}, map)),
+    %% no source identity required on a map input
+    ?assertEqual(
+        {ok, #{'__struct__' => point, x => 1, y => 2}},
+        thrift_runtime:convert(Desc, #{x => 1, y => 2}, struct)
+    ),
+    %% nested record → struct conversion recurses
+    Wrap = {struct, {ref, ?FIXTURE, <<"Wrap">>}},
+    ?assertEqual(
+        {ok, #{'__struct__' => wrap, p => #{'__struct__' => point, x => 1, y => 2}}},
+        thrift_runtime:convert(Wrap, {wrap, {point, 1, 2}}, struct)
+    ),
+    %% map-mode → record answers the same {error, {no_record, Tag}}
+    Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
+    ?assertEqual(
+        {error, {no_record, loose}},
+        thrift_runtime:convert(Loose, #{s => <<"v">>}, record)
+    ),
+    %% native/OTP-28 behavior is unchanged
+    case otp_release() >= 29 of
+        true ->
+            {ok, Native} = thrift_runtime:convert(Desc, #{x => 1, y => 2}, native),
+            ?assertEqual(1, records:get(x, Native));
+        false ->
+            ?assertEqual(
+                {error, {unsupported_repr, native}},
+                thrift_runtime:convert(Desc, #{x => 1, y => 2}, native)
             )
     end,
     ok.
@@ -196,15 +390,15 @@ record_engine_map_mode_test() ->
     Bag = {struct, {ref, ?FIXTURE, <<"Bag">>}},
     %% a record-mode child inside a map-mode parent converts recursively
     {ok, Bin} = thrift_runtime:encode(Bag, #{p => {point, 1, 2}}),
-    ?assertEqual({ok, #{p => #{x => 1, y => 2}}}, thrift_runtime:decode(Bag, Bin, map)),
+    ?assertEqual({ok, #{p => #{x => 1, y => 2}}}, thrift_runtime:decode(Bag, Bin, #{repr => map})),
     %% a map-mode struct has no record to produce: the `record` target
     %% is the same {error, {no_record, Tag}} convert/3 answers
-    ?assertEqual({error, {no_record, bag}}, thrift_runtime:decode(Bag, Bin, record)),
+    ?assertEqual({error, {no_record, bag}}, thrift_runtime:decode(Bag, Bin, #{repr => record})),
     %% {map, binary} structs take wire keys on input; the `map` target
     %% normalizes them to atoms
     BinKeys = {struct, {ref, ?FIXTURE, <<"BinKeys">>}},
     {ok, BinKeysBin} = thrift_runtime:encode(BinKeys, #{<<"s">> => <<"v">>}),
-    ?assertEqual({ok, #{s => <<"v">>}}, thrift_runtime:decode(BinKeys, BinKeysBin, map)),
+    ?assertEqual({ok, #{s => <<"v">>}}, thrift_runtime:decode(BinKeys, BinKeysBin, #{repr => map})),
     ok.
 
 record_engine_wire_passthrough_test() ->
@@ -263,7 +457,7 @@ record_engine_set_impl_test() ->
             {setbag, [3, 1], ordsets:from_list([3, 1, 2, 1]), sets:from_list([<<"b">>, <<"a">>]),
                 sets:from_list([[2, 1, 1]])}
         ),
-    {ok, {setbag, Plain, Ords, Tags, NestedOut}} = thrift_runtime:decode(SetBag, Bin, record),
+    {ok, {setbag, Plain, Ords, Tags, NestedOut}} = thrift_runtime:decode(SetBag, Bin, #{repr => record}),
     ?assertEqual([3, 1], Plain),
     ?assertEqual([1, 2, 3], Ords),
     ?assertEqual(sets:from_list([<<"a">>, <<"b">>]), Tags),
@@ -289,7 +483,7 @@ native_repr_test() ->
         true ->
             Desc = point_desc(),
             {ok, Bin} = thrift_runtime:encode(Desc, {point, 1, 2}),
-            {ok, Native} = thrift_runtime:decode(Desc, Bin, native),
+            {ok, Native} = thrift_runtime:decode(Desc, Bin, #{repr => native}),
             %% identity: the descriptor's module, the record tag
             ?assertEqual(?FIXTURE, records:get_module(Native)),
             ?assertEqual(point, records:get_name(Native)),
@@ -297,7 +491,7 @@ native_repr_test() ->
             ?assertEqual(#{x => 1, y => 2}, FieldMap),
             %% fields missing on the wire decode as undefined
             {ok, PartialBin} = thrift_runtime:encode(Desc, #{x => 1}),
-            {ok, Partial} = thrift_runtime:decode(Desc, PartialBin, native),
+            {ok, Partial} = thrift_runtime:decode(Desc, PartialBin, #{repr => native}),
             ?assertEqual(#{x => 1, y => undefined}, element(3, thrift_runtime_native:fields(Partial))),
             %% auto-detection: the native record normalizes to wire
             Wire = #{<<"x">> => 1, <<"y">> => 2},
@@ -314,11 +508,11 @@ native_repr_test() ->
             %% map-mode structs mint native records too
             Bag = {struct, {ref, ?FIXTURE, <<"Bag">>}},
             {ok, BagBin} = thrift_runtime:encode(Bag, #{p => {point, 5, 6}}),
-            {ok, BagNative} = thrift_runtime:decode(Bag, BagBin, native),
+            {ok, BagNative} = thrift_runtime:decode(Bag, BagBin, #{repr => native}),
             ?assertEqual(bag, records:get_name(BagNative)),
             %% the axis is protocol-independent
-            {ok, JsonBin} = thrift_runtime:encode(Desc, {point, 3, 4}, json),
-            {ok, JsonNative} = thrift_runtime:decode(Desc, JsonBin, native, json),
+            {ok, JsonBin} = thrift_runtime:encode(Desc, {point, 3, 4}, #{protocol => json}),
+            {ok, JsonNative} = thrift_runtime:decode(Desc, JsonBin, #{protocol => json, repr => native}),
             ?assertEqual(4, records:get(y, JsonNative)),
             %% tuple records stay tuples
             ?assertNot(thrift_runtime_native:is_native({point, 1, 2}))
@@ -364,38 +558,39 @@ encode_strict_test() ->
     ),
     ?assertMatch(
         {error, {unknown_fields, [zzz]}},
-        thrift_runtime:encode(Desc, #{x => 1, y => 2, zzz => 3}, binary, #{strict => true})
+        thrift_runtime:encode(Desc, #{x => 1, y => 2, zzz => 3}, #{strict => true})
     ),
     %% declared fields pass, atom or binary keyed
     ?assertMatch(
         {ok, _},
-        thrift_runtime:encode(Desc, #{x => 1, <<"y">> => 2}, binary, #{strict => true})
+        thrift_runtime:encode(Desc, #{x => 1, <<"y">> => 2}, #{strict => true})
     ),
     %% a struct-map's __struct__ key is identity metadata, not a field
     ?assertMatch(
         {ok, _},
-        thrift_runtime:encode(Desc, #{'__struct__' => point, x => 1, y => 2}, binary, #{
-            strict => true
-        })
+        thrift_runtime:encode(Desc, #{'__struct__' => point, x => 1, y => 2}, #{strict => true})
     ),
     %% a record tuple input has nothing to check
     ?assertMatch(
         {ok, _},
-        thrift_runtime:encode(Desc, {point, 1, 2}, binary, #{strict => true})
+        thrift_runtime:encode(Desc, {point, 1, 2}, #{strict => true})
     ),
     %% map-mode structs are checked against their own key type
     Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
     ?assertMatch(
         {error, {unknown_fields, [nope]}},
-        thrift_runtime:encode(Loose, #{s => <<"ok">>, nope => 1}, binary, #{strict => true})
+        thrift_runtime:encode(Loose, #{s => <<"ok">>, nope => 1}, #{strict => true})
     ),
     ok.
 
 decode_bad_repr_test() ->
     Desc = point_desc(),
     {ok, Bin} = thrift_runtime:encode(Desc, {point, 1, 2}),
-    ?assertEqual({error, {bad_repr, maps}}, thrift_runtime:decode(Desc, Bin, maps)),
-    ?assertEqual({error, {bad_repr, whatever}}, thrift_runtime:decode(Desc, Bin, whatever, compact)),
+    ?assertEqual({error, {bad_repr, maps}}, thrift_runtime:decode(Desc, Bin, #{repr => maps})),
+    ?assertEqual(
+        {error, {bad_repr, whatever}},
+        thrift_runtime:decode(Desc, Bin, #{protocol => compact, repr => whatever})
+    ),
     ok.
 
 %% A map-representation struct has no record to produce: decode answers
@@ -405,9 +600,9 @@ decode_bad_repr_test() ->
 decode_record_of_map_mode_test() ->
     Loose = {struct, {ref, ?FIXTURE, <<"Loose">>}},
     {ok, Bin} = thrift_runtime:encode(Loose, #{s => <<"x">>}),
-    ?assertEqual({error, {no_record, loose}}, thrift_runtime:decode(Loose, Bin, record)),
+    ?assertEqual({error, {no_record, loose}}, thrift_runtime:decode(Loose, Bin, #{repr => record})),
     %% the map representation keeps working
-    ?assertEqual({ok, #{s => <<"x">>}}, thrift_runtime:decode(Loose, Bin, map)),
+    ?assertEqual({ok, #{s => <<"x">>}}, thrift_runtime:decode(Loose, Bin, #{repr => map})),
     ok.
 
 %% The shared option defaults and the timeout umbrella.

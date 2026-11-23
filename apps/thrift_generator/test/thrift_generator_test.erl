@@ -36,6 +36,7 @@
     snake_case_names_test/0,
     header_doc_comment_test/0,
     merged_doc_comment_test/0,
+    trailing_body_doc_comment_test/0,
     enum_values_test/0,
     empty_enum_test/0,
     const_literal_test/0,
@@ -189,6 +190,51 @@ merged_doc_comment_test() ->
     ),
     [Struct] = Doc#thrift_generator_node.payload#thrift_generator_document.definitions,
     ?assertEqual(<<"First block.\nSecond line.">>, Struct#thrift_generator_node.doc),
+    ok.
+
+trailing_body_doc_comment_test() ->
+    {ok, Doc} = thrift_generator:parse_string(
+        <<
+            "namespace erl traildoc\n"
+            "union U {\n"
+            "  1: string a\n"
+            "  /** trailing */\n"
+            "}\n"
+            "struct S {\n"
+            "  /** real field */\n"
+            "  1: string value\n"
+            "  /** trailing */\n"
+            "  /** second trailing */\n"
+            "}\n"
+            "exception E {\n"
+            "  1: string message\n"
+            "  /** trailing */\n"
+            "}\n"
+            "enum Color {\n"
+            "  RED\n"
+            "  /** trailing */\n"
+            "}\n"
+            "service Api {\n"
+            "  /** real function */\n"
+            "  void ping(1: string message) /** trailing */\n"
+            "}\n"
+            "struct Container {\n"
+            "  1: list<string /** type trailing */> values\n"
+            "}\n"
+            "const list<i32> Values = [1, 2 /** trailing */]\n"
+        >>
+    ),
+    #thrift_generator_document{definitions = Definitions} = Doc#thrift_generator_node.payload,
+    ?assertEqual(7, length(Definitions)),
+    [Union, Struct, Exception, Enum, Service, Container, Const] = Definitions,
+    lists:foreach(
+        fun(Node) -> ?assertEqual(undefined, Node#thrift_generator_node.doc) end,
+        [Union, Struct, Exception, Enum, Service, Container, Const]
+    ),
+    #thrift_generator_struct{fields = [Field]} = Struct#thrift_generator_node.payload,
+    ?assertEqual(<<"real field">>, Field#thrift_generator_node.doc),
+    #thrift_generator_service{functions = [Function]} = Service#thrift_generator_node.payload,
+    ?assertEqual(<<"real function">>, Function#thrift_generator_node.doc),
     ok.
 
 %% Derived identifiers snake-case the IDL name: record tags, type

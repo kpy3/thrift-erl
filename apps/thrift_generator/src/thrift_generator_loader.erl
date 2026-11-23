@@ -21,8 +21,11 @@ included file.
 Include paths resolve relative to the directory of the including file.
 Circular includes are an error; diamond includes deduplicate. Each file
 becomes one entry with its module name — taken from `namespace erl`
-(or `namespace *`), falling back to the file base name without the
-.thrift extension. Entries come back in pre-order (root first); paths
+(or `namespace *`), falling back to the file base name. When
+namespace-derived keys collide, atom-safe normalized file basenames
+disambiguate the module keys; identifier prefixes still use the
+namespace. If basenames cannot make every key unique, loading fails with
+`duplicate_module`. Entries come back in pre-order (root first); paths
 are absolute binaries.
 """.
 
@@ -35,8 +38,8 @@ are absolute binaries.
 
 -doc """
 Loads `Path` and its transitive includes, or fails on parse errors,
-missing files, circular includes or two files claiming the same module
-name.
+missing files, circular includes or colliding module names that file
+basenames cannot disambiguate.
 """.
 -spec load(file:filename_all()) -> {ok, [#tg_loaded{}]} | {error, term()}.
 load(Path) ->
@@ -199,6 +202,27 @@ include_qualifier(Path) ->
 basename_sans_extension(Path) ->
     filename:basename(Path, <<".thrift">>).
 
+%% Collision candidates become generated module atoms, so they use the
+%% same atom-safe normalization as identifier prefixes. Invalid UTF-8 or
+%% a basename that normalizes to nothing falls back to the raw basename:
+%% the candidate set then stays ambiguous and the caller keeps the
+%% original duplicate-module error.
+
+-spec module_key_basename(binary()) -> binary().
+module_key_basename(Path) ->
+    Basename = basename_sans_extension(Path),
+    case unicode:characters_to_list(Basename, utf8) of
+        Chars when is_list(Chars) ->
+            _ = Chars,
+            try normalize_prefix(Basename, Path) of
+                Key -> Key
+            catch
+                throw:{load_error, {namespace, _, _}} -> Basename
+            end;
+        _InvalidUtf8 ->
+            Basename
+    end.
+
 -spec to_abs(file:filename_all()) -> binary().
 to_abs(Path) ->
     unicode:characters_to_binary(
@@ -212,10 +236,45 @@ check_duplicate_modules(Entries) ->
         #{},
         Entries
     ),
-    case [Name || Name := Count <- Counts, Count > 1] of
+    Colliding = lists:usort([
+        Entry#tg_loaded.name
+     || Entry <- Entries,
+        maps:get(Entry#tg_loaded.name, Counts) > 1
+    ]),
+    case Colliding of
         [] ->
             {ok, Entries};
-        [Name | _] ->
-            [First, Second | _] = [E || E <- Entries, E#tg_loaded.name =:= Name],
-            {error, {duplicate_module, Name, First#tg_loaded.path, Second#tg_loaded.path}}
+        _ ->
+            disambiguate_module_names(Entries, Colliding)
     end.
+
+%% Namespace collisions keep their identifier prefixes but need unique,
+%% atom-safe module keys. Normalized file basenames are the disambiguator
+%% Apache include references already use; when even those collide, retain
+%% the original duplicate-module error instead of choosing an arbitrary
+%% file.
+
+-spec disambiguate_module_names([#tg_loaded{}], [binary()]) ->
+    {ok, [#tg_loaded{}]} | {error, term()}.
+disambiguate_module_names(Entries, Colliding) ->
+    CandidateNames = [
+        case lists:member(Entry#tg_loaded.name, Colliding) of
+            true -> module_key_basename(Entry#tg_loaded.path);
+            false -> Entry#tg_loaded.name
+        end
+     || Entry <- Entries
+    ],
+    case length(CandidateNames) =:= length(lists:usort(CandidateNames)) of
+        true ->
+            {ok, [
+                Entry#tg_loaded{name = CandidateName}
+             || {Entry, CandidateName} <- lists:zip(Entries, CandidateNames)
+            ]};
+        false ->
+            duplicate_module_error(Entries, hd(Colliding))
+    end.
+
+-spec duplicate_module_error([#tg_loaded{}], binary()) -> {error, term()}.
+duplicate_module_error(Entries, Name) ->
+    [First, Second | _] = [E || E <- Entries, E#tg_loaded.name =:= Name],
+    {error, {duplicate_module, Name, First#tg_loaded.path, Second#tg_loaded.path}}.

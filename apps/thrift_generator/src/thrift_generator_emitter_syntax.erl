@@ -32,6 +32,7 @@ everything else stays trees.
     application/3,
     attribute/2,
     base_erlang_type/1,
+    doc_false_form/0,
     doc_form/2,
     error_term_type/1,
     export_form/1,
@@ -264,8 +265,10 @@ fn_form(Name, Clauses) ->
 %% The -doc attribute of a generated function: the definition's IDL doc
 %% comment (when it carries one) followed by the built-in explanation of
 %% the generated contract. Docs land in the docs chunk, so shell_docs
-%% can explain the overloaded arities (encode/2 = protocol, decode/2 =
-%% representation) without the consumer reading this emitter.
+%% can explain the generated functions without the consumer reading this
+%% emitter. Internal dispatch entries (the direct codecs, the codec
+%% indexes, `record_fields/1`) carry `-doc false` instead: they stay
+%% exported for the runtime but are hidden from the published docs.
 
 -spec doc_form(binary() | undefined, binary()) -> erl_syntax:forms().
 doc_form(IdlDoc, BuiltIn) ->
@@ -275,6 +278,15 @@ doc_form(IdlDoc, BuiltIn) ->
             Doc -> <<Doc/binary, "\n\n", BuiltIn/binary>>
         end,
     [erl_syntax:attribute(erl_syntax:atom(doc), [erl_syntax:string(unicode:characters_to_list(Text))])].
+
+%% The -doc attribute marking a generated function as internal: the
+%% function stays exported at the Erlang level (the runtime dispatches
+%% through it) but is hidden from shell_docs and ex_doc, which publish
+%% the normal and advanced facade instead.
+
+-spec doc_false_form() -> erl_syntax:forms().
+doc_false_form() ->
+    [erl_syntax:attribute(erl_syntax:atom(doc), [erl_syntax:atom(false)])].
 
 -spec fn_clause([erl_syntax:syntaxTree()], erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
 fn_clause(Patterns, Body) ->

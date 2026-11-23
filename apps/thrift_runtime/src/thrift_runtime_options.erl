@@ -31,9 +31,15 @@ standing in for every more specific timeout the caller does not name —
 
 A specific key wins over the umbrella, the umbrella wins over the
 default.
+
+The codec facade's option maps (`codec_options/2`) live here too: one
+validator for the advanced `thrift_runtime` encode/decode options,
+strict key sets per direction, so the network and the codec surface
+cannot drift apart.
 """.
 
 -export([
+    codec_options/2,
     handshake_timeout/1,
     idle_timeout/1,
     connect_timeout/1,
@@ -51,6 +57,104 @@ default.
 -define(DEFAULT_ACTIVE_N, 100).
 -define(DEFAULT_MAX_CONNECTIONS, 1024).
 -define(DEFAULT_HTTP_PATH, <<"/">>).
+
+%%--------------------------------------------------------------------
+%% Codec facade options
+%%--------------------------------------------------------------------
+
+%% The codec facade validates its options up front instead of failing
+%% halfway through a wire operation: the key set is fixed per direction,
+%% every entry is validated against its axis, and the normalized map
+%% carries the caller's values on top of the defaults. Unknown keys and
+%% bad values are caller typos, not data conditions — they answer tagged
+%% errors without touching the descriptor or the binary.
+
+-doc """
+Normalizes the codec facade's option map for one direction.
+
+Encode accepts exactly `protocol` and `strict` (default `binary`,
+`false`); decode accepts exactly `protocol` and `repr`, with `repr`
+required — the advanced facade has no schema module from which to infer
+a default representation. The `protocol` value resolves through
+`thrift_runtime:protocol_module/1` and the normalized map carries the
+resolved module, so the facade dispatches on it directly without a
+second resolution; `repr` validates through
+`thrift_runtime:repr_supported/1`, so `bad_protocol`, `bad_repr` and
+`unsupported_repr` keep their existing forms. A non-map argument is a
+bad options value, not a protocol: `{error, {bad_option, {options,
+Value, [map]}}}`.
+""".
+-spec codec_options(term(), encode | decode) -> {ok, map()} | {error, term()}.
+codec_options(Options, Direction) when is_map(Options) ->
+    case codec_unknown(Options, Direction) of
+        ok ->
+            codec_values(Options, Direction);
+        {error, _} = Error ->
+            Error
+    end;
+codec_options(Value, _Direction) ->
+    {error, {bad_option, {options, Value, [map]}}}.
+
+%% Exactly these keys exist per direction; anything else is a typo the
+%% caller must see, not an entry to ignore.
+
+-spec codec_allowed(encode | decode) -> [atom()].
+codec_allowed(encode) ->
+    [protocol, strict];
+codec_allowed(decode) ->
+    [protocol, repr].
+
+-spec codec_unknown(map(), encode | decode) -> ok | {error, {unknown_option, atom()}}.
+codec_unknown(Options, Direction) ->
+    Allowed = codec_allowed(Direction),
+    case [Key || Key <- maps:keys(Options), not lists:member(Key, Allowed)] of
+        [] ->
+            ok;
+        [Key | _] ->
+            {error, {unknown_option, Key}}
+    end.
+
+%% Defaults first, then per-key validation; a bad value answers before
+%% the codec could fail on it mid-operation.
+
+-spec codec_values(map(), encode | decode) -> {ok, map()} | {error, term()}.
+codec_values(Options, encode) ->
+    with_strict(Options, #{protocol => binary, strict => false});
+codec_values(Options, decode) ->
+    with_repr(Options, #{protocol => binary}).
+
+-spec with_strict(map(), map()) -> {ok, map()} | {error, term()}.
+with_strict(Options, Normalized) ->
+    case maps:get(strict, Options, false) of
+        Strict when is_boolean(Strict) ->
+            with_protocol(Options, Normalized#{strict => Strict});
+        Bad ->
+            {error, {bad_option, {strict, Bad, [true, false]}}}
+    end.
+
+-spec with_repr(map(), map()) -> {ok, map()} | {error, term()}.
+with_repr(Options, Normalized) ->
+    case Options of
+        #{repr := Repr} ->
+            case thrift_runtime:repr_supported(Repr) of
+                ok ->
+                    with_protocol(Options, Normalized#{repr => Repr});
+                {error, _} = Error ->
+                    Error
+            end;
+        #{} ->
+            {error, {missing_option, repr}}
+    end.
+
+-spec with_protocol(map(), map()) -> {ok, map()} | {error, term()}.
+with_protocol(Options, Normalized) ->
+    Protocol = maps:get(protocol, Options, binary),
+    case thrift_runtime:protocol_module(Protocol) of
+        {ok, Mod} ->
+            {ok, Normalized#{protocol => Mod}};
+        {error, _} = Error ->
+            Error
+    end.
 
 %%--------------------------------------------------------------------
 %% Timeouts

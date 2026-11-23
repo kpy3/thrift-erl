@@ -258,13 +258,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
             union -> union_check(S#tg_struct.fields, call_local(Entry, [v("Value"), i(0)]));
             _ -> required_check(S#tg_struct.fields, call_local(Entry, [v("Value"), i(0)]))
         end,
-    Doc =
-        <<
-            "Encodes the wire representation (a map keyed by binary field"
-            " names) with the compact protocol, byte-compatible with"
-            " thrift_runtime_compact:encode/2."
-        >>,
-    thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
+    thrift_generator_emitter_syntax:doc_false_form() ++
         [
             spec_form(Encode, 1, [t_fun([t_map_exact()], t_union([t_ok(t_atom(iodata)), t_error()]))]),
             {function, ?ANNO, Encode, 1, [encode_entry_clause(CheckBody), encode_error_clause()]}
@@ -575,13 +569,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     FieldsLoop = atom_concat(Decode, <<"_fields">>),
     FieldDispatch = atom_concat(Decode, <<"_field">>),
     Bits = required_bits(Fields),
-    Doc =
-        <<
-            "Decodes the compact protocol into the wire representation,"
-            " byte-compatible with thrift_runtime_compact:decode/2; `more` on"
-            " truncated input, unknown field ids skipped by nibble."
-        >>,
-    thrift_generator_emitter_syntax:doc_form(S#tg_struct.doc, Doc) ++
+    thrift_generator_emitter_syntax:doc_false_form() ++
         [
             spec_form(Decode, 1, [
                 t_fun(

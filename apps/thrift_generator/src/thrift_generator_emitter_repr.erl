@@ -81,6 +81,7 @@ source_forms(Mod, Ctx) ->
             ReprMod = repr_module(Mod),
             Forms =
                 thrift_generator_emitter_syntax:header(ReprMod, Mod#tg_module.path) ++
+                    [{attribute, ?ANNO, moduledoc, false}] ++
                     thrift_generator_emitter_syntax:exports_forms(export_entries(Structs)) ++
                     lists:append([
                         to_wire_forms(S, Ctx) ++ from_wire_forms(S, Mod, Ctx)

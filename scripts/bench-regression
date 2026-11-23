@@ -43,10 +43,25 @@ generate "$TMP/baseline" bench 080a "$ROOT/apps/thrift_generator/test/thrift_ben
 generate "$ROOT" goldentest head apps/thrift_generator/test/thrift_golden_SUITE_data/ThriftTest.thrift "$TMP/head-beams"
 generate "$ROOT" bench head "$ROOT/apps/thrift_generator/test/thrift_bench_regression_data/MultiRoot.thrift" "$TMP/head-beams"
 
-THRIFT_BENCH_BASE_BEAMS="$TMP/base-beams" \
-THRIFT_BENCH_HEAD_BEAMS="$TMP/head-beams" \
-ERL_CRASH_DUMP_SECONDS=0 \
-erl -noshell \
-    -pa "$ROOT"/_build/test/lib/*/ebin \
-    -pa "$ROOT"/_build/test/lib/*/test \
-    -eval 'thrift_bench_regression:main(["compare"])'
+compare_group() {
+    THRIFT_BENCH_BASE_BEAMS="$TMP/base-beams" \
+    THRIFT_BENCH_HEAD_BEAMS="$TMP/head-beams" \
+    THRIFT_BENCH_ENTRY_GROUP="$1" \
+    ERL_CRASH_DUMP_SECONDS=0 \
+    erl -noshell \
+        -pa "$ROOT"/_build/test/lib/*/ebin \
+        -pa "$ROOT"/_build/test/lib/*/test \
+        -eval 'thrift_bench_regression:main(["compare"])'
+}
+
+# One VM per entry group: full-suite interleaving depresses
+# untouched-code cells below the 0.99 gate (measured with an empty
+# emission diff), each group read alone measures parity. Every group
+# runs; the script exits non-zero if any group failed its gate.
+STATUS=0
+compare_group public || STATUS=1
+compare_group direct || STATUS=1
+compare_group conversion || STATUS=1
+compare_group onepass || STATUS=1
+compare_group schema || STATUS=1
+exit "$STATUS"

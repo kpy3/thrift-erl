@@ -324,10 +324,10 @@ check_generated_names(Module, Ctx) ->
     Ctx1 = check_flat_clashes(StructTags, "record tag", Ctx),
     Ctx2 = check_flat_clashes(EnumPrefixes, "enum helper prefix", Ctx1),
     %% Sum-union field atoms are NOT checked for cross-union clashes:
-    %% sharing a field name across unions is legal, common Thrift
-    %% (per-resource result unions), and only the module-level
-    %% convert/2 entry is context-free — the tag_index resolves a
-    %% shared atom to the last union declaring it (see tag_index_forms).
+    %% sharing a field name across unions is legal and common Thrift
+    %% (per-resource result unions), and the type-first facade resolves
+    %% every conversion through the explicit union type atom, so a
+    %% shared field atom is unambiguous.
     check_const_clashes(Module, Ctx2).
 
 -spec check_flat_clashes([{binary(), loc()}], string(), #ctx{}) -> #ctx{}.
@@ -345,29 +345,20 @@ check_flat_clashes(Pairs, What, Ctx) ->
         ByName
     ).
 
-%% Constant functions live in one namespace with the generated codecs:
-%% a constant named like a codec function or the shared convert/tag_index
-%% entries would shadow or collide with them.
+%% Constant functions live in one namespace with the generated enum
+%% helpers: a constant named like an enum helper would shadow it.
+%% The old per-struct codec wrappers and the tag index are gone, and the
+%% schema facade functions carry arities 1–3 where constants are arity
+%% 0, so the facade names need no reservation.
 
 -spec check_const_clashes(#tg_module{}, #ctx{}) -> #ctx{}.
 check_const_clashes(Module, Ctx) ->
     Generated =
-        [<<"convert">>, <<"tag_index">>] ++
-            [
-                Prefix
-             || S <- Module#tg_module.structs,
-                Snake <- [thrift_generator_names:snake(S#tg_struct.name)],
-                Prefix <- [
-                    <<"encode_", Snake/binary>>,
-                    <<"decode_", Snake/binary>>,
-                    <<Snake/binary, "_from_map">>
-                ]
-            ] ++
-            [
-                <<(thrift_generator_names:snake(E#tg_enum.name))/binary, Suffix/binary>>
-             || E <- Module#tg_module.enums,
-                Suffix <- [<<"_to_int">>, <<"_from_int">>]
-            ],
+        [
+            <<(thrift_generator_names:snake(E#tg_enum.name))/binary, Suffix/binary>>
+         || E <- Module#tg_module.enums,
+            Suffix <- [<<"_to_int">>, <<"_from_int">>]
+        ],
     lists:foldl(
         fun(C, C0) ->
             Snake = thrift_generator_names:snake(C#tg_const.name),
@@ -1144,10 +1135,10 @@ validate_throws(Fields, Loc, Ctx) ->
             (#tg_field{name = Name, required = required}, C) ->
                 err(Loc, "throw field ~ts cannot be required", [Name], C);
             (#tg_field{type = {ref, Ref, _}}, C) ->
-                case resolve_type_ref(Ref, C) of
-                    {ok, {_, _, exception}} ->
+                case throws_ref_kind(Ref, #{}, C) of
+                    {ok, exception} ->
                         C;
-                    {ok, {_, _, _}} ->
+                    {ok, not_exception} ->
                         err(Loc, "throw field must be an exception, got ~ts", [Ref], C);
                     error ->
                         C
@@ -1158,6 +1149,40 @@ validate_throws(Fields, Loc, Ctx) ->
         Ctx,
         Fields
     ).
+
+%% Throws validation follows typedef aliases to their terminal definition
+%% kind. The semantic field keeps the alias; only this check resolves it.
+
+-spec throws_ref_kind(binary(), #{{binary(), binary()} => true}, #ctx{}) ->
+    {ok, exception | not_exception} | error.
+throws_ref_kind(Name, Visited, Ctx) ->
+    case resolve_type_ref(Name, Ctx) of
+        {ok, {_, _, exception}} ->
+            {ok, exception};
+        {ok, {Module, Name, typedef}} ->
+            typedef_ref_kind(Module, Name, Visited, Ctx);
+        {ok, {_, _, _}} ->
+            {ok, not_exception};
+        error ->
+            error
+    end.
+
+-spec typedef_ref_kind(binary(), binary(), #{{binary(), binary()} => true}, #ctx{}) ->
+    {ok, exception | not_exception} | error.
+typedef_ref_kind(Module, Name, Visited, Ctx) ->
+    case Visited of
+        #{{Module, Name} := true} ->
+            error;
+        _ ->
+            case maps:find(Name, maps:get(Module, Ctx#ctx.all_typedefs, #{})) of
+                {ok, {ref, Target, _}} ->
+                    throws_ref_kind(Target, Visited#{{Module, Name} => true}, Ctx#ctx{module = Module});
+                {ok, _NonRef} ->
+                    {ok, not_exception};
+                error ->
+                    error
+            end
+    end.
 
 %%--------------------------------------------------------------------
 %% Reference resolution and validation
