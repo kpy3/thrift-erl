@@ -31,7 +31,8 @@ instead of using the shared `containers' field.
 
 -export([
     build/2,
-    codec_pair/3
+    codec_pair/3,
+    struct_call/6
 ]).
 
 -include("thrift_generator_model.hrl").
@@ -80,3 +81,46 @@ codec_names(Protocol, Structs, Ctx) ->
 -spec codec_pair(wire | compact | json, binary(), #tg_codec_plan{}) -> {atom(), atom()}.
 codec_pair(Protocol, Name, Plan) when is_binary(Name) ->
     maps:get(Name, maps:get(Protocol, Plan#tg_codec_plan.codec_names)).
+
+-doc """
+The nested-struct codec call of one protocol. A same-module reference
+becomes a direct call to the local specialized codec (its name comes
+from the plan's codec table); a cross-module reference calls the target
+types module directly with its own namespace prefix. JSON decode
+selects the `_body' companion — the envelope's `]`-fold belongs to the
+top level only. A case body, not a guard: rebuilding the current
+module's atom from the binary key is not guard-legal.
+""".
+-spec struct_call(
+    wire | compact | json, encode | decode, module(), binary(), thrift_generator_codec_ast:ast(), #tg_codec_plan{}
+) ->
+    thrift_generator_codec_ast:ast().
+struct_call(Protocol, Op, TypesMod, Name, Arg, Plan) ->
+    Ctx = Plan#tg_codec_plan.ctx,
+    Local = TypesMod =:= thrift_generator_names:types_module_atom(Ctx#ectx.current),
+    Pair =
+        case Local of
+            true ->
+                maps:get(Name, maps:get(Protocol, Plan#tg_codec_plan.codec_names));
+            false ->
+                thrift_generator_codec_common:ref_codec_pair(Protocol, TypesMod, Name, Ctx)
+        end,
+    Fun = select_fun(Protocol, Op, Pair),
+    case Local of
+        true ->
+            thrift_generator_codec_ast:call_local(Fun, [Arg]);
+        false ->
+            thrift_generator_codec_ast:remote(TypesMod, Fun, [Arg])
+    end.
+
+-spec select_fun(wire | compact | json, encode | decode, {atom(), atom()}) -> atom().
+select_fun(Protocol, Op, {Encode, Decode}) ->
+    Fun =
+        case Op of
+            encode -> Encode;
+            decode -> Decode
+        end,
+    case Protocol =:= json andalso Op =:= decode of
+        true -> thrift_generator_codec_common:decode_body_name(Fun);
+        false -> Fun
+    end.

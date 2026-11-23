@@ -29,7 +29,12 @@
     export_entries_include_protocol_pairs_test/0,
     export_entries_empty_module_test/0,
     codec_plan_collects_shared_metadata_test/0,
-    rpc_plan_preserves_shapes_test/0
+    rpc_plan_preserves_shapes_test/0,
+    struct_call_local_binary_encode_test/0,
+    struct_call_remote_compact_decode_test/0,
+    struct_call_json_decode_body_test/0,
+    enum_from_clauses_shared_table_test/0,
+    integer_guard_sequence_test/0
 ]).
 
 colliding_enum_descriptors_test() ->
@@ -264,4 +269,95 @@ rpc_plan_preserves_shapes_test() ->
     ],
     ?assertEqual([<<"Event">>, <<"Events$notify$params">>], Names),
     ?assertEqual([{base, binary}, {base, string}], Plan#tg_codec_plan.wire_types),
+    ok.
+
+%% A plan over a two-module context: `demo` (being generated, one
+%% declared struct) and `other` (referenced cross-module).
+struct_call_plan() ->
+    Request = #tg_struct{kind = struct, name = <<"PingRequest">>, fields = []},
+    Mod = #tg_module{name = <<"demo">>, prefix = <<>>, structs = [Request]},
+    Other = #tg_module{name = <<"other">>, prefix = <<>>},
+    Ctx = #ectx{
+        modules = #{<<"demo">> => Mod, <<"other">> => Other},
+        type_modules = #{<<"demo">> => demo_types, <<"other">> => other_types},
+        current = <<"demo">>
+    },
+    thrift_generator_codec_plan:build(Mod, Ctx).
+
+struct_call_local_binary_encode_test() ->
+    Plan = struct_call_plan(),
+    V = thrift_generator_codec_ast:v("V"),
+    %% a same-module reference becomes a direct local sibling call
+    ?assertEqual(
+        thrift_generator_codec_ast:call_local(encode_ping_request_wire, [V]),
+        thrift_generator_codec_plan:struct_call(wire, encode, demo_types, <<"PingRequest">>, V, Plan)
+    ),
+    ok.
+
+struct_call_remote_compact_decode_test() ->
+    Plan = struct_call_plan(),
+    Bin = thrift_generator_codec_ast:v("Bin"),
+    %% a cross-module reference calls the target types module directly,
+    %% with the target's own (here: empty) namespace prefix
+    ?assertEqual(
+        thrift_generator_codec_ast:remote(other_types, decode_widget_compact, [Bin]),
+        thrift_generator_codec_plan:struct_call(compact, decode, other_types, <<"Widget">>, Bin, Plan)
+    ),
+    ok.
+
+struct_call_json_decode_body_test() ->
+    Plan = struct_call_plan(),
+    V = thrift_generator_codec_ast:v("V"),
+    Bin = thrift_generator_codec_ast:v("Bin"),
+    %% JSON encode stays on the plain name in both directions...
+    ?assertEqual(
+        thrift_generator_codec_ast:call_local(encode_ping_request_json, [V]),
+        thrift_generator_codec_plan:struct_call(json, encode, demo_types, <<"PingRequest">>, V, Plan)
+    ),
+    ?assertEqual(
+        thrift_generator_codec_ast:remote(other_types, encode_widget_json, [V]),
+        thrift_generator_codec_plan:struct_call(json, encode, other_types, <<"Widget">>, V, Plan)
+    ),
+    %% ...while JSON decode selects the `_body` companion locally
+    ?assertEqual(
+        thrift_generator_codec_ast:call_local(decode_ping_request_json_body, [Bin]),
+        thrift_generator_codec_plan:struct_call(json, decode, demo_types, <<"PingRequest">>, Bin, Plan)
+    ),
+    %% ...and remotely
+    ?assertEqual(
+        thrift_generator_codec_ast:remote(other_types, decode_widget_json_body, [Bin]),
+        thrift_generator_codec_plan:struct_call(json, decode, other_types, <<"Widget">>, Bin, Plan)
+    ),
+    ok.
+
+enum_from_clauses_shared_table_test() ->
+    Int = thrift_generator_codec_ast:v("Int"),
+    R = thrift_generator_codec_ast:v("R"),
+    ?assertEqual(
+        [
+            thrift_generator_codec_ast:clause([thrift_generator_codec_ast:i(1)], none, [
+                thrift_generator_codec_ast:ok3(thrift_generator_codec_ast:at('ONE'), R)
+            ]),
+            thrift_generator_codec_ast:clause([thrift_generator_codec_ast:i(2)], none, [
+                thrift_generator_codec_ast:ok3(thrift_generator_codec_ast:at('TWO'), R)
+            ]),
+            thrift_generator_codec_ast:clause([thrift_generator_codec_ast:v("_")], none, [
+                thrift_generator_codec_ast:ok3(Int, R)
+            ])
+        ],
+        thrift_generator_codec_ast:enum_from_clauses([{1, 'ONE'}, {2, 'TWO'}], Int, R)
+    ),
+    ok.
+
+integer_guard_sequence_test() ->
+    V = thrift_generator_codec_ast:v("V"),
+    A = erl_anno:new(0),
+    ?assertEqual(
+        [
+            {call, A, {remote, A, {atom, A, erlang}, {atom, A, is_integer}}, [V]},
+            {op, A, '>=', V, {integer, A, -128}},
+            {op, A, '=<', V, {integer, A, 127}}
+        ],
+        thrift_generator_codec_ast:integer_guard(i8, V)
+    ),
     ok.

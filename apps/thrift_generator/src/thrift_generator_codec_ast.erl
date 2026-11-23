@@ -73,6 +73,8 @@ width headers, length prefixes) stay in their emitters.
     full_mask/1,
     missing_names/2,
     key_filter/3,
+    enum_from_clauses/3,
+    integer_guard/2,
     fun_type/2,
     t_atom/1,
     t_atom_lit/1,
@@ -390,6 +392,37 @@ key_filter(N, Map, true) ->
     remote(maps, is_key, [N, Map]);
 key_filter(N, Map, false) ->
     {op, ?ANNO, 'not', remote(maps, is_key, [N, Map])}.
+
+%% The enum decoder table shared by the binary and compact emitters:
+%% one clause per {Value, Atom} descriptor entry answering {ok, Atom,
+%% Rest}, with the dynamic-integer fallback binding the raw value.
+
+-spec enum_from_clauses([{integer(), atom()}], ast(), ast()) -> [ast()].
+enum_from_clauses(Desc, Int, R) ->
+    [
+        clause([i(Value)], none, [ok3(at(Atom), R)])
+     || {Value, Atom} <- Desc
+    ] ++ [clause([v("_")], none, [ok3(Int, R)])].
+
+%% The type/range guard sequence of every guarded base-int encode site:
+%% `is_integer(V), V >= Min, V =< Max' for the signed width of the base
+%% type (JSON folds the two range tests into one `andalso' — it builds
+%% that shape from the second and third elements of this list).
+
+-spec integer_guard(i8 | i16 | i32 | i64, ast()) -> [ast()].
+integer_guard(B, V) ->
+    Bits = int_bits(B),
+    [
+        remote(erlang, is_integer, [V]),
+        {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
+        {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
+    ].
+
+-spec int_bits(i8 | i16 | i32 | i64) -> 8 | 16 | 32 | 64.
+int_bits(i8) -> 8;
+int_bits(i16) -> 16;
+int_bits(i32) -> 32;
+int_bits(i64) -> 64.
 
 %%--------------------------------------------------------------------
 %% Type AST helpers

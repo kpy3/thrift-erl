@@ -106,6 +106,7 @@ syntax trees like everywhere else in the emitter.
     required_bit/2,
     full_mask/1,
     missing_names/2,
+    integer_guard/2,
     t_atom/1,
     t_atom_lit/1,
     t_map_exact/0,
@@ -163,17 +164,16 @@ module_forms(Plan) ->
     %% them directly, and keeping the declared structs' code layout
     %% untouched matters more than grouping (BEAM layout sensitivity).
     Mod = Plan#tg_codec_plan.module,
-    Ctx = Plan#tg_codec_plan.ctx,
     Enums = Plan#tg_codec_plan.enums,
     ServiceStructs = [CS#tg_codec_struct.struct || CS <- Plan#tg_codec_plan.rpc],
-    Blocks = struct_blocks(Mod#tg_module.structs, Ctx, Enums),
-    ServiceBlocks = struct_blocks(ServiceStructs, Ctx, Enums),
+    Blocks = struct_blocks(Mod#tg_module.structs, Plan, Enums),
+    ServiceBlocks = struct_blocks(ServiceStructs, Plan, Enums),
     %% JSON keeps its own container inventory: the unsupported-map
     %% cutoff prunes the children of a map with no JSON-supported key.
     Containers = lists:usort(
         lists:append([containers_json(T) || T <- Plan#tg_codec_plan.wire_types])
     ),
-    ContainerForms = lists:append([container_forms(C, Ctx, Enums) || C <- Containers]),
+    ContainerForms = lists:append([container_forms(C, Plan, Enums) || C <- Containers]),
     Codec = thrift_generator_codec_common:codec_index_forms(json, Plan),
     Blocks ++
         ContainerForms ++
@@ -195,16 +195,16 @@ module_forms(Plan) ->
         Codec ++
         ServiceBlocks.
 
--spec struct_blocks([#tg_struct{}], #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec struct_blocks([#tg_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_blocks(Structs, Ctx, Enums) ->
+struct_blocks(Structs, Plan, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
                 io_lib:format("~s json wire codecs", [thrift_generator_ir:section_label(S)])
             )
         ] ++
-            struct_forms(S, Ctx, Enums)
+            struct_forms(S, Plan, Enums)
      || S <- Structs
     ]).
 
@@ -239,13 +239,14 @@ dec_name(T, Enums) ->
 %% Per-struct blocks
 %%--------------------------------------------------------------------
 
--spec struct_forms(#tg_struct{}, #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec struct_forms(#tg_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_forms(S, Ctx, Enums) ->
-    {Encode, Decode} = thrift_generator_codec_common:codec_pair(json, S, Ctx),
-    FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
-    encode_forms(S, Encode, FieldTypes, Ctx, Enums) ++
-        decode_forms(S, Decode, FieldTypes, Ctx, Enums).
+struct_forms(S, Plan, Enums) ->
+    Ectx = Plan#tg_codec_plan.ctx,
+    {Encode, Decode} = thrift_generator_codec_plan:codec_pair(json, S#tg_struct.name, Plan),
+    FieldTypes = [wtype(F#tg_field.type, Ectx) || F <- S#tg_struct.fields],
+    encode_forms(S, Encode, FieldTypes, Plan, Enums) ++
+        decode_forms(S, Decode, FieldTypes, Plan, Enums).
 
 %%--------------------------------------------------------------------
 %% Encode side
@@ -257,9 +258,9 @@ struct_forms(S, Ctx, Enums) ->
 %% field), so the entry only reverses — measured ~20% over the
 %% join-at-the-top shape on the bench structs.
 
--spec encode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec encode_forms(#tg_struct{}, atom(), [wire_type()], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
+encode_forms(S, Encode, FieldTypes, Plan, Enums) ->
     Chain = atom_concat(Encode, <<"_fields">>),
     %% The checks hand off to the FIRST chain function; with no fields
     %% the chain name itself answers the empty accumulator.
@@ -296,18 +297,18 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         %% it would leave an unused function under warnings_as_errors.
         case {S#tg_struct.kind, S#tg_struct.fields} of
             {union, []} -> [];
-            _ -> chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1)
+            _ -> chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Plan, Enums, 1)
         end.
 
 -spec chain_forms(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #tg_codec_plan{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
-chain_forms(Chain, [], _Ctx, _Enums, _N) ->
+chain_forms(Chain, [], _Plan, _Enums, _N) ->
     %% Zero fields: the chain name itself answers the empty accumulator.
     [{function, ?ANNO, Chain, 3, [clause([v("_Value"), v("_Comma"), v("_Acc")], none, [ok_t(nil())])]}];
-chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
-    chain_fns(Chain, Fields, Ctx, Enums, 1).
+chain_forms(Chain, Fields, Plan, Enums, 1) when Fields =/= [] ->
+    chain_fns(Chain, Fields, Plan, Enums, 1).
 
 %% The field functions proper: the last one answers the accumulated
 %% chunk list (in reverse), the earlier ones hand it on. Each chunk
@@ -317,16 +318,16 @@ chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
 %% the top.
 
 -spec chain_fns(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #tg_codec_plan{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
-chain_fns(_Chain, [], _Ctx, _Enums, _N) ->
+chain_fns(_Chain, [], _Plan, _Enums, _N) ->
     [];
-chain_fns(Chain, [{F, T}], Ctx, Enums, N) ->
-    [chain_fn(Chain, N, F, T, stop, Ctx, Enums)];
-chain_fns(Chain, [{F, T} | Rest], Ctx, Enums, N) ->
+chain_fns(Chain, [{F, T}], Plan, Enums, N) ->
+    [chain_fn(Chain, N, F, T, stop, Plan, Enums)];
+chain_fns(Chain, [{F, T} | Rest], Plan, Enums, N) ->
     Next = {next, chain_fn_name(Chain, N + 1)},
-    [chain_fn(Chain, N, F, T, Next, Ctx, Enums)] ++ chain_fns(Chain, Rest, Ctx, Enums, N + 1).
+    [chain_fn(Chain, N, F, T, Next, Plan, Enums)] ++ chain_fns(Chain, Rest, Plan, Enums, N + 1).
 
 %% The two continuations of one field. `stop' means the field is the
 %% last one — it answers the accumulator itself. `Prefix' is the
@@ -349,12 +350,12 @@ absent_call({next, Name}) ->
     call_local(Name, [v("Value"), v("Comma"), v("Acc")]).
 
 -spec chain_fn(
-    atom(), pos_integer(), #tg_field{}, wire_type(), {next, atom()} | stop, #ectx{} | undefined, #{
+    atom(), pos_integer(), #tg_field{}, wire_type(), {next, atom()} | stop, #tg_codec_plan{} | undefined, #{
         integer() => pos_integer()
     }
 ) ->
     erl_syntax:forms().
-chain_fn(Chain, N, F, {base, uuid}, NextStep, _Ctx, _Enums) ->
+chain_fn(Chain, N, F, {base, uuid}, NextStep, _Plan, _Enums) ->
     %% A present uuid field never produces a chunk: the constant error
     %% fires before the value is read. An absent one skips on to the
     %% rest of the chain, like any other field. A last-link uuid never
@@ -371,7 +372,7 @@ chain_fn(Chain, N, F, {base, uuid}, NextStep, _Ctx, _Enums) ->
             clause([v("_")], none, [absent_call(NextStep)])
         ]),
     {function, ?ANNO, chain_fn_name(Chain, N), 3, [clause([v("Value"), CommaPat, v("Acc")], none, [Body])]};
-chain_fn(Chain, N, F, {base, B} = T, NextStep, _Ctx, _Enums) when
+chain_fn(Chain, N, F, {base, B} = T, NextStep, _Plan, _Enums) when
     B =:= bool; B =:= i8; B =:= i16; B =:= i32; B =:= i64; B =:= double; B =:= string; B =:= binary
 ->
     %% The guarded base types fold the type check into the map-match
@@ -426,7 +427,7 @@ chain_fn(Chain, N, F, {base, B} = T, NextStep, _Ctx, _Enums) when
             'case'(v("Value"), Clauses ++ [clause([v("_")], none, [absent_call(NextStep)])])
         ])
     ]};
-chain_fn(Chain, N, F, T, NextStep, Ctx, Enums) ->
+chain_fn(Chain, N, F, T, NextStep, Plan, Enums) ->
     %% The whole `"id":{"tag":` prefix is one literal.
     Prefix =
         bin_lit(
@@ -437,7 +438,7 @@ chain_fn(Chain, N, F, T, NextStep, Ctx, Enums) ->
     Body =
         'case'(v("Value"), [
             clause([map_exact(name_lit(F#tg_field.name), v("V"))], none, [
-                'case'(encode_json_expr(T, v("V"), Ctx, Enums), [
+                'case'(encode_json_expr(T, v("V"), Plan, Enums), [
                     clause([tuple_t([at(ok), v("E")])], none, [present_call(NextStep, Prefix, v("E"))]),
                     error_clause()
                 ])
@@ -458,14 +459,15 @@ chain_fn_name(Chain, N) ->
 %% the generic engine's encode_j clauses. Encodes bind nothing — the
 %% case variables are the outer value.
 
--spec encode_json_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry()) -> ast().
-encode_json_expr({base, bool}, V, _Ctx, _Enums) ->
+-spec encode_json_expr(wire_type(), ast(), #tg_codec_plan{} | undefined, thrift_generator_codec_common:registry()) ->
+    ast().
+encode_json_expr({base, bool}, V, _Plan, _Enums) ->
     'case'(V, [
         clause([at(true)], none, [ok_t(bin_lit(<<"true">>))]),
         clause([at(false)], none, [ok_t(bin_lit(<<"false">>))]),
         mismatch_tail(V)
     ]);
-encode_json_expr({base, B}, V, _Ctx, _Enums) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
+encode_json_expr({base, B}, V, _Plan, _Enums) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
     'case'(V, [
         clause(
             [v("_")],
@@ -474,14 +476,14 @@ encode_json_expr({base, B}, V, _Ctx, _Enums) when B =:= i8; B =:= i16; B =:= i32
         ),
         clause([v("_")], none, [err_encode(mismatch(V))])
     ]);
-encode_json_expr({base, double}, V, _Ctx, _Enums) ->
+encode_json_expr({base, double}, V, _Plan, _Enums) ->
     'case'(V, [
         clause([v("_")], [remote(erlang, is_number, [V])], [
             ok_t(call_local(json_format_double, [V]))
         ]),
         mismatch_tail(V)
     ]);
-encode_json_expr({base, S}, V, _Ctx, _Enums) when S =:= string; S =:= binary ->
+encode_json_expr({base, S}, V, _Plan, _Enums) when S =:= string; S =:= binary ->
     'case'(V, [
         clause([v("_")], [remote(erlang, is_binary, [V])], [
             ok_t(list_lit([i(34), call_local(json_escape, [V, V]), i(34)]))
@@ -492,79 +494,40 @@ encode_json_expr({base, S}, V, _Ctx, _Enums) when S =:= string; S =:= binary ->
 %% nothing (the generic ignores the value too), but the callers' pair
 %% clauses bind the value/input for every other type — a plain constant
 %% would leave those bindings unused and fail warnings_as_errors.
-encode_json_expr({base, uuid}, V, _Ctx, _Enums) ->
+encode_json_expr({base, uuid}, V, _Plan, _Enums) ->
     'case'(V, [clause([v("_")], none, [uuid_error()])]);
-encode_json_expr({enum, Desc}, V, _Ctx, _Enums) ->
+encode_json_expr({enum, Desc}, V, _Plan, _Enums) ->
     'case'(remote(thrift_runtime_protocol, enum_to_int, [enum_desc_lit(Desc), V]), [
         ok_bind_clause(v("Int"), ok_t(remote(erlang, integer_to_binary, [v("Int")]))),
         clause([at(error)], none, [err_encode(tuple_t([at(unknown_enum_value), V]))])
     ]);
-encode_json_expr({struct, {ref, TypesMod, Local}}, V, Ctx, _Enums) ->
-    struct_encode_call(TypesMod, Local, V, Ctx);
-encode_json_expr({list, _} = T, V, _Ctx, Enums) ->
+encode_json_expr({struct, {ref, TypesMod, Local}}, V, Plan, _Enums) ->
+    thrift_generator_codec_plan:struct_call(json, encode, TypesMod, Local, V, Plan);
+encode_json_expr({list, _} = T, V, _Plan, Enums) ->
     call_local(enc_name(T, Enums), [V]);
-encode_json_expr({set, _, _} = T, V, _Ctx, Enums) ->
+encode_json_expr({set, _, _} = T, V, _Plan, Enums) ->
     call_local(enc_name(T, Enums), [V]);
-encode_json_expr({set, _} = T, V, _Ctx, Enums) ->
+encode_json_expr({set, _} = T, V, _Plan, Enums) ->
     call_local(enc_name(T, Enums), [V]);
-encode_json_expr({map, _, _} = T, V, _Ctx, Enums) ->
+encode_json_expr({map, _, _} = T, V, _Plan, Enums) ->
     call_local(enc_name(T, Enums), [V]).
 
--spec int_range(atom(), ast()) -> ast().
+%% The single-guard range test of the JSON base-int clauses: the same
+%% bounds as thrift_generator_codec_ast:integer_guard/2, folded into
+%% one `andalso' expression (the shape the generic engine's clauses
+%% render).
+-spec int_range(i8 | i16 | i32 | i64, ast()) -> ast().
 int_range(B, V) ->
-    {Low, High} = int_bounds(B),
-    {op, ?ANNO, 'andalso', {op, ?ANNO, '>=', V, i(Low)}, {op, ?ANNO, '=<', V, i(High)}}.
-
--spec int_bounds(atom()) -> {integer(), integer()}.
-int_bounds(i8) ->
-    {-128, 127};
-int_bounds(i16) ->
-    {-32768, 32767};
-int_bounds(i32) ->
-    {-2147483648, 2147483647};
-int_bounds(i64) ->
-    {-(1 bsl 63), (1 bsl 63) - 1}.
-
--spec struct_encode_call(module(), binary(), ast(), #ectx{}) -> ast().
-struct_encode_call(TypesMod, Local, V, Ctx) ->
-    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-        true ->
-            {Encode, _Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
-            call_local(Encode, [V]);
-        false ->
-            {Encode, _Decode} = thrift_generator_codec_common:ref_codec_pair(json, TypesMod, Local, Ctx),
-            remote(TypesMod, Encode, [V])
-    end.
-
--spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
-%% Nested refs call the body directly (no `]`-fold); the target prefix
-%% selects the exported cross-module function.
-struct_decode_call(TypesMod, Local, Bin, Ctx) ->
-    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-        true ->
-            {_Encode, Decode} = thrift_generator_codec_common:codec_pair(json, Local, Ctx),
-            call_local(thrift_generator_codec_common:decode_body_name(Decode), [Bin]);
-        false ->
-            {_Encode, Decode} = thrift_generator_codec_common:ref_codec_pair(json, TypesMod, Local, Ctx),
-            DecodeBody = thrift_generator_codec_common:decode_body_name(Decode),
-            remote(TypesMod, DecodeBody, [Bin])
-    end.
-
-%% The emitter derives the types-module atom from the module key with
-%% the same rule (`sanitize(Name) ++ "_types"`); #ectx.current keeps the
-%% binary key, so the comparison has to rebuild the atom. A case body,
-%% not a guard — binary_to_atom is not guard-legal.
--spec types_module_atom(binary()) -> module().
-types_module_atom(Name) ->
-    thrift_generator_names:types_module_atom(Name).
+    [_IsInt, Ge, Le] = integer_guard(B, V),
+    {op, ?ANNO, 'andalso', Ge, Le}.
 
 %%--------------------------------------------------------------------
 %% Decode side
 %%--------------------------------------------------------------------
 
--spec decode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec decode_forms(#tg_struct{}, atom(), [wire_type()], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
+decode_forms(S, Decode, FieldTypes, Plan, Enums) ->
     Fields = S#tg_struct.fields,
     FieldsName = atom_concat(Decode, <<"_fields">>),
     FieldName = atom_concat(Decode, <<"_field">>),
@@ -615,7 +578,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
             {function, ?ANNO, FieldsName, 3, fields_clauses(FieldName, AfterName, DoneName)},
             {function, ?ANNO, FieldName, 3, field_clauses(Decode)},
             {function, ?ANNO, atom_concat(Decode, <<"_field_value">>), 4,
-                dispatch_clauses(lists:zip(Fields, FieldTypes), Bits, Ctx, Enums)},
+                dispatch_clauses(lists:zip(Fields, FieldTypes), Bits, Plan, Enums)},
             {function, ?ANNO, AfterName, 3, after_clauses(FieldsName, DoneName)},
             {function, ?ANNO, DoneName, 3, done_clauses(Bits)}
         ].
@@ -762,23 +725,23 @@ put_acc(NamePut, V, Acc) ->
 -spec dispatch_clauses(
     [{#tg_field{}, wire_type()}],
     [{integer(), pos_integer(), binary()}],
-    #ectx{},
+    #tg_codec_plan{},
     thrift_generator_codec_common:registry()
 ) ->
     [ast()].
-dispatch_clauses(FieldTypes, Bits, Ctx, Enums) ->
-    [field_value_clause(F, T, Bits, Ctx, Enums) || {F, T} <- FieldTypes] ++
+dispatch_clauses(FieldTypes, Bits, Plan, Enums) ->
+    [field_value_clause(F, T, Bits, Plan, Enums) || {F, T} <- FieldTypes] ++
         [skip_clause()].
 
 -spec field_value_clause(
     #tg_field{},
     wire_type(),
     [{integer(), pos_integer(), binary()}],
-    #ectx{},
+    #tg_codec_plan{},
     thrift_generator_codec_common:registry()
 ) ->
     ast().
-field_value_clause(F, {base, uuid}, _Bits, _Ctx, _Enums) ->
+field_value_clause(F, {base, uuid}, _Bits, _Plan, _Enums) ->
     %% tag(j_unsupported) is the empty string: the field matches only
     %% `""` and then constant-errors, exactly the generic path. The
     %% unused tail parameters stay underscored — the constant error
@@ -793,7 +756,7 @@ field_value_clause(F, {base, uuid}, _Bits, _Ctx, _Enums) ->
             ])
         ]
     );
-field_value_clause(F, T, Bits, Ctx, Enums) ->
+field_value_clause(F, T, Bits, Plan, Enums) ->
     Id = F#tg_field.id,
     clause(
         [i(Id), v("Tag"), v("Bin"), v("Req")],
@@ -805,7 +768,7 @@ field_value_clause(F, T, Bits, Ctx, Enums) ->
                     %% case: names its branches bind (V, Rest, the
                     %% catch-all) stay in scope after it, so the outer
                     %% destructure and catch-all carry distinct names.
-                    'case'(decode_json_expr(T, v("Bin"), Ctx, Enums), [
+                    'case'(decode_json_expr(T, v("Bin"), Plan, Enums), [
                         clause([tuple_t([at(ok), v("Val"), v("RestOut")])], none, [
                             'case'(call_local(json_expect, [v("RestOut"), i(125)]), [
                                 ok_bind_clause(
@@ -864,8 +827,9 @@ skip_clause() ->
         ])
     ]).
 
--spec decode_json_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry()) -> ast().
-decode_json_expr({base, bool}, Bin, _Ctx, _Enums) ->
+-spec decode_json_expr(wire_type(), ast(), #tg_codec_plan{} | undefined, thrift_generator_codec_common:registry()) ->
+    ast().
+decode_json_expr({base, bool}, Bin, _Plan, _Enums) ->
     'case'(call_local(json_skip_ws, [Bin]), [
         clause([bin_pat([{pat_str(<<"true">>), default, default}, {v("Rest"), default, [binary]}])], none, [
             ok3(at(true), v("Rest"))
@@ -876,7 +840,7 @@ decode_json_expr({base, bool}, Bin, _Ctx, _Enums) ->
         clause([bin_pat([])], none, [at(more)]),
         clause([v("_")], none, [err_decode(tuple_t([at(bad_value_for_base_type), at(bool)]))])
     ]);
-decode_json_expr({base, B}, Bin, _Ctx, _Enums) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
+decode_json_expr({base, B}, Bin, _Plan, _Enums) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
     %% The catch-all exports `OtherDecode', not `Other': callers wrap
     %% this case as their subject, and a same-name handler after the
     %% subject would be an unsafe re-bind.
@@ -887,7 +851,7 @@ decode_json_expr({base, B}, Bin, _Ctx, _Enums) when B =:= i8; B =:= i16; B =:= i
         ]),
         other_clause("OtherDecode")
     ]);
-decode_json_expr({base, double}, Bin, _Ctx, _Enums) ->
+decode_json_expr({base, double}, Bin, _Plan, _Enums) ->
     'case'(call_local(json_scan_number, [Bin]), [
         clause([tuple_t([at(ok), tuple_pat([at(float), v("V")]), v("Rest")])], none, [ok3(v("V"), v("Rest"))]),
         clause([tuple_t([at(ok), tuple_pat([at(int), v("V")]), v("Rest")])], none, [
@@ -895,11 +859,11 @@ decode_json_expr({base, double}, Bin, _Ctx, _Enums) ->
         ]),
         other_clause("OtherDecode")
     ]);
-decode_json_expr({base, S}, Bin, _Ctx, _Enums) when S =:= string; S =:= binary ->
+decode_json_expr({base, S}, Bin, _Plan, _Enums) when S =:= string; S =:= binary ->
     call_local(json_scan_string, [Bin]);
-decode_json_expr({base, uuid}, Bin, _Ctx, _Enums) ->
+decode_json_expr({base, uuid}, Bin, _Plan, _Enums) ->
     'case'(Bin, [clause([v("_")], none, [uuid_decode_error()])]);
-decode_json_expr({enum, Desc}, Bin, _Ctx, _Enums) ->
+decode_json_expr({enum, Desc}, Bin, _Plan, _Enums) ->
     'case'(call_local(json_scan_number, [Bin]), [
         clause([tuple_t([at(ok), tuple_pat([at(int), v("Int")]), v("Rest")])], none, [
             'case'(remote(thrift_runtime_protocol, enum_from_int, [enum_desc_lit(Desc), v("Int")]), [
@@ -909,23 +873,23 @@ decode_json_expr({enum, Desc}, Bin, _Ctx, _Enums) ->
         ]),
         other_clause("OtherDecode")
     ]);
-decode_json_expr({struct, {ref, TypesMod, Local}}, Bin, Ctx, _Enums) ->
-    struct_decode_call(TypesMod, Local, Bin, Ctx);
-decode_json_expr({list, _} = T, Bin, _Ctx, Enums) ->
+decode_json_expr({struct, {ref, TypesMod, Local}}, Bin, Plan, _Enums) ->
+    thrift_generator_codec_plan:struct_call(json, decode, TypesMod, Local, Bin, Plan);
+decode_json_expr({list, _} = T, Bin, _Plan, Enums) ->
     call_local(dec_name(T, Enums), [Bin]);
-decode_json_expr({set, _, _} = T, Bin, _Ctx, Enums) ->
+decode_json_expr({set, _, _} = T, Bin, _Plan, Enums) ->
     call_local(dec_name(T, Enums), [Bin]);
-decode_json_expr({set, _} = T, Bin, _Ctx, Enums) ->
+decode_json_expr({set, _} = T, Bin, _Plan, Enums) ->
     call_local(dec_name(T, Enums), [Bin]);
-decode_json_expr({map, _, _} = T, Bin, _Ctx, Enums) ->
+decode_json_expr({map, _, _} = T, Bin, _Plan, Enums) ->
     call_local(dec_name(T, Enums), [Bin]).
 
 %%--------------------------------------------------------------------
 %% Container helpers
 %%--------------------------------------------------------------------
 
--spec container_forms(wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
-container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
+-spec container_forms(wire_type(), #tg_codec_plan{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
+container_forms({Kind, _} = T, Plan, Enums) when Kind =:= list; Kind =:= set ->
     Elem = thrift_generator_codec_common:elem_type(T),
     Tag = bin_lit(json_tag(Elem)),
     Enc = enc_name(T, Enums),
@@ -948,7 +912,7 @@ container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
                     {function, ?ANNO, EncElems, 1, [
                         clause([nil()], none, [ok_t(nil())]),
                         clause([cons(v("V"), v("Rest"))], none, [
-                            'case'(encode_json_expr(Elem, v("V"), Ctx, Enums), [
+                            'case'(encode_json_expr(Elem, v("V"), Plan, Enums), [
                                 ok_bind_clause(
                                     v("E"),
                                     'case'(call_local(EncElems, [v("Rest")]), [
@@ -962,7 +926,7 @@ container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
                     ]}
                 ]
         end,
-    DecElemsForms = dec_elems_forms(Elem, DecElems, Ctx, Enums),
+    DecElemsForms = dec_elems_forms(Elem, DecElems, Plan, Enums),
     [
         {function, ?ANNO, Enc, 1, [
             clause([v("Values")], [remote(erlang, is_list, [v("Values")])], [
@@ -994,7 +958,7 @@ container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
         ]},
         {function, ?ANNO, Dec, 1, dec_seq_clauses(Tag, DecElems)}
     ] ++ EncElemsForms ++ DecElemsForms;
-container_forms({map, K, V} = T, Ctx, Enums) ->
+container_forms({map, K, V} = T, Plan, Enums) ->
     case map_key_supported(K) of
         unsupported ->
             %% A map whose key no JSON object key can carry compiles to
@@ -1016,7 +980,7 @@ container_forms({map, K, V} = T, Ctx, Enums) ->
                 ]}
             ];
         supported ->
-            container_map_forms(T, K, V, Ctx, Enums)
+            container_map_forms(T, K, V, Plan, Enums)
     end.
 
 -spec map_key_supported(wire_type()) -> supported | unsupported.
@@ -1029,9 +993,11 @@ map_key_supported({enum, _Desc}) ->
 map_key_supported(_T) ->
     unsupported.
 
--spec container_map_forms(wire_type(), wire_type(), wire_type(), #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec container_map_forms(
+    wire_type(), wire_type(), wire_type(), #tg_codec_plan{}, thrift_generator_codec_common:registry()
+) ->
     erl_syntax:forms().
-container_map_forms(T, K, V, Ctx, Enums) ->
+container_map_forms(T, K, V, Plan, Enums) ->
     Enc = enc_name(T, Enums),
     Dec = dec_name(T, Enums),
     EncPairs = atom_concat(Enc, <<"_pairs">>),
@@ -1091,7 +1057,7 @@ container_map_forms(T, K, V, Ctx, Enums) ->
                 'case'(call_local(KeyText, [v("K")]), [
                     ok_bind_clause(
                         v("KeyText"),
-                        'case'(encode_json_expr(V, v("V"), Ctx, Enums), [
+                        'case'(encode_json_expr(V, v("V"), Plan, Enums), [
                             ok_bind_clause(
                                 v("ValIo"),
                                 'case'(call_local(EncPairs, [v("Rest")]), [
@@ -1127,7 +1093,7 @@ container_map_forms(T, K, V, Ctx, Enums) ->
         {function, ?ANNO, Dec, 1, dec_map_clauses(bin_lit(json_tag(K)), bin_lit(json_tag(V)), DecPairs)},
         {function, ?ANNO, KeyFromText, 1, key_from_text_clauses(K)},
         {function, ?ANNO, DecPairs, 3, dec_pairs_clauses(DecPairs, DecPair)}
-    ] ++ dec_pair_form(V, KeyFromText, DecPair, Ctx, Enums).
+    ] ++ dec_pair_form(V, KeyFromText, DecPair, Plan, Enums).
 
 %% The enum descriptor ({Int, Atom} pairs) as a literal AST — the same
 %% shape `struct_info/1` hands the generic engines.
@@ -1368,8 +1334,9 @@ tag_clauses(Tag, DecElems) ->
         ])
     ].
 
--spec dec_elems_forms(wire_type(), atom(), #ectx{}, thrift_generator_codec_common:registry()) -> [erl_syntax:forms()].
-dec_elems_forms({base, uuid}, DecElems, _Ctx, _Enums) ->
+-spec dec_elems_forms(wire_type(), atom(), #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+    [erl_syntax:forms()].
+dec_elems_forms({base, uuid}, DecElems, _Plan, _Enums) ->
     [
         {function, ?ANNO, DecElems, 3, [
             clause([i(0), v("Bin"), v("Acc")], none, [
@@ -1381,7 +1348,7 @@ dec_elems_forms({base, uuid}, DecElems, _Ctx, _Enums) ->
             uuid_decode_error_clause(3)
         ]}
     ];
-dec_elems_forms(Elem, DecElems, Ctx, Enums) ->
+dec_elems_forms(Elem, DecElems, Plan, Enums) ->
     [
         {function, ?ANNO, DecElems, 3, [
             clause([i(0), v("Bin"), v("Acc")], none, [
@@ -1391,7 +1358,7 @@ dec_elems_forms(Elem, DecElems, Ctx, Enums) ->
                 ])
             ]),
             clause([i(1), v("Bin"), v("Acc")], none, [
-                'case'(decode_json_expr(Elem, v("Bin"), Ctx, Enums), [
+                'case'(decode_json_expr(Elem, v("Bin"), Plan, Enums), [
                     %% The value case is the subject of the outer case: its
                     %% branch names (V, Rest, the catch-all) stay in scope
                     %% after it, so the destructure and handlers below use
@@ -1409,7 +1376,7 @@ dec_elems_forms(Elem, DecElems, Ctx, Enums) ->
                 ])
             ]),
             clause([v("N"), v("Bin"), v("Acc")], [{op, ?ANNO, '>', v("N"), i(1)}], [
-                'case'(decode_json_expr(Elem, v("Bin"), Ctx, Enums), [
+                'case'(decode_json_expr(Elem, v("Bin"), Plan, Enums), [
                     clause([tuple_t([at(ok), v("ElemV"), v("ElemRest")])], none, [
                         'case'(call_local(json_expect, [v("ElemRest"), i(44)]), [
                             ok_bind_clause(
@@ -1583,16 +1550,16 @@ dec_pairs_clauses(DecPairs, DecPair) ->
 %% {ok, Key, {Value, Rest}}. A function (not an inlined tree) keeps the
 %% loop's destructure free of the body's exported names.
 
--spec dec_pair_form(wire_type(), atom(), atom(), #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec dec_pair_form(wire_type(), atom(), atom(), #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-dec_pair_form(V, KeyFromText, DecPair, Ctx, Enums) ->
+dec_pair_form(V, KeyFromText, DecPair, Plan, Enums) ->
     [
         {function, ?ANNO, DecPair, 2, [
             clause([v("KeyText"), v("Bin")], none, [
                 'case'(call_local(json_expect, [v("Bin"), i(58)]), [
                     ok_bind_clause(
                         v("Rest0"),
-                        'case'(decode_json_expr(V, v("Rest0"), Ctx, Enums), [
+                        'case'(decode_json_expr(V, v("Rest0"), Plan, Enums), [
                             ok3_bind_clause(
                                 v("Value"),
                                 v("Rest1"),
@@ -2046,8 +2013,8 @@ uuid_decode_error_clause(Arity) ->
 %%--------------------------------------------------------------------
 
 -spec wtype(thrift_type(), #ectx{}) -> wire_type().
-wtype(Type, Ctx) ->
-    thrift_generator_ir:type_desc(Type, Ctx).
+wtype(Type, Ectx) ->
+    thrift_generator_ir:type_desc(Type, Ectx).
 
 %% The JSON type tags of the generic engine's tag/1, computed at emit
 %% time — the generated code carries them as literals.
