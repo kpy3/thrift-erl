@@ -116,14 +116,17 @@ args_from_wire({struct, {_Kind, Fields}}, Args) ->
 -doc """
 Converts a handler result to wire representation.
 
-`Result` is `{ok, Value}`, `{error, {exception, Value}}` — the declared
-exception identified by its representation tag — or
+`Result` is `ok` — the success answer of a `void` function — or
+`{ok, Value}` — the reply of a non-void function, converted through
+`ReplyType`; declared exceptions answer `{error, {exception, Value}}` —
+the declared exception identified by its representation tag — or
 `{error, {exception, Name, Value}}` with an explicit wire name (the
 form hand-written descriptors and map-representation exceptions need);
-anything else passes through.
+anything else passes through, and the runtime rejects it as an
+unsupported result.
 """.
 -spec result_to_wire(type_desc() | undefined, [exception_field()], term()) -> term().
-result_to_wire(_ReplyType, _Exceptions, {ok, undefined} = Result) ->
+result_to_wire(undefined, _Exceptions, ok = Result) ->
     Result;
 result_to_wire(ReplyType, _Exceptions, {ok, Value}) when ReplyType =/= undefined ->
     {ok, to_wire(ReplyType, Value)};

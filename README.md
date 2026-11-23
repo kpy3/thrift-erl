@@ -310,7 +310,7 @@ ping(#ping_api_ping_request{message = <<"bad">>}) ->
 ping(#ping_api_ping_request{message = Msg}) ->
     {ok, #ping_api_ping_reply{message = <<"pong: ", Msg/binary>>, at_millis = 0}}.
 
-poke() -> {ok, undefined}.
+poke() -> ok.
 ```
 
 Server and client:

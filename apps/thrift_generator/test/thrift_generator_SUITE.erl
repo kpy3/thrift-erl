@@ -69,6 +69,7 @@
     standalone_generate_check_clean/1,
     getting_started_example/1,
     generated_client_start_unlinked/1,
+    generated_handler_result_contract/1,
     generated_map_mode/1,
     generated_native_repr/1,
     generated_set_impl/1
@@ -120,6 +121,7 @@ all() ->
         standalone_generate_check_clean,
         getting_started_example,
         generated_client_start_unlinked,
+        generated_handler_result_contract,
         generated_map_mode,
         generated_native_repr,
         generated_set_impl
@@ -1863,7 +1865,7 @@ getting_started_example(Config) ->
             "ping(#ping_api_ping_request{message = Msg}) ->\n"
             "    {ok, #ping_api_ping_reply{message = <<\"pong: \", Msg/binary>>, at_millis = 0}}.\n"
             "\n"
-            "poke() -> {ok, undefined}.\n"
+            "poke() -> ok.\n"
         >>
     ),
     {ok, ping_handler, HandlerBeam} = compile:file(
@@ -2004,6 +2006,62 @@ generated_client_start_unlinked(Config) ->
     after
         ok = start_unlink_ping_server:stop(Server)
     end.
+
+%% The generated handler behaviour spells out the strict result
+%% contract: `ok' for a void or oneway callback, `{ok, Value}' for a
+%% non-void one — every -callback still returns the remote
+%% `thrift_runtime_service:handler_result()' type.
+
+-spec generated_handler_result_contract(ct:config()) -> ok.
+generated_handler_result_contract(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    Path = write_snippet(
+        Config,
+        "result_contract.thrift",
+        <<
+            "service Svc {\n"
+            "  void ping(),\n"
+            "  i32 add(1: i32 a, 2: i32 b),\n"
+            "  oneway void poke()\n"
+            "}\n"
+        >>
+    ),
+    {ok, _} = thrift_generator:generate(Path, #{out_dir => PrivDir}),
+    {ok, RawSrc} = file:read_file(filename:join(PrivDir, "result_contract_svc_handler.erl")),
+    Src = doc_text(RawSrc),
+    ?assertMatch({match, _}, re:run(Src, <<"Handler callback for ping[\\s\\S]*?answer `ok`">>)),
+    ?assertMatch({match, _}, re:run(Src, <<"Handler callback for add[\\s\\S]*?answers `{ok, Value}`">>)),
+    ?assertMatch(
+        {match, _},
+        re:run(Src, <<"Handler callback for the oneway poke[\\s\\S]*?answer `ok`">>)
+    ),
+    {match, Callbacks} = re:run(Src, <<"-callback ">>, [global]),
+    ?assertEqual(3, length(Callbacks)),
+    ?assertMatch(
+        {match, _},
+        re:run(Src, <<"-callback ping\\(\\) -> thrift_runtime_service:handler_result\\(\\)\\.">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(Src, <<"-callback poke\\(\\) -> thrift_runtime_service:handler_result\\(\\)\\.">>)
+    ),
+    ?assertMatch(
+        {match, _},
+        re:run(
+            Src,
+            <<"-callback add\\(integer\\(\\), integer\\(\\)\\) ->\\s+thrift_runtime_service:handler_result\\(\\)\\.">>
+        )
+    ),
+    ok.
+
+%% Doc attributes wrap their string literal one chunk per line; the
+%% seams (`"' newline indentation `"') carry no content, so gluing them
+%% restores the logical doc text for substring matching (same helper as
+%% the emitter suite's).
+
+-spec doc_text(binary()) -> binary().
+doc_text(Source) ->
+    re:replace(Source, <<"\"\\n\\s*\"">>, <<>>, [global, {return, binary}]).
 
 %% The standalone CLI end to end, over the real prod escript: explicit
 %% generate/check/clean commands, the `src' default output dir, the

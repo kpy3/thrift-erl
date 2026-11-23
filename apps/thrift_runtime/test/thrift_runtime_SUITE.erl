@@ -34,6 +34,10 @@
     http_calls/1,
     declared_exception/1,
     application_exception/1,
+    invalid_void_handler_result/1,
+    invalid_nonvoid_handler_result/1,
+    oneway_invalid_result/1,
+    oneway_invalid_result_http/1,
     oneway_delivery/1,
     many_sequential_calls/1,
     unknown_function_is_local_error/1,
@@ -63,6 +67,10 @@ all() ->
         http_calls,
         declared_exception,
         application_exception,
+        invalid_void_handler_result,
+        invalid_nonvoid_handler_result,
+        oneway_invalid_result,
+        oneway_invalid_result_http,
         oneway_delivery,
         many_sequential_calls,
         unknown_function_is_local_error,
@@ -209,6 +217,90 @@ application_exception(_Config) ->
             call(Client, <<"boomInternal">>, [])
         )
     end).
+
+%% The strict handler-result contract: the legacy void answer `{ok,
+%% undefined}' is an unsupported result now, not a compatibility shim.
+%% The call is answered with INTERNAL_ERROR and exactly one `handler_error'
+%% event, and the connection stays usable.
+
+invalid_void_handler_result(_Config) ->
+    with_event_server(#{}, fun(Client) ->
+        ?assertMatch(
+            {error, {application_exception, <<"internal error">>, 6, <<"INTERNAL_ERROR">>}},
+            call(Client, <<"badPing">>, [])
+        ),
+        wait_handler_error(<<"badPing">>, {bad_result, {ok, undefined}}),
+        assert_no_handler_error(),
+        ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3]))
+    end).
+
+%% A bare `ok' stays unsupported for a non-void function: INTERNAL_ERROR
+%% plus one `handler_error' event.
+
+invalid_nonvoid_handler_result(_Config) ->
+    with_event_server(#{}, fun(Client) ->
+        ?assertMatch(
+            {error, {application_exception, <<"internal error">>, 6, <<"INTERNAL_ERROR">>}},
+            call(Client, <<"badAdd">>, [])
+        ),
+        wait_handler_error(<<"badAdd">>, {bad_result, ok}),
+        assert_no_handler_error()
+    end).
+
+%% An invalid oneway result cannot be answered on the wire (nothing is
+%% ever sent back); it surfaces as one `handler_error' event only. The
+%% handler itself ran to completion — its side effect arrived.
+
+oneway_invalid_result(_Config) ->
+    with_event_server(#{}, fun(Client) ->
+        true = register(thrift_runtime_test_sink, self()),
+        try
+            ok = thrift_runtime_client:oneway(Client, <<"badNotify">>, [<<"fire">>], 5000),
+            receive
+                {bad_notified, <<"fire">>} ->
+                    ok
+            after 2000 ->
+                erlang:error(oneway_not_delivered)
+            end,
+            wait_handler_error(<<"badNotify">>, {bad_result, {ok, undefined}}),
+            assert_no_handler_error()
+        after
+            unregister(thrift_runtime_test_sink)
+        end
+    end).
+
+%% Over HTTP the acknowledgement is exactly the (empty) 200 owed to every
+%% request, sent before the handler runs: an invalid oneway result adds
+%% one `handler_error' event and no second response. A raw socket pins
+%% both halves — one response with an empty body, then silence.
+
+oneway_invalid_result_http(_Config) ->
+    Self = self(),
+    Events = fun(E) -> Self ! {suite_event, E} end,
+    {ok, Server} =
+        thrift_runtime_server:start_link(#{
+            port => 0,
+            transport => http,
+            handler => ?HANDLER,
+            service => ?SERVICE,
+            on_event => Events
+        }),
+    try
+        {ok, Port} = thrift_runtime_server:port(Server),
+        {ok, Sock} = gen_tcp:connect("127.0.0.1", Port, [binary, {packet, raw}, {active, false}]),
+        try
+            ok = raw_http_oneway(Sock, <<"badNotify">>),
+            wait_handler_error(<<"badNotify">>, {bad_result, {ok, undefined}}),
+            assert_no_handler_error(),
+            %% the valid oneway is acknowledged exactly once too, with no event
+            ok = raw_http_oneway(Sock, <<"notify">>),
+            assert_no_handler_error()
+        after
+            gen_tcp:close(Sock)
+        end
+    after
+        thrift_runtime_server:stop(Server)
+    end.
 
 oneway_delivery(_Config) ->
     with_server(#{}, fun(Client) ->
@@ -714,6 +806,74 @@ with_server(Overrides, Test) ->
         end
     after
         thrift_runtime_server:stop(Server)
+    end.
+
+%% A server (and client) whose on_event collector forwards every event
+%% to the test process as `{suite_event, Event}'.
+
+-spec with_event_server(map(), fun((pid()) -> term())) -> term().
+with_event_server(Overrides, Test) ->
+    Self = self(),
+    Events = fun(E) -> Self ! {suite_event, E} end,
+    with_server(Overrides#{on_event => Events}, Test).
+
+%% Waits for the `handler_error' event of one invalid handler result;
+%% events from the client's side of the connection are skipped over.
+
+-spec wait_handler_error(binary(), term()) -> ok.
+wait_handler_error(Function, Reason) ->
+    receive
+        {suite_event, #{type := handler_error, function := Function, reason := Reason}} ->
+            ok;
+        {suite_event, _} ->
+            wait_handler_error(Function, Reason)
+    after 5000 ->
+        erlang:error({no_handler_error, Function, Reason})
+    end.
+
+%% One invalid result means exactly one event: a short drain must not
+%% reveal a second `handler_error'.
+
+-spec assert_no_handler_error() -> ok.
+assert_no_handler_error() ->
+    receive
+        {suite_event, #{type := handler_error} = Event} ->
+            erlang:error({unexpected_handler_error, Event});
+        {suite_event, _} ->
+            assert_no_handler_error()
+    after 300 ->
+        ok
+    end.
+
+%%--------------------------------------------------------------------
+%% Raw HTTP helpers
+%%--------------------------------------------------------------------
+
+%% POSTs one oneway message over a raw socket and pins the acknowledgement:
+%% exactly one response, 200 with an empty body, then silence on the wire.
+
+-spec raw_http_oneway(gen_tcp:socket(), binary()) -> ok.
+raw_http_oneway(Sock, Name) ->
+    Params = {struct, {struct, [{1, default, {base, string}, <<"m">>, undefined}]}},
+    {ok, Payload} = thrift_runtime_binary:encode(Params, #{<<"m">> => <<"fire">>}),
+    Message = iolist_to_binary(thrift_runtime_binary:encode_message(oneway, Name, 0, Payload)),
+    Request = thrift_runtime_http:request(<<"localhost">>, <<"/">>, [], Message),
+    ok = gen_tcp:send(Sock, iolist_to_binary(Request)),
+    {200, <<>>} = recv_http_response(Sock),
+    {error, timeout} = gen_tcp:recv(Sock, 0, 400),
+    ok.
+
+-spec recv_http_response(gen_tcp:socket()) -> {100..599, binary()}.
+recv_http_response(Sock) ->
+    recv_http_response(Sock, <<>>).
+
+recv_http_response(Sock, Buffer) ->
+    case thrift_runtime_http:extract_response(Buffer, 64 * 1024 * 1024) of
+        {ok, {Code, _Headers, Body}, _Leftover} ->
+            {Code, Body};
+        more ->
+            {ok, Data} = gen_tcp:recv(Sock, 0, 5000),
+            recv_http_response(Sock, <<Buffer/binary, Data/binary>>)
     end.
 
 %% A multiplexed server hosting the given `ServiceName => {Handler,

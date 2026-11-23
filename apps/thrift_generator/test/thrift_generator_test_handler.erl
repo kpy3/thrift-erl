@@ -26,9 +26,9 @@
 -record(shared_inner, {name}).
 -record(main_failed, {reason}).
 
--spec ping() -> {ok, undefined}.
+-spec ping() -> ok.
 ping() ->
-    {ok, undefined}.
+    ok.
 
 -spec area(integer(), integer()) -> {ok, integer()}.
 area(W, H) ->

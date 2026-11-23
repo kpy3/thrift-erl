@@ -14,5 +14,6 @@
 -compile([nowarn_unused_record]).
 
 -doc("Handler callback for ping: called as `Handler:ping(Args...)` in "
-     "declaration order; answers a `thrift_runtime_service:handler_result()`.").
+     "declaration order; the function is `void` — answer `ok` (a declared "
+     "exception is still `{error, {exception, ...}}`).").
 -callback ping() -> thrift_runtime_service:handler_result().

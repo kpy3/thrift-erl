@@ -23,6 +23,9 @@
     size/1,
     deep/1,
     ping/0,
+    badPing/0,
+    badAdd/0,
+    badNotify/1,
     boom/0,
     boomInternal/0,
     notify/1,
@@ -45,8 +48,27 @@ size(Items) ->
 deep(#{<<"x">> := X, <<"y">> := Y}) ->
     {ok, #{<<"x">> => Y, <<"y">> => X}}.
 
--spec ping() -> {ok, undefined}.
+-spec ping() -> ok.
 ping() ->
+    ok.
+
+-spec badPing() -> {ok, undefined}.
+badPing() ->
+    {ok, undefined}.
+
+-spec badAdd() -> ok.
+badAdd() ->
+    ok.
+
+-spec badNotify(binary()) -> {ok, undefined}.
+badNotify(M) ->
+    case whereis(thrift_runtime_test_sink) of
+        undefined ->
+            ok;
+        Pid ->
+            Pid ! {bad_notified, M},
+            ok
+    end,
     {ok, undefined}.
 
 -spec boom() -> {error, {exception, binary(), map()}}.

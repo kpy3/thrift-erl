@@ -24,9 +24,9 @@ params/result codecs produce and consume.
 
 -export([ping/0, area/2, fetch/1, fire/1]).
 
--spec ping() -> {ok, undefined}.
+-spec ping() -> ok.
 ping() ->
-    {ok, undefined}.
+    ok.
 
 -spec area(integer(), integer()) -> {ok, integer()}.
 area(W, H) ->

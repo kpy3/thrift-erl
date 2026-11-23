@@ -87,6 +87,31 @@ service_info() ->
             params => {struct, {struct, []}},
             reply => {base, string}
         },
+        <<"badPing">> => #{
+            name => <<"badPing">>,
+            oneway => false,
+            params => {struct, {struct, []}}
+            %% void; the handler answers the legacy `{ok, undefined}' shape,
+            %% which the strict contract rejects
+        },
+        <<"badAdd">> => #{
+            name => <<"badAdd">>,
+            oneway => false,
+            params => {struct, {struct, []}},
+            reply => {base, i32}
+            %% non-void; the handler answers a bare `ok', unsupported here
+        },
+        <<"badNotify">> => #{
+            name => <<"badNotify">>,
+            oneway => true,
+            params =>
+                {struct,
+                    {struct, [
+                        {1, default, {base, string}, <<"m">>, undefined}
+                    ]}}
+            %% oneway; the handler answers the legacy `{ok, undefined}'
+            %% shape — an invalid oneway result is an event, not a reply
+        },
         <<"notify">> => #{
             name => <<"notify">>,
             oneway => true,

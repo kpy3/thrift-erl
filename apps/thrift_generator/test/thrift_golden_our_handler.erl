@@ -47,7 +47,7 @@ the officially generated client through our runtime (see
 
 -doc false.
 testVoid() ->
-    {ok, undefined}.
+    ok.
 
 -doc false.
 testString(Thing) ->
@@ -118,7 +118,7 @@ testMapMap(_Hi) ->
 testException(<<"Xception">>) ->
     {error, {exception, #goldentest_xception{errorCode = 1001, message = <<"Xception">>}}};
 testException(_) ->
-    {ok, undefined}.
+    ok.
 
 -doc false.
 testMultiException(<<"Xception">>, _) ->
@@ -134,4 +134,4 @@ testMultiException(_, Arg1) ->
 -doc false.
 testOneway(Secs) ->
     thrift_golden_official_handler:notify_oneway(Secs),
-    {ok, undefined}.
+    ok.

@@ -4,6 +4,14 @@
 
 ### Breaking changes
 
+RPC handler results are strict and mirror the client-side shapes (void
+and oneway handlers answer the bare atom `ok`, non-void handlers answer
+`{ok, Value}`): the old void shape `{ok, undefined}` is rejected like
+any other unsupported result — a request/response call is answered with
+`TApplicationException` `INTERNAL_ERROR` and one `handler_error` event,
+an oneway call emits the event only. The HTTP oneway acknowledgement is
+unchanged, as are the wire codecs and the empty void payload.
+
 The generator tooling API is unified on one validated options map
 across every frontend — the library, the standalone CLI and the rebar3
 plugin — with the transitional forms removed and no compatibility

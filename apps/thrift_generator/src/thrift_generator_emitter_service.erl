@@ -250,20 +250,35 @@ callback_doc(F) ->
             unicode:characters_to_binary(
                 io_lib:format(
                     "Handler callback for the oneway ~ts: called as"
-                    " `Handler:~ts(Args...)` in declaration order; the"
-                    " answer is discarded.",
+                    " `Handler:~ts(Args...)` in declaration order; nothing"
+                    " goes back over the wire — answer `ok`.",
                     [Name, Name]
                 )
             );
         false ->
-            unicode:characters_to_binary(
-                io_lib:format(
-                    "Handler callback for ~ts: called as"
-                    " `Handler:~ts(Args...)` in declaration order; answers"
-                    " a `thrift_runtime_service:handler_result()`.",
-                    [Name, Name]
-                )
-            )
+            case F#tg_function.return_type of
+                void ->
+                    unicode:characters_to_binary(
+                        io_lib:format(
+                            "Handler callback for ~ts: called as"
+                            " `Handler:~ts(Args...)` in declaration order;"
+                            " the function is `void` — answer `ok` (a"
+                            " declared exception is still"
+                            " `{error, {exception, ...}}`).",
+                            [Name, Name]
+                        )
+                    );
+                _ ->
+                    unicode:characters_to_binary(
+                        io_lib:format(
+                            "Handler callback for ~ts: called as"
+                            " `Handler:~ts(Args...)` in declaration order;"
+                            " answers `{ok, Value}` with the reply value"
+                            " — a `thrift_runtime_service:handler_result()`.",
+                            [Name, Name]
+                        )
+                    )
+            end
     end.
 
 %% -callback Name/Arity :: FunType — the payload mixes a tree with a
