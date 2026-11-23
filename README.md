@@ -327,6 +327,18 @@ ok = ping_api_ping_client:stop(Client),
 ok = ping_api_ping_server:stop(Server).
 ```
 
+Calls answer `ok` for a void or oneway result, `{ok, Value}` for a
+non-void reply and `{error, {exception, ...}}` for a declared
+exception — generated, dynamic (`thrift_runtime_client`) and
+reconnecting callers alike. The handler side mirrors the shapes: a
+void or oneway callback answers the bare atom `ok`, a non-void one
+`{ok, Value}` or the exception tuple; the old void shape `{ok,
+undefined}` is an unsupported result. An unsupported handler result
+answers the call with `TApplicationException` `INTERNAL_ERROR` and
+emits one `handler_error` event (oneway emits the event only), and
+never changes the wire payload — a void function has no success field,
+so `ok` is the existing empty result struct.
+
 `start_link` options (a map at creation time, not app env):
 
 - `service` — the module implementing the `thrift_runtime_service`
@@ -618,7 +630,9 @@ runs the full ThriftTest battery against our HTTP server.
 automatic reconnection: any failure fails the outstanding calls and
 stops the process, so a pool sees the death immediately and replaces
 the worker. The unlinked `thrift_runtime_client:start/1` (plus
-`service => ping_api_ping_server`) is the pool-worker entry:
+`service => ping_api_ping_server`) is the pool-worker entry; generated
+clients export the same unlinked `start/1` beside `start_link/1` with
+`service` already inserted:
 
 ```erlang
 ClientOpts = #{host => "127.0.0.1", port => 9090, service => ping_api_ping_server},
@@ -664,7 +678,7 @@ start — the wrapper keeps trying, like the reference Apache
     #{host => "localhost", port => 9090, service => ping_api_ping_server,
       reconnect_min => 500, reconnect_max => 30000}
 ),
-{ok, undefined} = thrift_runtime_reconnecting_client:call(Client, <<"poke">>, [], 5000),
+ok = thrift_runtime_reconnecting_client:call(Client, <<"poke">>, [], 5000),
 
 %% the pool health-check surface
 #{connected := true, calls_ok := 3, calls_failed := 0,
@@ -725,7 +739,8 @@ lives in the `thrift_runtime_events` moduledoc):
   protocol errors are answers, not handler errors.
 
 The generated client and server take `on_event` unchanged — their
-`start_link/1` accepts the same options map as the runtime modules.
+`start_link/1` accepts the same options map as the runtime modules
+(the generated client also has the unlinked `start/1`).
 
 ## Multiplexed services
 
