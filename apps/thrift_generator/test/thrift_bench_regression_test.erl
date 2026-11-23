@@ -23,7 +23,8 @@
     constant_ratio_has_degenerate_interval_test/0,
     wide_interval_is_inconclusive_test/0,
     median_handles_even_sample_count_test/0,
-    schema_rows_use_current_head_module_facade_test/0
+    schema_rows_use_current_head_module_facade_test/0,
+    schema_cases_run_end_to_end_with_default_repr_test/0
 ]).
 
 paired_ratio_uses_throughput_direction_test() ->
@@ -103,3 +104,74 @@ schema_rows_use_current_head_module_facade_test() ->
         maps:get(head, Decode)
     ),
     ok.
+
+%% `schema_cases/1' is the production entry point behind those rows: it
+%% resolves the struct's representation through the head module's
+%% introspection (`repr_mode_of' + the default-repr mapping), encodes the
+%% value through the runtime binary engine to build the decode wire
+%% bytes, and filters on THRIFT_BENCH_ENTRY=schema with
+%% THRIFT_BENCH_PROTOCOL=binary. The row shapes still come out of
+%% `schema_case/4', so this test pins the end-to-end plumbing instead of
+%% only the literal row shape.
+
+schema_cases_run_end_to_end_with_default_repr_test() ->
+    Spec = #{
+        id => <<"Xtruct">>,
+        struct => <<"Xtruct">>,
+        value => #{
+            <<"string_thing">> => <<"hi">>,
+            <<"byte_thing">> => 1,
+            <<"i32_thing">> => 2,
+            <<"i64_thing">> => 3
+        },
+        base_prefix => <<"goldentest">>,
+        base_module => goldentest080a_types,
+        head_prefix => <<"fixture">>,
+        head_module => thrift_bench_schema_head_types
+    },
+    with_schema_env(
+        "binary",
+        fun() ->
+            [Encode, Decode] = thrift_bench_regression:schema_cases(Spec),
+            ?assertEqual({<<"Xtruct">>, binary, schema, encode}, maps:get(key, Encode)),
+            ?assertEqual(
+                {encode, {facade, thrift_bench_schema_head_types, xtruct, maps:get(value, Spec), #{}}},
+                maps:get(head, Encode)
+            ),
+            %% Xtruct is a tuple-record struct on the head module, so the
+            %% default-repr mapping supplies `record' on the decode row.
+            ?assertEqual({<<"Xtruct">>, binary, schema, decode}, maps:get(key, Decode)),
+            ?assertMatch(
+                {decode,
+                    {runtime, {struct, {ref, thrift_bench_schema_head_types, <<"Xtruct">>}}, _, #{
+                        repr := record
+                    }}},
+                maps:get(base, Decode)
+            ),
+            ?assertMatch(
+                {decode, {facade, thrift_bench_schema_head_types, xtruct, _, #{repr := record}}},
+                maps:get(head, Decode)
+            )
+        end
+    ),
+    %% Selection stays binary-only: any other protocol drops the rows.
+    with_schema_env(
+        "compact",
+        fun() -> ?assertEqual([], thrift_bench_regression:schema_cases(Spec)) end
+    ),
+    ok.
+
+with_schema_env(Protocol, Fun) ->
+    EntryPrev = os:getenv("THRIFT_BENCH_ENTRY"),
+    ProtocolPrev = os:getenv("THRIFT_BENCH_PROTOCOL"),
+    os:putenv("THRIFT_BENCH_ENTRY", "schema"),
+    os:putenv("THRIFT_BENCH_PROTOCOL", Protocol),
+    try
+        Fun()
+    after
+        restore_env("THRIFT_BENCH_ENTRY", EntryPrev),
+        restore_env("THRIFT_BENCH_PROTOCOL", ProtocolPrev)
+    end.
+
+restore_env(Name, false) -> os:unsetenv(Name);
+restore_env(Name, Value) -> os:putenv(Name, Value).

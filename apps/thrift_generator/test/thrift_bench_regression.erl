@@ -52,7 +52,7 @@ Use `scripts/bench-regression`, which supplies generation
 and cleanup.
 """.
 
--export([main/1, median/1, evaluate/2, cases/1, schema_case/4]).
+-export([main/1, median/1, evaluate/2, cases/1, schema_case/4, schema_cases/1]).
 -export([repeat/3, encode/1, decode/1, call/1, to_wire/1, from_wire/1]).
 -export([decode_twopass/1, decode_onepass/1, encode_twopass/1, encode_onepass/1, onepass_cases/1]).
 -export_type([sample/0, evaluation/0]).

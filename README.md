@@ -447,8 +447,11 @@ explicit, so the value's own tag is never consulted:
 %% convert/3 and decode alike.
 ```
 
-`descriptor/1` hands out the named-ref descriptor the advanced runtime
-facade consumes: `{ok, Desc} = ping_api_types:descriptor(ping_request)`.
+Both descriptors the advanced runtime facade accepts are one call
+away: `struct_info/1` answers the struct's inline descriptor (accepting
+the canonical type atom or the wire name), while `descriptor/1` hands
+out the named-ref descriptor:
+`{ok, Desc} = ping_api_types:descriptor(ping_request)`.
 
 The representation of a struct can also be pinned in the IDL with
 `erl.struct_type = "map"` — values become maps at the wire boundary in

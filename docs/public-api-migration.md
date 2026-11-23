@@ -37,7 +37,10 @@ The option maps are validated, not silently ignored:
   `{error, {bad_option, {options, Value, [map]}}}` instead of being
   treated as a positional protocol or repr;
 - an unknown type atom answers `{error, {unknown_type, Type}}`
-  everywhere the facade resolves it.
+  everywhere the facade resolves it; when the same call also carries a
+  non-map options argument, the `{error, {bad_option, {options, Value,
+  [map]}}}` answer takes precedence — options are validated before the
+  type is resolved.
 
 Conversion is type-directed: the value's record tag, `__struct__` key
 or native identity is never consulted. The old shared-sum-atom

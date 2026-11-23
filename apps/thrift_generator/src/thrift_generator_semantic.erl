@@ -324,11 +324,10 @@ check_generated_names(Module, Ctx) ->
     Ctx1 = check_flat_clashes(StructTags, "record tag", Ctx),
     Ctx2 = check_flat_clashes(EnumPrefixes, "enum helper prefix", Ctx1),
     %% Sum-union field atoms are NOT checked for cross-union clashes:
-    %% sharing a field name across unions is legal, common Thrift
-    %% (per-resource result unions), and only the shared field atom of
-    %% one union's value can reach another union's schema through an
-    %% untyped convert call — the generated facade converts through the
-    %% explicit type, never through a shared tag index.
+    %% sharing a field name across unions is legal and common Thrift
+    %% (per-resource result unions), and the type-first facade resolves
+    %% every conversion through the explicit union type atom, so a
+    %% shared field atom is unambiguous.
     check_const_clashes(Module, Ctx2).
 
 -spec check_flat_clashes([{binary(), loc()}], string(), #ctx{}) -> #ctx{}.
