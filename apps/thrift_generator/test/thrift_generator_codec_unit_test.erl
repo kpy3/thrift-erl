@@ -34,7 +34,14 @@
     struct_call_remote_compact_decode_test/0,
     struct_call_json_decode_body_test/0,
     enum_from_clauses_shared_table_test/0,
-    integer_guard_sequence_test/0
+    integer_guard_sequence_test/0,
+    sequence_encoder_form_test/0,
+    sequence_encode_elements_form_test/0,
+    sequence_decode_elements_form_test/0,
+    map_decode_pairs_form_test/0,
+    base_field_clauses_binary_int_test/0,
+    base_field_clauses_binary_bool_test/0,
+    base_field_clauses_compact_int_test/0
 ]).
 
 colliding_enum_descriptors_test() ->
@@ -359,5 +366,260 @@ integer_guard_sequence_test() ->
             {op, A, '=<', V, {integer, A, 127}}
         ],
         thrift_generator_codec_ast:integer_guard(i8, V)
+    ),
+    ok.
+
+%% The shared container/base-field shapes rendered with erl_pp:form/1.
+%% Reference strings captured from the pre-refactor emitters' output
+%% (binary list<i16> container, binary/compact i32 and bool base fields).
+
+render_form(Form) ->
+    lists:flatten(erl_pp:form(Form)).
+
+sequence_encoder_form_test() ->
+    %% binary list<i16> header: element wire byte + i32 length
+    Header = thrift_generator_codec_ast:list_lit([
+        thrift_generator_codec_ast:bin_seg(thrift_generator_codec_ast:i(6), thrift_generator_codec_ast:i(8), [
+            big, unsigned
+        ]),
+        thrift_generator_codec_ast:bin_seg(
+            thrift_generator_codec_ast:call_local(length, [thrift_generator_codec_ast:v("Values")]),
+            thrift_generator_codec_ast:i(32),
+            [big, signed]
+        )
+    ]),
+    ?assertEqual(
+        "enc_list_i16(Values) when is_list(Values) ->\n"
+        "    case enc_list_i16_elems(Values) of\n"
+        "        {ok, Es} ->\n"
+        "            {ok,\n"
+        "             [[<<6:8/big-unsigned>>, <<(length(Values)):32/big-signed>>],\n"
+        "              Es]};\n"
+        "        {error, _} = Err ->\n"
+        "            Err\n"
+        "    end;\n"
+        "enc_list_i16(Value) ->\n"
+        "    {error, {encode, {value_does_not_match_type, Value}}}.\n",
+        render_form(thrift_generator_codec_ast:sequence_encoder_form(enc_list_i16, enc_list_i16_elems, Header))
+    ),
+    ok.
+
+sequence_encode_elements_form_test() ->
+    V = thrift_generator_codec_ast:v("V"),
+    EncodeElem = thrift_generator_codec_ast:'case'(V, [
+        thrift_generator_codec_ast:clause(
+            [thrift_generator_codec_ast:v("_")], thrift_generator_codec_ast:integer_guard(i16, V), [
+                thrift_generator_codec_ast:ok_t(
+                    thrift_generator_codec_ast:bin_seg(V, thrift_generator_codec_ast:i(16), [big, signed])
+                )
+            ]
+        ),
+        thrift_generator_codec_ast:mismatch_tail(V)
+    ]),
+    ?assertEqual(
+        "enc_list_i16_elems([]) ->\n"
+        "    {ok, []};\n"
+        "enc_list_i16_elems([V | Rest]) ->\n"
+        "    case\n"
+        "        case V of\n"
+        "            _ when is_integer(V), V >= -32768, V =< 32767 ->\n"
+        "                {ok, <<V:16/big-signed>>};\n"
+        "            _ ->\n"
+        "                {error, {encode, {value_does_not_match_type, V}}}\n"
+        "        end\n"
+        "    of\n"
+        "        {ok, E} ->\n"
+        "            case enc_list_i16_elems(Rest) of\n"
+        "                {ok, RestIo} ->\n"
+        "                    {ok, [E | RestIo]};\n"
+        "                {error, _} = Err ->\n"
+        "                    Err\n"
+        "            end;\n"
+        "        {error, _} = Err ->\n"
+        "            Err\n"
+        "    end.\n",
+        render_form(
+            {function, erl_anno:new(0), enc_list_i16_elems, 1,
+                thrift_generator_codec_ast:sequence_encode_elements_form(enc_list_i16_elems, EncodeElem)}
+        )
+    ),
+    ok.
+
+sequence_decode_elements_form_test() ->
+    %% the compact catch-all name must survive: a nested decode that
+    %% rebinds OtherLoop would be an unsafe-variable error in generated code
+    ?assertEqual(
+        "dec_list_i16_elems(0, Rest, Acc) ->\n"
+        "    {ok, lists:reverse(Acc), Rest};\n"
+        "dec_list_i16_elems(N, Bin, Acc) ->\n"
+        "    case dec_i16(Bin) of\n"
+        "        {ok, V, Rest} ->\n"
+        "            dec_list_i16_elems(N - 1, Rest, [V | Acc]);\n"
+        "        OtherLoop ->\n"
+        "            OtherLoop\n"
+        "    end.\n",
+        render_form(
+            {function, erl_anno:new(0), dec_list_i16_elems, 3,
+                thrift_generator_codec_ast:sequence_decode_elements_form(
+                    dec_list_i16_elems,
+                    thrift_generator_codec_ast:call_local(dec_i16, [thrift_generator_codec_ast:v("Bin")]),
+                    thrift_generator_codec_ast:other_clause("OtherLoop")
+                )}
+        )
+    ),
+    ok.
+
+map_decode_pairs_form_test() ->
+    %% the compact catch-all names: the value decode nests inside the key
+    %% decode's binding scope, so both must be distinct from each other
+    ?assertEqual(
+        "dec_map_kv_pairs(0, Rest, Acc) ->\n"
+        "    {ok, Acc, Rest};\n"
+        "dec_map_kv_pairs(N, Bin, Acc) ->\n"
+        "    case dec_k(Bin) of\n"
+        "        {ok, K, Rest} ->\n"
+        "            case dec_v(Rest) of\n"
+        "                {ok, V, Rest1} ->\n"
+        "                    dec_map_kv_pairs(N - 1, Rest1, Acc#{K => V});\n"
+        "                OtherPairV ->\n"
+        "                    OtherPairV\n"
+        "            end;\n"
+        "        OtherPairK ->\n"
+        "            OtherPairK\n"
+        "    end.\n",
+        render_form(
+            {function, erl_anno:new(0), dec_map_kv_pairs, 3,
+                thrift_generator_codec_ast:map_decode_pairs_form(
+                    dec_map_kv_pairs,
+                    thrift_generator_codec_ast:call_local(dec_k, [thrift_generator_codec_ast:v("Bin")]),
+                    thrift_generator_codec_ast:call_local(dec_v, [thrift_generator_codec_ast:v("Rest")]),
+                    thrift_generator_codec_ast:other_clause("OtherPairK"),
+                    thrift_generator_codec_ast:other_clause("OtherPairV")
+                )}
+        )
+    ),
+    ok.
+
+base_field_clauses_binary_int_test() ->
+    BinPayload = fun(_B, V) ->
+        thrift_generator_codec_ast:bin_seg(V, thrift_generator_codec_ast:i(32), [big, signed])
+    end,
+    Clauses =
+        thrift_generator_codec_ast:base_field_clauses(
+            i32,
+            thrift_generator_codec_ast:name_lit(<<"count">>),
+            thrift_generator_codec_ast:bin_lit(<<8, 0, 1>>),
+            thrift_generator_codec_ast:call_local(enc_f2, [thrift_generator_codec_ast:v("Value")]),
+            BinPayload
+        ),
+    ?assertEqual(
+        "dummy(Value) ->\n"
+        "    case Value of\n"
+        "        #{<<\"count\">> := V}\n"
+        "            when is_integer(V), V >= -2147483648, V =< 2147483647 ->\n"
+        "            case enc_f2(Value) of\n"
+        "                {ok, Rest} ->\n"
+        "                    {ok,\n"
+        "                     [[<<\"\\b\\000\\001\">>, <<V:32/big-signed>>] | Rest]};\n"
+        "                {error, _} = Err ->\n"
+        "                    Err\n"
+        "            end;\n"
+        "        #{<<\"count\">> := OtherV} ->\n"
+        "            {error, {encode, {value_does_not_match_type, OtherV}}}\n"
+        "    end.\n",
+        render_form(
+            {function, erl_anno:new(0), dummy, 1, [
+                thrift_generator_codec_ast:clause([thrift_generator_codec_ast:v("Value")], none, [
+                    thrift_generator_codec_ast:'case'(thrift_generator_codec_ast:v("Value"), Clauses)
+                ])
+            ]}
+        )
+    ),
+    ok.
+
+base_field_clauses_binary_bool_test() ->
+    %% the bool payload is the {True, False} pair of bare wire bytes
+    BoolPayload = fun(bool, _V) ->
+        {thrift_generator_codec_ast:bin_lit(<<1>>), thrift_generator_codec_ast:bin_lit(<<0>>)}
+    end,
+    Clauses =
+        thrift_generator_codec_ast:base_field_clauses(
+            bool,
+            thrift_generator_codec_ast:name_lit(<<"count">>),
+            thrift_generator_codec_ast:bin_lit(<<8, 0, 1>>),
+            thrift_generator_codec_ast:call_local(enc_f2, [thrift_generator_codec_ast:v("Value")]),
+            BoolPayload
+        ),
+    ?assertEqual(
+        "dummy(Value) ->\n"
+        "    case Value of\n"
+        "        #{<<\"count\">> := true} ->\n"
+        "            case enc_f2(Value) of\n"
+        "                {ok, Rest} ->\n"
+        "                    {ok, [[<<\"\\b\\000\\001\">>, <<\"\\001\">>] | Rest]};\n"
+        "                {error, _} = Err ->\n"
+        "                    Err\n"
+        "            end;\n"
+        "        #{<<\"count\">> := false} ->\n"
+        "            case enc_f2(Value) of\n"
+        "                {ok, Rest} ->\n"
+        "                    {ok, [[<<\"\\b\\000\\001\">>, <<\"\\000\">>] | Rest]};\n"
+        "                {error, _} = Err ->\n"
+        "                    Err\n"
+        "            end;\n"
+        "        #{<<\"count\">> := OtherV} ->\n"
+        "            {error, {encode, {value_does_not_match_type, OtherV}}}\n"
+        "    end.\n",
+        render_form(
+            {function, erl_anno:new(0), dummy, 1, [
+                thrift_generator_codec_ast:clause([thrift_generator_codec_ast:v("Value")], none, [
+                    thrift_generator_codec_ast:'case'(thrift_generator_codec_ast:v("Value"), Clauses)
+                ])
+            ]}
+        )
+    ),
+    ok.
+
+base_field_clauses_compact_int_test() ->
+    CompactPayload = fun(_B, V) -> thrift_generator_codec_ast:call_local(enc_varint_z, [V]) end,
+    Clauses =
+        thrift_generator_codec_ast:base_field_clauses(
+            i32,
+            thrift_generator_codec_ast:name_lit(<<"count">>),
+            thrift_generator_codec_ast:call_local(enc_header, [
+                thrift_generator_codec_ast:i(1),
+                thrift_generator_codec_ast:v("LastId"),
+                thrift_generator_codec_ast:i(16#51)
+            ]),
+            thrift_generator_codec_ast:call_local(enc_f2, [
+                thrift_generator_codec_ast:v("Value"), thrift_generator_codec_ast:v("LastId")
+            ]),
+            CompactPayload
+        ),
+    ?assertEqual(
+        "dummy(Value, LastId) ->\n"
+        "    case Value of\n"
+        "        #{<<\"count\">> := V}\n"
+        "            when is_integer(V), V >= -2147483648, V =< 2147483647 ->\n"
+        "            case enc_f2(Value, LastId) of\n"
+        "                {ok, Rest} ->\n"
+        "                    {ok,\n"
+        "                     [[enc_header(1, LastId, 81), enc_varint_z(V)] |\n"
+        "                      Rest]};\n"
+        "                {error, _} = Err ->\n"
+        "                    Err\n"
+        "            end;\n"
+        "        #{<<\"count\">> := OtherV} ->\n"
+        "            {error, {encode, {value_does_not_match_type, OtherV}}}\n"
+        "    end.\n",
+        render_form(
+            {function, erl_anno:new(0), dummy, 2, [
+                thrift_generator_codec_ast:clause(
+                    [thrift_generator_codec_ast:v("Value"), thrift_generator_codec_ast:v("LastId")], none, [
+                        thrift_generator_codec_ast:'case'(thrift_generator_codec_ast:v("Value"), Clauses)
+                    ]
+                )
+            ]}
+        )
     ),
     ok.

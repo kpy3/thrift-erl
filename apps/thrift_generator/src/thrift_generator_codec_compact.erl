@@ -115,6 +115,11 @@ everywhere else in the emitter.
     missing_names/2,
     enum_from_clauses/3,
     integer_guard/2,
+    sequence_encoder_form/3,
+    sequence_encode_elements_form/2,
+    sequence_decode_elements_form/3,
+    map_decode_pairs_form/5,
+    base_field_clauses/5,
     t_atom/1,
     t_atom_lit/1,
     t_map_exact/0,
@@ -459,69 +464,26 @@ base_chain_fn(Chain, N, F, {base, B} = T, NextStep, StaticLast) ->
     Body =
         'case'(
             v("Value"),
-            base_field_clauses(B, Name, Header, Present) ++
+            base_field_clauses(B, Name, Header, Present, fun base_payload/2) ++
                 [
                     clause([v("_")], none, [Absent])
                 ]
         ),
     chain_form(Chain, N, LastPattern, Body).
 
--spec base_field_clauses(atom(), ast(), ast(), ast()) -> [ast()].
-base_field_clauses(B, Name, Header, Present) ->
-    V = v("V"),
-    Clauses =
-        case B of
-            i8 ->
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        integer_guard(i8, V),
-                        Header,
-                        bin_seg(V, i(8), [big, signed]),
-                        Present
-                    )
-                ];
-            double ->
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        [remote(erlang, is_number, [V])],
-                        Header,
-                        bin_seg(remote(erlang, float, [V]), i(64), [little, float]),
-                        Present
-                    )
-                ];
-            S when S =:= string; S =:= binary ->
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        [remote(erlang, is_binary, [V])],
-                        Header,
-                        list_lit([call_local(enc_varint, [call_local(byte_size, [V])]), V]),
-                        Present
-                    )
-                ];
-            _ ->
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        integer_guard(B, V),
-                        Header,
-                        call_local(enc_varint_z, [V]),
-                        Present
-                    )
-                ]
-        end,
-    Clauses ++ [clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])].
+%% The compact-protocol payload of a present base field: a zigzag varint
+%% for i16/i32/i64, a single signed byte for i8 (not varint-encoded),
+%% little-endian float bits, a uvarint length prefix before strings.
 
--spec base_present_clause(ast(), [ast()], ast(), ast(), ast()) -> ast().
-base_present_clause(MapPat, Guard, Header, Payload, Present) ->
-    clause([MapPat], Guard, [
-        'case'(Present, [
-            ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, Payload]), v("Rest")))),
-            error_clause()
-        ])
-    ]).
+-spec base_payload(atom(), ast()) -> ast().
+base_payload(double, V) ->
+    bin_seg(remote(erlang, float, [V]), i(64), [little, float]);
+base_payload(S, V) when S =:= string; S =:= binary ->
+    list_lit([call_local(enc_varint, [call_local(byte_size, [V])]), V]);
+base_payload(i8, V) ->
+    bin_seg(V, i(8), [big, signed]);
+base_payload(_B, V) ->
+    call_local(enc_varint_z, [V]).
 
 %% The header bytes a chain link pays per written field. When the
 %% previous link is required (or the chain opens), the delta base is a
@@ -979,45 +941,18 @@ container_forms({Kind, _} = T, Plan, Enums) when Kind =:= list; Kind =:= set ->
                 [];
             _ ->
                 [
-                    {function, ?ANNO, DecElems, 3, [
-                        clause([i(0), v("Rest"), v("Acc")], none, [
-                            ok3(remote(lists, reverse, [v("Acc")]), v("Rest"))
-                        ]),
-                        clause([v("N"), v("Bin"), v("Acc")], none, [
-                            'case'(decode_elem_expr(Elem, v("Bin"), Plan, Enums, ""), [
-                                ok3_bind_clause(
-                                    v("V"),
-                                    v("Rest"),
-                                    call_local(DecElems, [
-                                        {op, ?ANNO, '-', v("N"), i(1)},
-                                        v("Rest"),
-                                        cons(v("V"), v("Acc"))
-                                    ])
-                                ),
-                                other_clause("OtherLoop")
-                            ])
-                        ])
-                    ]}
+                    {function, ?ANNO, DecElems, 3,
+                        sequence_decode_elements_form(
+                            DecElems, decode_elem_expr(Elem, v("Bin"), Plan, Enums, ""), other_clause("OtherLoop")
+                        )}
                 ]
         end,
     [
-        {function, ?ANNO, Enc, 1, [
-            clause([v("Values")], [remote(erlang, is_list, [v("Values")])], [
-                'case'(call_local(EncElems, [v("Values")]), [
-                    ok_bind_clause(
-                        v("Es"),
-                        ok_t(
-                            list_lit([
-                                call_local(coll_header, [i(Nib), call_local(length, [v("Values")])]),
-                                v("Es")
-                            ])
-                        )
-                    ),
-                    error_clause()
-                ])
-            ]),
-            mismatch_fn_tail()
-        ]},
+        sequence_encoder_form(
+            Enc,
+            EncElems,
+            call_local(coll_header, [i(Nib), call_local(length, [v("Values")])])
+        ),
         {function, ?ANNO, EncElems, 1,
             case Elem of
                 {base, uuid} ->
@@ -1029,21 +964,7 @@ container_forms({Kind, _} = T, Plan, Enums) when Kind =:= list; Kind =:= set ->
                         uuid_error_clause(1)
                     ];
                 _ ->
-                    [
-                        clause([nil()], none, [ok_t(nil())]),
-                        clause([cons(v("V"), v("Rest"))], none, [
-                            'case'(encode_elem_expr(Elem, v("V"), Plan, Enums), [
-                                ok_bind_clause(
-                                    v("E"),
-                                    'case'(call_local(EncElems, [v("Rest")]), [
-                                        ok_bind_clause(v("RestIo"), ok_t(cons(v("E"), v("RestIo")))),
-                                        error_clause()
-                                    ])
-                                ),
-                                error_clause()
-                            ])
-                        ])
-                    ]
+                    sequence_encode_elements_form(EncElems, encode_elem_expr(Elem, v("V"), Plan, Enums))
             end},
         {function, ?ANNO, Dec, 1, [
             clause([v("Bin")], none, [
@@ -1192,32 +1113,13 @@ container_forms({map, K, V} = T, Plan, Enums) ->
                 {_, {base, uuid}} ->
                     [uuid_decode_error_clause(3)];
                 _ ->
-                    [
-                        clause([i(0), v("Rest"), v("Acc")], none, [ok3(v("Acc"), v("Rest"))]),
-                        clause([v("N"), v("Bin"), v("Acc")], none, [
-                            'case'(decode_elem_expr(K, v("Bin"), Plan, Enums, "K"), [
-                                ok3_bind_clause(
-                                    v("K"),
-                                    v("Rest"),
-                                    'case'(
-                                        decode_elem_expr(V, v("Rest"), Plan, Enums, "V"), [
-                                            ok3_bind_clause(
-                                                v("V"),
-                                                v("Rest1"),
-                                                call_local(DecPairs, [
-                                                    {op, ?ANNO, '-', v("N"), i(1)},
-                                                    v("Rest1"),
-                                                    map_put(v("Acc"), v("K"), v("V"))
-                                                ])
-                                            ),
-                                            other_clause("OtherPairV")
-                                        ]
-                                    )
-                                ),
-                                other_clause("OtherPairK")
-                            ])
-                        ])
-                    ]
+                    map_decode_pairs_form(
+                        DecPairs,
+                        decode_elem_expr(K, v("Bin"), Plan, Enums, "K"),
+                        decode_elem_expr(V, v("Rest"), Plan, Enums, "V"),
+                        other_clause("OtherPairK"),
+                        other_clause("OtherPairV")
+                    )
             end}
     ].
 
