@@ -390,23 +390,12 @@ dispatch(Function, Handler, SeqId, Tail, Info, #state{} = State) ->
             try apply(Handler, function_name(Function), Args1) of
                 Result ->
                     case wire_result(Result, Info, State) of
-                        {ok, Reply} ->
-                            encode_reply(Function, SeqId, Reply, Info, State);
                         {error, {exception, ExceptionName, ExceptionValue}} ->
                             encode_exception_reply(
                                 Function, SeqId, ExceptionName, ExceptionValue, Info, State
                             );
-                        Other ->
-                            ?LOG_WARNING(#{
-                                domain => [thrift],
-                                msg => "handler returned an unsupported result",
-                                name => Function,
-                                result => Other
-                            }),
-                            emit_handler_error(State, Function, {bad_result, Other}),
-                            reply_application_exception(
-                                Function, SeqId, <<"internal error">>, 6, State
-                            )
+                        WireResult ->
+                            reply_wire_result(Function, SeqId, WireResult, Info, State)
                     end
             catch
                 Class:Reason:Stacktrace ->
@@ -446,7 +435,16 @@ handle_oneway_message(Name, Tail, #state{} = State) ->
                 {ok, Args} ->
                     Args1 = args_for_handler(Args, Info, State),
                     try apply(Handler, function_name(Function), Args1) of
-                        _ -> ok
+                        ok ->
+                            ok;
+                        BadResult ->
+                            ?LOG_WARNING(#{
+                                domain => [thrift],
+                                msg => "oneway handler returned an unsupported result",
+                                name => Function,
+                                result => BadResult
+                            }),
+                            emit_handler_error(State, Function, {bad_result, BadResult})
                     catch
                         Class:Reason:Stacktrace ->
                             ?LOG_WARNING(#{
@@ -563,6 +561,50 @@ wire_result(Result, Info, #state{}) ->
     thrift_runtime_record:result_to_wire(
         maps:get(reply, Info, undefined), maps:get(exceptions, Info, []), Result
     ).
+
+%% The strict success contract, checked against the function's own
+%% descriptor: `ok' answers a `void' function (`reply => undefined'),
+%% `{ok, Value}' answers a non-void one. The historical void shape
+%% `{ok, undefined}' is not a compatibility shim — it fails here exactly
+%% like any other unsupported result. Declared exceptions are valid for
+%% either shape and were handled before this runs.
+
+-spec reply_value(term(), thrift_runtime_service:function_info()) -> {ok, term()} | error.
+reply_value(ok, Info) ->
+    case maps:get(reply, Info, undefined) of
+        undefined -> {ok, undefined};
+        _ReplyType -> error
+    end;
+reply_value({ok, Value}, Info) ->
+    case maps:get(reply, Info, undefined) of
+        undefined -> error;
+        _ReplyType -> {ok, Value}
+    end;
+reply_value(_WireResult, _Info) ->
+    error.
+
+%% Answers a wire-valid result with the reply; an unsupported one is
+%% logged and emitted as a `handler_error', then answered with
+%% INTERNAL_ERROR like a handler crash.
+
+-spec reply_wire_result(
+    binary(), non_neg_integer(), term(), thrift_runtime_service:function_info(), #state{}
+) ->
+    #state{}.
+reply_wire_result(Function, SeqId, WireResult, Info, #state{} = State) ->
+    case reply_value(WireResult, Info) of
+        {ok, Reply} ->
+            encode_reply(Function, SeqId, Reply, Info, State);
+        error ->
+            ?LOG_WARNING(#{
+                domain => [thrift],
+                msg => "handler returned an unsupported result",
+                name => Function,
+                result => WireResult
+            }),
+            emit_handler_error(State, Function, {bad_result, WireResult}),
+            reply_application_exception(Function, SeqId, <<"internal error">>, 6, State)
+    end.
 
 %% Builds the REPLY payload: field 0 carries the return value when the
 %% function is non-void; declared exceptions were already encoded by

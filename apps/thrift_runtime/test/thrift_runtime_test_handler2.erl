@@ -30,9 +30,9 @@ add(A, B) ->
 echo(M) ->
     {ok, <<"echo2:", M/binary>>}.
 
--spec ping() -> {ok, undefined}.
+-spec ping() -> ok.
 ping() ->
-    {ok, undefined}.
+    ok.
 
 -spec notify(binary()) -> ok.
 notify(M) ->

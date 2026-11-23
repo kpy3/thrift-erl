@@ -250,20 +250,35 @@ callback_doc(F) ->
             unicode:characters_to_binary(
                 io_lib:format(
                     "Handler callback for the oneway ~ts: called as"
-                    " `Handler:~ts(Args...)` in declaration order; the"
-                    " answer is discarded.",
+                    " `Handler:~ts(Args...)` in declaration order; nothing"
+                    " goes back over the wire — answer `ok`.",
                     [Name, Name]
                 )
             );
         false ->
-            unicode:characters_to_binary(
-                io_lib:format(
-                    "Handler callback for ~ts: called as"
-                    " `Handler:~ts(Args...)` in declaration order; answers"
-                    " a `thrift_runtime_service:handler_result()`.",
-                    [Name, Name]
-                )
-            )
+            case F#tg_function.return_type of
+                void ->
+                    unicode:characters_to_binary(
+                        io_lib:format(
+                            "Handler callback for ~ts: called as"
+                            " `Handler:~ts(Args...)` in declaration order;"
+                            " the function is `void` — answer `ok` (a"
+                            " declared exception is still"
+                            " `{error, {exception, ...}}`).",
+                            [Name, Name]
+                        )
+                    );
+                _ ->
+                    unicode:characters_to_binary(
+                        io_lib:format(
+                            "Handler callback for ~ts: called as"
+                            " `Handler:~ts(Args...)` in declaration order;"
+                            " answers `{ok, Value}` with the reply value"
+                            " — a `thrift_runtime_service:handler_result()`.",
+                            [Name, Name]
+                        )
+                    )
+            end
     end.
 
 %% -callback Name/Arity :: FunType — the payload mixes a tree with a
@@ -345,8 +360,9 @@ client_forms(Svc, Mod, ServerMod, ClientMod, Ctx) ->
     Doc =
         unicode:characters_to_binary([
             io_lib:format(
-                "Typed client for the ~ts service. `start_link/1` takes the"
-                " same options map as `thrift_runtime_client` (minus `service`).~ts",
+                "Typed client for the ~ts service. `start/1` and"
+                " `start_link/1` take the same options map as"
+                " `thrift_runtime_client` (minus `service`).~ts",
                 [
                     Svc#tg_service.name,
                     repr_text(Svc, Mod, " Struct arguments and results are converted to ~ts at the boundary.")
@@ -359,10 +375,12 @@ client_forms(Svc, Mod, ServerMod, ClientMod, Ctx) ->
         thrift_generator_emitter_syntax:moduledoc_form(Doc) ++
         [
             thrift_generator_emitter_syntax:export_form(
-                lists:append([Exports || {Exports, _} <- ClientFns]) ++ [{start_link, 1}, {stop, 1}]
+                lists:append([Exports || {Exports, _} <- ClientFns]) ++
+                    [{start, 1}, {start_link, 1}, {stop, 1}]
             )
         ] ++
         lists:append([Forms || {_, Forms} <- ClientFns]) ++
+        start_form(ServerMod) ++
         start_link_form(ServerMod) ++
         stop_form().
 
@@ -518,28 +536,48 @@ oneway_ret(F) ->
             call_ret()
     end.
 
+%% Both starts share the options map with `service` inserted; only the
+%% runtime entry point and the linking promise differ.
+
+-spec start_form(module()) -> erl_syntax:forms().
+start_form(ServerMod) ->
+    client_start_form(
+        ServerMod,
+        start,
+        <<
+            "Connects to the server without linking the client to the"
+            " caller; the options map is `thrift_runtime_client`'s, minus"
+            " `service`."
+        >>
+    ).
+
 -spec start_link_form(module()) -> erl_syntax:forms().
 start_link_form(ServerMod) ->
+    client_start_form(
+        ServerMod,
+        start_link,
+        <<
+            "Connects to the server and links the client to the caller;"
+            " the options map is `thrift_runtime_client`'s, minus `service`."
+        >>
+    ).
+
+-spec client_start_form(module(), start | start_link, binary()) -> erl_syntax:forms().
+client_start_form(ServerMod, RuntimeFun, Doc) ->
     MapUpdate =
         erl_syntax:map_expr(
             erl_syntax:variable("Opts"),
             [thrift_generator_emitter_syntax:map_field(service, thrift_generator_emitter_syntax:abstract(ServerMod))]
         ),
-    thrift_generator_emitter_syntax:doc_form(
-        undefined,
-        <<
-            "Connects to the server and links the client to the caller;"
-            " the options map is `thrift_runtime_client`'s, minus `service`."
-        >>
-    ) ++
-        thrift_generator_emitter_syntax:fn_form(start_link, [
+    thrift_generator_emitter_syntax:doc_form(undefined, Doc) ++
+        thrift_generator_emitter_syntax:fn_form(RuntimeFun, [
             erl_syntax:clause(
                 [erl_syntax:variable("Opts")],
                 none,
                 [
                     erl_syntax:application(
                         erl_syntax:atom(thrift_runtime_client),
-                        erl_syntax:atom(start_link),
+                        erl_syntax:atom(RuntimeFun),
                         [MapUpdate]
                     )
                 ]

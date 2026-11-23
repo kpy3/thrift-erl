@@ -25,6 +25,8 @@
 -export([
     framed_calls/1,
     buffered_calls/1,
+    empty_result_payload_uses_service_info/1,
+    nonvoid_result_without_success_keeps_badkey/1,
     compact_framed_calls/1,
     compact_buffered_calls/1,
     json_framed_calls/1,
@@ -32,6 +34,10 @@
     http_calls/1,
     declared_exception/1,
     application_exception/1,
+    invalid_void_handler_result/1,
+    invalid_nonvoid_handler_result/1,
+    oneway_invalid_result/1,
+    oneway_invalid_result_http/1,
     oneway_delivery/1,
     many_sequential_calls/1,
     unknown_function_is_local_error/1,
@@ -52,6 +58,8 @@ all() ->
     [
         framed_calls,
         buffered_calls,
+        empty_result_payload_uses_service_info,
+        nonvoid_result_without_success_keeps_badkey,
         compact_framed_calls,
         compact_buffered_calls,
         json_framed_calls,
@@ -59,6 +67,10 @@ all() ->
         http_calls,
         declared_exception,
         application_exception,
+        invalid_void_handler_result,
+        invalid_nonvoid_handler_result,
+        oneway_invalid_result,
+        oneway_invalid_result_http,
         oneway_delivery,
         many_sequential_calls,
         unknown_function_is_local_error,
@@ -87,7 +99,7 @@ framed_calls(_Config) ->
         ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
         ?assertEqual({ok, <<"hello">>}, call(Client, <<"echo">>, [<<"hello">>])),
         ?assertEqual({ok, 3}, call(Client, <<"size">>, [[<<"a">>, <<"b">>, <<"c">>]])),
-        ?assertEqual({ok, undefined}, call(Client, <<"ping">>, [])),
+        ?assertEqual(ok, call(Client, <<"ping">>, [])),
         ?assertEqual(
             {ok, #{<<"x">> => 2, <<"y">> => 1}}, call(Client, <<"deep">>, [#{<<"x">> => 1, <<"y">> => 2}])
         )
@@ -99,6 +111,63 @@ buffered_calls(_Config) ->
         ?assertEqual(
             {ok, #{<<"x">> => 9, <<"y">> => 8}}, call(Client, <<"deep">>, [#{<<"x">> => 8, <<"y">> => 9}])
         )
+    end).
+
+%% A reply whose result struct carries no success field: the void
+%% function (declared without a `reply' descriptor) answers the bare
+%% atom `ok', while a non-void function with an equally empty payload
+%% keeps its historical `{ok, undefined}' — voidness comes from the
+%% service description, never from the payload being empty. A raw peer
+%% answers an empty result struct per protocol, something the normal
+%% server stack cannot send for a non-void function (its encoder writes
+%% the success field whenever the function declares a reply type).
+
+empty_result_payload_uses_service_info(_Config) ->
+    lists:foreach(
+        fun(Protocol) ->
+            with_empty_payload_peer(Protocol, fun(Client) ->
+                ?assertEqual(ok, call(Client, <<"ping">>, [])),
+                ?assertEqual({ok, undefined}, call(Client, <<"add">>, [2, 3]))
+            end)
+        end,
+        [thrift_runtime_binary, thrift_runtime_compact, thrift_runtime_json]
+    ),
+    ok.
+
+%% A non-void result whose decoded map has no `success' entry must keep
+%% the historical failure mode: the client process crashes with
+%% `badkey' (its terminate releases the pending caller with `{error,
+%% closed}'), not silently answer `{ok, undefined}'. Neither the generic
+%% engine nor the generated codecs can produce that map (both skip
+%% unknown wire ids), but a custom protocol module — a supported client
+%% option — can; the mystery protocol test double injects an unknown key
+%% into every decoded struct map.
+
+nonvoid_result_without_success_keeps_badkey(_Config) ->
+    with_empty_payload_peer(thrift_runtime_test_mystery_protocol, fun(Client) ->
+        %% the linked client crashes on purpose; keep the exit a message
+        process_flag(trap_exit, true),
+        Self = self(),
+        spawn(fun() ->
+            Self ! {mystery_result, call(Client, <<"add">>, [2, 3])}
+        end),
+        %% terminate answers the pending call while dying
+        ?assertEqual(
+            {error, closed},
+            receive
+                {mystery_result, R} ->
+                    R
+            after 5000 ->
+                erlang:error(no_mystery_result)
+            end
+        ),
+        receive
+            {'EXIT', Client, {{badkey, <<"success">>}, _}} ->
+                ok
+        after 1000 ->
+            erlang:error(client_did_not_crash_with_badkey)
+        end,
+        ?assertNot(is_process_alive(Client))
     end).
 
 %% The compact protocol over both transports: the framed path is pure
@@ -149,6 +218,90 @@ application_exception(_Config) ->
         )
     end).
 
+%% The strict handler-result contract: the legacy void answer `{ok,
+%% undefined}' is an unsupported result now, not a compatibility shim.
+%% The call is answered with INTERNAL_ERROR and exactly one `handler_error'
+%% event, and the connection stays usable.
+
+invalid_void_handler_result(_Config) ->
+    with_event_server(#{}, fun(Client) ->
+        ?assertMatch(
+            {error, {application_exception, <<"internal error">>, 6, <<"INTERNAL_ERROR">>}},
+            call(Client, <<"badPing">>, [])
+        ),
+        wait_handler_error(<<"badPing">>, {bad_result, {ok, undefined}}),
+        assert_no_handler_error(),
+        ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3]))
+    end).
+
+%% A bare `ok' stays unsupported for a non-void function: INTERNAL_ERROR
+%% plus one `handler_error' event.
+
+invalid_nonvoid_handler_result(_Config) ->
+    with_event_server(#{}, fun(Client) ->
+        ?assertMatch(
+            {error, {application_exception, <<"internal error">>, 6, <<"INTERNAL_ERROR">>}},
+            call(Client, <<"badAdd">>, [])
+        ),
+        wait_handler_error(<<"badAdd">>, {bad_result, ok}),
+        assert_no_handler_error()
+    end).
+
+%% An invalid oneway result cannot be answered on the wire (nothing is
+%% ever sent back); it surfaces as one `handler_error' event only. The
+%% handler itself ran to completion — its side effect arrived.
+
+oneway_invalid_result(_Config) ->
+    with_event_server(#{}, fun(Client) ->
+        true = register(thrift_runtime_test_sink, self()),
+        try
+            ok = thrift_runtime_client:oneway(Client, <<"badNotify">>, [<<"fire">>], 5000),
+            receive
+                {bad_notified, <<"fire">>} ->
+                    ok
+            after 2000 ->
+                erlang:error(oneway_not_delivered)
+            end,
+            wait_handler_error(<<"badNotify">>, {bad_result, {ok, undefined}}),
+            assert_no_handler_error()
+        after
+            unregister(thrift_runtime_test_sink)
+        end
+    end).
+
+%% Over HTTP the acknowledgement is exactly the (empty) 200 owed to every
+%% request, sent before the handler runs: an invalid oneway result adds
+%% one `handler_error' event and no second response. A raw socket pins
+%% both halves — one response with an empty body, then silence.
+
+oneway_invalid_result_http(_Config) ->
+    Self = self(),
+    Events = fun(E) -> Self ! {suite_event, E} end,
+    {ok, Server} =
+        thrift_runtime_server:start_link(#{
+            port => 0,
+            transport => http,
+            handler => ?HANDLER,
+            service => ?SERVICE,
+            on_event => Events
+        }),
+    try
+        {ok, Port} = thrift_runtime_server:port(Server),
+        {ok, Sock} = gen_tcp:connect("127.0.0.1", Port, [binary, {packet, raw}, {active, false}]),
+        try
+            ok = raw_http_oneway(Sock, <<"badNotify">>),
+            wait_handler_error(<<"badNotify">>, {bad_result, {ok, undefined}}),
+            assert_no_handler_error(),
+            %% the valid oneway is acknowledged exactly once too, with no event
+            ok = raw_http_oneway(Sock, <<"notify">>),
+            assert_no_handler_error()
+        after
+            gen_tcp:close(Sock)
+        end
+    after
+        thrift_runtime_server:stop(Server)
+    end.
+
 oneway_delivery(_Config) ->
     with_server(#{}, fun(Client) ->
         true = register(thrift_runtime_test_sink, self()),
@@ -195,7 +348,7 @@ multiplexed_calls(_Config) ->
                 ?assertEqual(
                     {ok, <<"echo2:hello">>}, call(Beta, <<"echo">>, [<<"hello">>])
                 ),
-                ?assertEqual({ok, undefined}, call(Beta, <<"ping">>, [])),
+                ?assertEqual(ok, call(Beta, <<"ping">>, [])),
                 true = register(thrift_runtime_test_sink, self()),
                 try
                     ok = thrift_runtime_client:oneway(Beta, <<"notify">>, [<<"fire">>], 5000),
@@ -485,15 +638,16 @@ client_stats(_Config) ->
     with_server(#{}, fun(Client) ->
         ?assertEqual(#{calls_ok => 0, calls_failed => 0}, thrift_runtime_client:get_stats(Client)),
         ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
+        ?assertEqual(ok, call(Client, <<"ping">>, [])),
         ok = thrift_runtime_client:oneway(Client, <<"notify">>, [<<"x">>], 5000),
         ?assertEqual({error, unknown_function}, call(Client, <<"nope">>, [])),
         ?assertEqual(
             {error, {exception, <<"boom">>, #{<<"message">> => <<"as declared">>}}},
             call(Client, <<"boom">>, [])
         ),
-        ?assertEqual(#{calls_ok => 2, calls_failed => 2}, thrift_runtime_client:get_stats(Client)),
+        ?assertEqual(#{calls_ok => 3, calls_failed => 2}, thrift_runtime_client:get_stats(Client)),
         ?assertEqual(
-            #{calls_ok => 2, calls_failed => 2}, thrift_runtime_client:get_and_reset_stats(Client)
+            #{calls_ok => 3, calls_failed => 2}, thrift_runtime_client:get_and_reset_stats(Client)
         ),
         ?assertEqual(#{calls_ok => 0, calls_failed => 0}, thrift_runtime_client:get_stats(Client))
     end).
@@ -614,7 +768,7 @@ protocol_calls(Overrides) ->
         ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3])),
         ?assertEqual({ok, <<"hello">>}, call(Client, <<"echo">>, [<<"hello">>])),
         ?assertEqual({ok, 3}, call(Client, <<"size">>, [[<<"a">>, <<"b">>, <<"c">>]])),
-        ?assertEqual({ok, undefined}, call(Client, <<"ping">>, [])),
+        ?assertEqual(ok, call(Client, <<"ping">>, [])),
         ?assertEqual(
             {ok, #{<<"x">> => 2, <<"y">> => 1}}, call(Client, <<"deep">>, [#{<<"x">> => 1, <<"y">> => 2}])
         ),
@@ -654,6 +808,74 @@ with_server(Overrides, Test) ->
         thrift_runtime_server:stop(Server)
     end.
 
+%% A server (and client) whose on_event collector forwards every event
+%% to the test process as `{suite_event, Event}'.
+
+-spec with_event_server(map(), fun((pid()) -> term())) -> term().
+with_event_server(Overrides, Test) ->
+    Self = self(),
+    Events = fun(E) -> Self ! {suite_event, E} end,
+    with_server(Overrides#{on_event => Events}, Test).
+
+%% Waits for the `handler_error' event of one invalid handler result;
+%% events from the client's side of the connection are skipped over.
+
+-spec wait_handler_error(binary(), term()) -> ok.
+wait_handler_error(Function, Reason) ->
+    receive
+        {suite_event, #{type := handler_error, function := Function, reason := Reason}} ->
+            ok;
+        {suite_event, _} ->
+            wait_handler_error(Function, Reason)
+    after 5000 ->
+        erlang:error({no_handler_error, Function, Reason})
+    end.
+
+%% One invalid result means exactly one event: a short drain must not
+%% reveal a second `handler_error'.
+
+-spec assert_no_handler_error() -> ok.
+assert_no_handler_error() ->
+    receive
+        {suite_event, #{type := handler_error} = Event} ->
+            erlang:error({unexpected_handler_error, Event});
+        {suite_event, _} ->
+            assert_no_handler_error()
+    after 300 ->
+        ok
+    end.
+
+%%--------------------------------------------------------------------
+%% Raw HTTP helpers
+%%--------------------------------------------------------------------
+
+%% POSTs one oneway message over a raw socket and pins the acknowledgement:
+%% exactly one response, 200 with an empty body, then silence on the wire.
+
+-spec raw_http_oneway(gen_tcp:socket(), binary()) -> ok.
+raw_http_oneway(Sock, Name) ->
+    Params = {struct, {struct, [{1, default, {base, string}, <<"m">>, undefined}]}},
+    {ok, Payload} = thrift_runtime_binary:encode(Params, #{<<"m">> => <<"fire">>}),
+    Message = iolist_to_binary(thrift_runtime_binary:encode_message(oneway, Name, 0, Payload)),
+    Request = thrift_runtime_http:request(<<"localhost">>, <<"/">>, [], Message),
+    ok = gen_tcp:send(Sock, iolist_to_binary(Request)),
+    {200, <<>>} = recv_http_response(Sock),
+    {error, timeout} = gen_tcp:recv(Sock, 0, 400),
+    ok.
+
+-spec recv_http_response(gen_tcp:socket()) -> {100..599, binary()}.
+recv_http_response(Sock) ->
+    recv_http_response(Sock, <<>>).
+
+recv_http_response(Sock, Buffer) ->
+    case thrift_runtime_http:extract_response(Buffer, 64 * 1024 * 1024) of
+        {ok, {Code, _Headers, Body}, _Leftover} ->
+            {Code, Body};
+        more ->
+            {ok, Data} = gen_tcp:recv(Sock, 0, 5000),
+            recv_http_response(Sock, <<Buffer/binary, Data/binary>>)
+    end.
+
 %% A multiplexed server hosting the given `ServiceName => {Handler,
 %% Service}' pairs; the test gets the bound port and brings its own
 %% clients.
@@ -677,6 +899,59 @@ multiplex_client(Port, Service, ServiceMod) ->
     thrift_runtime_client:start_link(#{
         host => "127.0.0.1", port => Port, service => ServiceMod, multiplex => Service
     }).
+
+%% A raw framed peer that answers every request with a reply whose
+%% result struct is empty — no success field, no exception field. The
+%% envelope fields (name, seqid) are echoed from the request, so the
+%% client accepts the reply; only the payload shape is controlled here.
+
+-spec with_empty_payload_peer(module(), fun((pid()) -> term())) -> term().
+with_empty_payload_peer(Protocol, Test) ->
+    {ok, Listen} = gen_tcp:listen(0, [binary, {packet, raw}, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(Listen),
+    Peer = spawn_link(fun() -> empty_payload_peer(Listen, Protocol) end),
+    {ok, Client} =
+        thrift_runtime_client:start_link(#{
+            host => "127.0.0.1", port => Port, service => ?SERVICE, protocol => Protocol
+        }),
+    try
+        Test(Client)
+    after
+        %% the regression case crashes the client on purpose
+        try
+            thrift_runtime_client:stop(Client)
+        catch
+            _:_ -> ok
+        end,
+        Peer ! close
+    end.
+
+-spec empty_payload_peer(inet:socket(), module()) -> ok.
+empty_payload_peer(Listen, Protocol) ->
+    {ok, Sock} = gen_tcp:accept(Listen, 5000),
+    empty_payload_loop(Sock, Protocol).
+
+-spec empty_payload_loop(inet:socket(), module()) -> ok.
+empty_payload_loop(Sock, Protocol) ->
+    receive
+        close ->
+            gen_tcp:close(Sock),
+            ok
+    after 0 ->
+        case gen_tcp:recv(Sock, 4, 5000) of
+            {ok, <<Len:32/big-signed>>} ->
+                {ok, Frame} = gen_tcp:recv(Sock, Len, 5000),
+                {ok, call, Name, SeqId, _Tail} = Protocol:decode_message(Frame),
+                {ok, Empty} = Protocol:encode({struct, {struct, []}}, #{}),
+                Reply = iolist_to_binary(Protocol:encode_message(reply, Name, SeqId, Empty)),
+                ok = gen_tcp:send(Sock, <<(byte_size(Reply)):32/big-signed, Reply/binary>>),
+                empty_payload_loop(Sock, Protocol);
+            _Closed ->
+                %% the client went away (stopped or crashed)
+                gen_tcp:close(Sock),
+                ok
+        end
+    end.
 
 %% An exported-but-broken hook (raises undef from inside) must crash the
 %% call, not silently fall back to the descriptor engine: the fallback

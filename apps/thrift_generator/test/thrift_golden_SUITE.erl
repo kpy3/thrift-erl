@@ -271,7 +271,7 @@ run_our_client_assertions(Client) ->
         {error, {exception, #goldentest_xception{errorCode = 1001, message = <<"Xception">>}}},
         goldentest_thrift_test_client:testException(Client, <<"Xception">>)
     ),
-    ?assertEqual({ok, undefined}, goldentest_thrift_test_client:testException(Client, <<"fine">>)),
+    ?assertEqual(ok, goldentest_thrift_test_client:testException(Client, <<"fine">>)),
 
     ?assertEqual(
         {error, {exception, #goldentest_xception{errorCode = 1001, message = <<"This is not Xception2">>}}},

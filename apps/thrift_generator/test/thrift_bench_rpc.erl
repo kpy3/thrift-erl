@@ -159,12 +159,11 @@ start_side(ServerMod, Name) ->
 
 -spec check_case(rpc_case(), side()) -> ok.
 check_case(#{name := Name, args := Args}, #{client := Client}) ->
-    Expected =
-        case Args of
-            [] -> undefined;
-            [Arg] -> Arg
-        end,
-    {ok, Expected} = thrift_runtime_client:call(Client, Name, Args, 30000),
+    case Args of
+        %% a void function answers the bare atom `ok`
+        [] -> ok = thrift_runtime_client:call(Client, Name, Args, 30000);
+        [Arg] -> {ok, Arg} = thrift_runtime_client:call(Client, Name, Args, 30000)
+    end,
     ok.
 
 -spec calibrate(rpc_case(), pos_integer(), side()) -> rpc_case().

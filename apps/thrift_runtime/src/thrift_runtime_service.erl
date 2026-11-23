@@ -25,15 +25,19 @@ and the declared exceptions.
 Handler functions are called as `Handler:Function(Args...)` with
 arguments in declaration order. They answer:
 
-- `{ok, Value}` — the reply value (`undefined` for `void` functions);
+- `ok` — the success answer of a `void` or `oneway` function;
+- `{ok, Value}` — the reply value of a non-void function;
 - `{error, {exception, Value}}` — a declared exception, identified by
   the value's representation tag (record tag, `__struct__` map or
   native record) and encoded under its throw-field id;
 - `{error, {exception, Name, Value}}` — the same with an explicit wire
   name, for hand-written descriptors and map-representation exceptions
   (plain maps carry no identity);
-- anything else that raises — the runtime answers with
-  `TApplicationException` (INTERNAL_ERROR).
+- anything else — including the historical void shape `{ok,
+  undefined}` — is an unsupported result: the runtime answers with
+  `TApplicationException` (INTERNAL_ERROR) and emits a `handler_error`
+  event. An invalid oneway result emits the event only; nothing is
+  sent back.
 """.
 
 -export_type([function_info/0, service_info/0, handler_result/0]).
@@ -61,7 +65,8 @@ arguments in declaration order. They answer:
 -type service_info() :: #{binary() := function_info()}.
 
 -type handler_result() ::
-    {ok, term()}
+    ok
+    | {ok, term()}
     | {error, {exception, thrift_runtime_binary:struct_value()}}
     | {error, {exception, Name :: binary(), thrift_runtime_binary:struct_value()}}.
 

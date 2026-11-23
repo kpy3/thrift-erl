@@ -140,6 +140,65 @@ Notes:
 - `encode/2` (binary protocol) and the `protocol_module/1` /
   `repr_supported/1` helpers are unchanged.
 
+## RPC results and generated client starts
+
+The RPC result contract is the same shape on both ends of the wire:
+`ok` for void and oneway, `{ok, Value}` for a non-void reply,
+`{error, {exception, ...}}` for a declared exception. There are no
+compatibility shims — the old void shape `{ok, undefined}` is
+unsupported, not silently translated on the handler side. The wire
+payload is unchanged throughout: a void function has no success field,
+so `ok` is exactly the previous empty result struct, byte for byte.
+
+### Client-side results
+
+| Old | New |
+|---|---|
+| `{ok, undefined}` from a void call — plain, generated or reconnecting | `ok` (still a success for the reconnecting wrapper's statistics, still no reconnection) |
+| `ok` from a oneway call | unchanged (`ok`) |
+| `{ok, Value}` from a non-void call | unchanged |
+| `{error, {exception, ...}}` declared exception answers | unchanged |
+| `{error, {application_exception, ...}}` and transport errors | unchanged |
+
+The normalization happens in the shared runtime client, so generated
+typed clients, `thrift_runtime_client:call/4` and
+`thrift_runtime_reconnecting_client:call/4` all answer the same
+shapes, on every protocol and transport. The representation-conversion
+seam keeps one compatibility mapping:
+`thrift_runtime_record:call_result_from_wire(undefined, Exceptions,
+{ok, undefined})` normalizes the legacy void shape to `ok` (and `ok`
+passes through unchanged), so hand-written descriptor users see the
+same contract.
+
+### Handler results
+
+| Old | New |
+|---|---|
+| `{ok, undefined}` from a void handler | `ok` |
+| `{ok, undefined}` (or anything but `ok`) from a oneway handler — silently ignored | exactly `ok`; anything else is unsupported |
+| `ok` from a void or oneway handler — treated as unsupported | `ok` (valid) |
+| `{ok, Value}` from a non-void handler | unchanged |
+| `{error, {exception, ...}}` declared-exception answers | unchanged |
+
+An unsupported handler result — including the old void `{ok,
+undefined}` — is answered exactly like any other invalid result: a
+request/response call gets `TApplicationException` `INTERNAL_ERROR`
+plus one `handler_error` event (`reason => {bad_result, Result}`), a
+oneway call emits the event only. The HTTP oneway acknowledgement is
+unchanged, and `thrift_runtime_record:result_to_wire(undefined,
+Exceptions, ok)` preserves the void mapping for hand-written
+descriptor users.
+
+### Generated client `start/1`
+
+Generated `<prefix>_<svc>_client` modules now export an unlinked
+`start/1` beside `start_link/1`. It takes the same options map, with
+`service` inserted exactly as for `start_link/1`, and delegates to
+`thrift_runtime_client:start/1` — same ownership and monitor
+semantics as `start_link/1` minus the link. It is the pool-worker
+entry for generated clients, matching the runtime client's
+`start/1`; nothing is removed.
+
 ## Internal entries (unchanged behavior, hidden from the docs)
 
 The runtime dispatches through generated internals; they stay exported

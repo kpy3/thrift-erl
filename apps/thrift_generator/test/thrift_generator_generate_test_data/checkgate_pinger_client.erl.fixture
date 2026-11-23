@@ -8,9 +8,14 @@
 -module(checkgate_pinger_client).
 -compile([nowarn_missing_spec]).
 
--moduledoc("Typed client for the Pinger service. `start_link/1` takes the "
-           "same options map as `thrift_runtime_client` (minus `service`).").
--export([ping/1, ping/2, start_link/1, stop/1]).
+-moduledoc("Typed client for the Pinger service. `start/1` and `start_link/1` "
+           "take the same options map as `thrift_runtime_client` (minus "
+           "`service`).").
+-export([ping/1,
+         ping/2,
+         start/1,
+         start_link/1,
+         stop/1]).
 
 -doc("Calls ping and waits for the reply with the default 5000 ms timeout.").
 -spec ping(pid()) -> thrift_runtime_client:call_result().
@@ -28,6 +33,12 @@ ping(Client, Timeout) ->
                                                                                                                 []}},
                                                                                                               []),
                                                                            Timeout)).
+
+-doc("Connects to the server without linking the client to the caller; the "
+     "options map is `thrift_runtime_client`'s, minus `service`.").
+start(Opts) ->
+    thrift_runtime_client:start(Opts#{service =>
+                                          checkgate_pinger_server}).
 
 -doc("Connects to the server and links the client to the caller; the options "
      "map is `thrift_runtime_client`'s, minus `service`.").

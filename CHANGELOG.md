@@ -4,6 +4,25 @@
 
 ### Breaking changes
 
+RPC handler results are strict and mirror the client-side shapes (void
+and oneway handlers answer the bare atom `ok`, non-void handlers answer
+`{ok, Value}`): the old void shape `{ok, undefined}` is rejected like
+any other unsupported result — a request/response call is answered with
+`TApplicationException` `INTERNAL_ERROR` and one `handler_error` event,
+an oneway call emits the event only. The HTTP oneway acknowledgement is
+unchanged, as are the wire codecs and the empty void payload.
+
+Void RPC results now answer the bare atom `ok` on the client side
+too — generated typed clients, `thrift_runtime_client` and
+`thrift_runtime_reconnecting_client` alike (the wrapper counts it as a
+success, no reconnection); oneway calls already answered `ok` and
+still do. Code matching `{ok, undefined}` for a void
+call must match `ok` instead; non-void `{ok, Value}` answers and all
+exception and transport errors are unchanged. The wire payload does
+not move: a void function has no success field, so `ok` is the same
+empty result struct as before (old → new tables in
+`docs/public-api-migration.md`).
+
 The generator tooling API is unified on one validated options map
 across every frontend — the library, the standalone CLI and the rebar3
 plugin — with the transitional forms removed and no compatibility
@@ -62,6 +81,11 @@ the transitional legacy forms are removed with no compatibility shims
 
 ### Generator (`thrift_generator`)
 
+- Generated `<prefix>_<svc>_client` modules export an unlinked
+  `start/1` beside `start_link/1`: the same options map with `service`
+  inserted, delegating to `thrift_runtime_client:start/1` — the
+  pool-worker entry for generated clients, same semantics minus the
+  link.
 - Repr-native one-pass binary codecs: generated types modules encode
   tuple records and maps directly to wire bytes and decode wire bytes
   straight into record/map/struct/native values, skipping the

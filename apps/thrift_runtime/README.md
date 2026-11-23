@@ -46,6 +46,14 @@ ok = ping_api_ping_client:stop(Client),
 ok = ping_api_ping_server:stop(Server).
 ```
 
+A void or oneway call answers the bare atom `ok`, a non-void call
+`{ok, Value}` and a declared exception `{error, {exception, ...}}` —
+for generated, dynamic and reconnecting callers alike. Handlers answer
+`ok` for void/oneway and `{ok, Value}` otherwise; anything else is an
+unsupported result (`INTERNAL_ERROR` + one `handler_error` event) and
+the wire payload never changes. Generated clients export an unlinked
+`start/1` beside `start_link/1` for pool workers.
+
 For hand-written schemas and dynamic work the runtime exposes the same
 contract with explicit descriptors:
 `thrift_runtime:encode(Desc, Value[, Options])`,

@@ -22,9 +22,9 @@ values (no `record_api`), so every function simply returns its argument.
 
 -export([testVoid/0, testString/1, testStruct/1, testList/1]).
 
--spec testVoid() -> {ok, undefined}.
+-spec testVoid() -> ok.
 testVoid() ->
-    {ok, undefined}.
+    ok.
 
 -spec testString(binary()) -> {ok, binary()}.
 testString(Thing) ->
