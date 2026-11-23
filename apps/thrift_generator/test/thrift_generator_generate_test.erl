@@ -34,6 +34,7 @@
     generate_bad_opts_test/0,
     generate_skips_unchanged_test/0,
     clean_removes_generated_files_test/0,
+    clean_binary_out_dir_test/0,
     clean_missing_dir_test/0
 ]).
 
@@ -372,6 +373,26 @@ clean_removes_generated_files_test() ->
         ?assert(filelib:is_file(filename:join(OutDir, "notes.txt"))),
         ?assert(filelib:is_file(File)),
         ?assertEqual({ok, []}, thrift_generator:clean(OutDir)),
+        ok
+    after
+        rm_rf(Dir)
+    end.
+
+%% clean/1 takes any filename chardata: with a binary out dir the
+%% banner-owned files must be found and deleted exactly like with the
+%% string spelling (filename:extension mirrors the path's stringness).
+
+clean_binary_out_dir_test() ->
+    Dir = tmp_dir(),
+    try
+        File = write_idl(Dir),
+        OutDir = unicode:characters_to_binary(filename:join(Dir, "out")),
+        {ok, Generated} = thrift_generator:generate(File, OutDir, #{}),
+        {ok, Deleted} = thrift_generator:clean(OutDir),
+        Expected =
+            [Path || #{path := Path} <- Generated] ++
+                [HrlPath || #{hrl := HrlPath} <- Generated, is_binary(HrlPath) orelse is_list(HrlPath)],
+        ?assertEqual(lists:sort(Expected), lists:sort(Deleted)),
         ok
     after
         rm_rf(Dir)

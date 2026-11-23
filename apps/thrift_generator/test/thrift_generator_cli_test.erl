@@ -14,12 +14,16 @@
 
 -module(thrift_generator_cli_test).
 
--moduledoc "Unit tests for the CLI error formatting (`main/1' itself halts\n"
-"the emulator; argument parsing rides on the stdlib `argparse' module).".
+-moduledoc "Unit tests for the CLI: the argparse command shape and error formatting.\n"
+"`main/1' itself halts the emulator, so the grammar is pinned through\n"
+"`command/0' here; the real end-to-end generate/check/clean runs live in\n"
+"thrift_generator_SUITE (`standalone_generate_check_clean').".
 
 -include_lib("stdlib/include/assert.hrl").
 
 -export([
+    command_shape_test/0,
+    command_rejects_legacy_test/0,
     format_error_test/0,
     format_error_list_test/0,
     format_error_stale_test/0,
@@ -31,6 +35,106 @@
     diagnostic_column_utf8_test/0,
     diagnostic_column_tabs_test/0
 ]).
+
+%% The explicit grammar: one dispatcher with three subcommands. Generate
+%% and check take the file operand, -o and all five axes (defaulting to
+%% the library defaults, out_dir "src"); clean takes only -o. Parsing is
+%% argparse-level — `main/1' itself halts the emulator, so the shape is
+%% pinned here through command/0 and the suite's real escript runs.
+
+command_shape_test() ->
+    Cmd = thrift_generator_cli:command(),
+    #{commands := Commands} = Cmd,
+    ?assertEqual(
+        lists:sort(["generate", "check", "clean"]),
+        lists:sort(maps:keys(Commands))
+    ),
+    Opts = #{progname => "thrift_generator"},
+    %% generate: explicit subcommand, library defaults on every axis
+    {ok, Gen, [_, "generate"], _} = argparse:parse(["generate", "a.thrift"], Cmd, Opts),
+    ?assertEqual(
+        #{
+            file => "a.thrift",
+            out_dir => <<"src">>,
+            repr => record,
+            union_type => record,
+            set => list,
+            typedef_type => alias,
+            enum_case => preserve
+        },
+        maps:with([file, out_dir, repr, union_type, set, typedef_type, enum_case], Gen)
+    ),
+    %% check: same option surface as generate
+    {ok, Check, [_, "check"], _} = argparse:parse(
+        [
+            "check",
+            "a.thrift",
+            "-o",
+            "elsewhere",
+            "--repr",
+            "map",
+            "--union-type",
+            "sum",
+            "--set",
+            "sets",
+            "--typedef-type",
+            "nominal",
+            "--enum-case",
+            "lower",
+            "--compact-errors"
+        ],
+        Cmd,
+        Opts
+    ),
+    ?assertEqual(<<"elsewhere">>, maps:get(out_dir, Check)),
+    ?assertEqual(
+        #{repr => map, union_type => sum, set => sets, typedef_type => nominal, enum_case => lower},
+        maps:with([repr, union_type, set, typedef_type, enum_case], Check)
+    ),
+    ?assertEqual(true, maps:get(compact_errors, Check)),
+    %% help answers without the file operand (argparse would demand a
+    %% required positional first)
+    {ok, GenHelp, [_, "generate"], _} = argparse:parse(["generate", "--help"], Cmd, Opts),
+    ?assertEqual(true, maps:get(help, GenHelp)),
+    {ok, CleanHelp, [_, "clean"], _} = argparse:parse(["clean", "-h"], Cmd, Opts),
+    ?assertEqual(true, maps:get(help, CleanHelp)),
+    %% clean: only -o, defaulting to src
+    {ok, Clean, [_, "clean"], _} = argparse:parse(["clean"], Cmd, Opts),
+    ?assertEqual(<<"src">>, maps:get(out_dir, Clean)),
+    {ok, CleanOut, _, _} = argparse:parse(["clean", "-o", "elsewhere"], Cmd, Opts),
+    ?assertEqual(<<"elsewhere">>, maps:get(out_dir, CleanOut)),
+    ok.
+
+%% The legacy grammar is not mapped onto the new one: an implicit file
+%% operand, --check and generation axes on clean all fail at parse time
+%% (the CLI prints the usage and exits 1).
+
+command_rejects_legacy_test() ->
+    Cmd = thrift_generator_cli:command(),
+    Opts = #{progname => "thrift_generator"},
+    Invalid = [
+        ["a.thrift"],
+        ["a.thrift", "-o", "out"],
+        ["generate", "a.thrift", "--check"],
+        ["check", "a.thrift", "--check"],
+        ["clean", "a.thrift"],
+        ["clean", "--check"],
+        ["clean", "--repr", "map"],
+        ["clean", "-o"],
+        ["unknown", "a.thrift"],
+        ["generate", "a.thrift", "--frobnicate"]
+    ],
+    lists:foreach(
+        fun(Args) -> ?assertMatch({error, _}, argparse:parse(Args, Cmd, Opts), Args) end,
+        Invalid
+    ),
+    %% the usage text names all three commands
+    Help = unicode:characters_to_binary(argparse:help(Cmd, Opts)),
+    lists:foreach(
+        fun(Name) -> ?assertMatch({_, _}, binary:match(Help, Name)) end,
+        [<<"generate">>, <<"check">>, <<"clean">>]
+    ),
+    ok.
 
 %% Lexer/parser errors format through the originating module's own
 %% formatter, with the file and line prefixed.
