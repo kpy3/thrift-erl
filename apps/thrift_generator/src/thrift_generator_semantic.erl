@@ -1174,12 +1174,12 @@ typedef_ref_kind(Module, Name, Visited, Ctx) ->
         #{{Module, Name} := true} ->
             error;
         _ ->
-            case maps:find(Name, maps:get(Module, Ctx#ctx.all_typedefs, #{})) of
-                {ok, {ref, Target, _}} ->
+            case maps:get(Module, Ctx#ctx.all_typedefs, #{}) of
+                #{Name := {ref, Target, _}} ->
                     throws_ref_kind(Target, Visited#{{Module, Name} => true}, Ctx#ctx{module = Module});
-                {ok, _NonRef} ->
+                #{Name := _NonRef} ->
                     {ok, not_exception};
-                error ->
+                _ ->
                     error
             end
     end.
