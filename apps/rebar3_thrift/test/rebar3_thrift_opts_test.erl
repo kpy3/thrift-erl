@@ -30,6 +30,7 @@
     bad_value_test/0,
     unknown_option_test/0,
     bad_out_dir_test/0,
+    clean_out_dir_test/0,
     bad_opt_rendering_test/0
 ]).
 
@@ -124,6 +125,35 @@ bad_out_dir_test() ->
     ?assertEqual(
         {error, {bad_option, {out_dir, ["/x" | 42], [string, binary]}}},
         rebar3_thrift:thrift_gen_opts([{out_dir, ["/x" | 42]}])
+    ),
+    ok.
+
+%% The clean hook validates its out dir through the shared contract
+%% before deleting anything: an invalid configured value answers the
+%% shared bad_option reason (rendered by the provider's format_error/1
+%% like every other option error) and the deletion never runs; a valid
+%% value — or an absent key, defaulting to "src" — answers the resolved
+%% dir. The do/1 wiring itself stays untested like the rest of the
+%% host rebar3 API (it needs a rebar_state).
+
+clean_out_dir_test() ->
+    ?assertEqual({ok, "src"}, rebar3_thrift_clean:out_dir([])),
+    ?assertEqual({ok, "gen"}, rebar3_thrift_clean:out_dir([{out_dir, "gen"}])),
+    ?assertEqual(
+        {error, {bad_option, {out_dir, 42, [string, binary]}}},
+        rebar3_thrift_clean:out_dir([{out_dir, 42}])
+    ),
+    ?assertEqual(
+        {error, {bad_option, {out_dir, ["/x" | 42], [string, binary]}}},
+        rebar3_thrift_clean:out_dir([{out_dir, ["/x" | 42]}])
+    ),
+    %% the shared reason renders through the same formatter the command
+    %% path uses
+    ?assertEqual(
+        "{bad_option,{out_dir,42,[string,binary]}}",
+        unicode:characters_to_list(
+            rebar3_thrift_clean:format_error({bad_option, {out_dir, 42, [string, binary]}})
+        )
     ),
     ok.
 

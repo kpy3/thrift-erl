@@ -1,9 +1,59 @@
 # Public API migration
 
-The public codec API is finalized as one coherent, type-first surface.
-This guide maps every old call shape to its replacement. There are no
-compatibility shims: the transitional forms were removed in the same
-release that introduced the options maps and the type-first facade.
+The public codec API and the generator tooling API are finalized as
+one coherent surface each. This guide maps every old call shape to its
+replacement. There are no compatibility shims: the transitional forms
+were removed in the same release that introduced the options maps and
+the type-first facade.
+
+## Generator tooling (`thrift_generator`, CLI, `rebar3_thrift`)
+
+Every frontend — the library, the standalone CLI and the rebar3
+plugin — now feeds one validated options map: `out_dir` (default
+`"src"`) plus the five axes (`repr`, `union_type`, `set`,
+`typedef_type`, `enum_case`). Validation runs through a single
+normalizer, so a bad option fails everywhere with the same reason:
+`{error, {unknown_option, Key}}` for an unknown key and `{error,
+{bad_option, {Key, Value, Allowed}}}` for a bad value (a non-map
+options argument answers `{error, {bad_option, {options, Value,
+[map]}}}`).
+
+### Library
+
+| Removed | Replacement |
+|---|---|
+| `generate(File, OutDir)` (positional out dir) | `generate(File, #{out_dir => OutDir})` |
+| `generate(File, OutDir, Opts)` | `generate(File, Opts#{out_dir => OutDir})` |
+| `check(File, OutDir)` (positional out dir) | `check(File, #{out_dir => OutDir})` |
+| `check(File, OutDir, Opts)` | `check(File, Opts#{out_dir => OutDir})` |
+
+`generate/1` and `check/1` are the same operations with every default
+(`out_dir => "src"`); `clean/1` is unchanged. The parser-level helpers
+`tokens/1`, `ast/1`, `parse_file/1` and `parse_string/1` stay exported
+— the loader pipeline and the test suites call them — but they are
+internal, not a stable public contract.
+
+### CLI
+
+| Removed | Replacement |
+|---|---|
+| `thrift_generator <file.thrift> [-o dir]` (implicit generate) | `thrift_generator generate <file.thrift> [-o dir]` |
+| `thrift_generator --check <file.thrift> [-o dir]` | `thrift_generator check <file.thrift> [-o dir]` |
+
+The commands are explicit: a bare file operand, an implicit
+`generate` and the `--check` flag are rejected with the usage banner,
+not remapped. `clean` (`thrift_generator clean [-o dir]`) is new in
+this release. The flag set is unchanged and `-o` defaults to `src`.
+
+### rebar3 plugin
+
+| Removed | Replacement |
+|---|---|
+| `{bad_opt, {Key, Value, Allowed}}` provider error | the shared `{bad_option, {Key, Value, Allowed}}` reason, and `{unknown_option, Key}` for a config typo — rendered exactly like the CLI prints it |
+
+`{thrift, [...]}` keeps its shape — the host-only `files` key plus the
+same keys as the options map — and the hooked clean provider now
+validates `out_dir` through the shared contract before deleting.
 
 ## Generated `<mod>_types` modules
 

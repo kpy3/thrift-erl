@@ -1833,7 +1833,7 @@ getting_started_example(Config) ->
             "}\n"
         >>
     ),
-    {ok, _} = thrift_generator:generate(Path, PrivDir, #{}),
+    {ok, _} = thrift_generator:generate(Path, #{out_dir => PrivDir}),
     lists:foreach(
         fun(File) ->
             {ok, Mod, Beam} = compile:file(filename:join(PrivDir, File), [binary, {i, PrivDir}]),

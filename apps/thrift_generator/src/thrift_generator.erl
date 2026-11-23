@@ -15,19 +15,21 @@
 -module(thrift_generator).
 
 -moduledoc """
-Front end of the Thrift IDL generator: turns IDL files into tokens and
-an AST of `#thrift_generator_node{}` records.
+Front end of the Thrift IDL generator.
 
-The pipeline is `tokens/1` -> `ast/1`; `parse_file/1` and
-`parse_string/1` wrap both steps. `parse_file/1` appends a synthetic
-`__file__` marker to the source, which the grammar consumes after the
-document's definitions; the AST document itself carries only headers
-and definitions — module naming and include resolution work from the
-paths the loader tracks.
+The public generation operations are `generate/1,2`, `check/1,2` and
+`clean/1`: every frontend (the library, the standalone CLI and the
+rebar3 plugin) feeds the same validated options map through them. The
+parser-level entries `tokens/1`, `ast/1`, `parse_file/1` and
+`parse_string/1` stay exported — the loader pipeline and the test
+suites call them — but they are internal: their shapes follow the
+lexer/parser pair, not a stable public contract, and `parse_file/1`
+appends a synthetic `__file__` marker to the source, which the grammar
+consumes after the document's definitions.
 """.
 
 -export([tokens/1, ast/1, parse_file/1, parse_string/1]).
--export([generate/1, generate/2, generate/3, check/1, check/2, check/3, clean/1]).
+-export([generate/1, generate/2, check/1, check/2, clean/1]).
 
 -include("thrift_generator.hrl").
 
@@ -92,7 +94,11 @@ when one was written).
     | {error, term()}.
 generate(ThriftFile, Options) ->
     with_normalized(Options, fun(Opts) ->
-        generate(ThriftFile, maps:get(out_dir, Opts), maps:remove(out_dir, Opts))
+        OutDir = maps:get(out_dir, Opts),
+        with_sources(ThriftFile, maps:remove(out_dir, Opts), fun(Sources) ->
+            ok = filelib:ensure_dir(filename:join(OutDir, "x")),
+            write_all(Sources, OutDir, [])
+        end)
     end).
 
 -doc "Generates with default options; artifacts are written to `./src`.".
@@ -102,28 +108,11 @@ generate(ThriftFile, Options) ->
 generate(ThriftFile) ->
     generate(ThriftFile, #{}).
 
--doc """
-Transitional form kept while frontends migrate: like `generate/2`, but
-the output directory is the explicit `OutDir` argument instead of the
-`out_dir` option (an `out_dir` key in `Opts` is ignored here). Will be
-removed once the CLI and the rebar3 plugin consume `generate/1,2`.
-""".
--spec generate(file:filename_all(), file:filename_all(), generate_opts()) ->
-    {ok, [#{module := module(), path := file:filename_all(), hrl => file:filename_all()}]}
-    | {error, term()}.
-generate(ThriftFile, OutDir, Options) ->
-    with_normalized(Options, fun(Opts) ->
-        with_sources(ThriftFile, maps:remove(out_dir, Opts), fun(Sources) ->
-            ok = filelib:ensure_dir(filename:join(OutDir, "x")),
-            write_all(Sources, OutDir, [])
-        end)
-    end).
-
 %% Options enter only through the shared normalizer: validation errors
 %% are returned before the loader runs, so a bad options map never
 %% causes a partial write.
--spec with_normalized(term(), fun((generate_opts()) -> {ok, term()} | {error, term()})) ->
-    {ok, term()} | {error, term()}.
+-spec with_normalized(term(), fun((generate_opts()) -> Result)) ->
+    Result | {error, term()}.
 with_normalized(Options, Fun) ->
     case thrift_generator_options:normalize(Options) of
         {ok, Opts} -> Fun(Opts);
@@ -156,24 +145,7 @@ files.
     ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
 check(ThriftFile, Options) ->
     with_normalized(Options, fun(Opts) ->
-        check(ThriftFile, maps:get(out_dir, Opts), maps:remove(out_dir, Opts))
-    end).
-
--doc "Checks freshness with default options against `./src`.".
--spec check(file:filename_all()) -> ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
-check(ThriftFile) ->
-    check(ThriftFile, #{}).
-
--doc """
-Transitional form kept while frontends migrate: like `check/2`, but the
-output directory is the explicit `OutDir` argument instead of the
-`out_dir` option. Will be removed once the CLI and the rebar3 plugin
-consume `check/1,2`.
-""".
--spec check(file:filename_all(), file:filename_all(), generate_opts()) ->
-    ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
-check(ThriftFile, OutDir, Options) ->
-    with_normalized(Options, fun(Opts) ->
+        OutDir = maps:get(out_dir, Opts),
         with_sources(ThriftFile, maps:remove(out_dir, Opts), fun(Sources) ->
             case stale_sources(Sources, OutDir, []) of
                 [] -> ok;
@@ -181,6 +153,11 @@ check(ThriftFile, OutDir, Options) ->
             end
         end)
     end).
+
+-doc "Checks freshness with default options against `./src`.".
+-spec check(file:filename_all()) -> ok | {error, {stale, [file:filename_all()]}} | {error, term()}.
+check(ThriftFile) ->
+    check(ThriftFile, #{}).
 
 with_sources(ThriftFile, Opts, Fun) ->
     case sources(ThriftFile, Opts) of
@@ -321,8 +298,8 @@ hrl_path(OutDir, Base) ->
     filename:join(OutDir, Base ++ ".hrl").
 
 -doc """
-Reads and lexes an IDL file, appending a `__file__` marker with the
-path as given.
+Internal: reads and lexes an IDL file, appending a `__file__` marker
+with the path as given. Not a stable public contract.
 """.
 -spec tokens(file:filename_all()) ->
     {ok, [token()], loc()}
@@ -349,7 +326,7 @@ utf8_text(Data, Filename) ->
         _ -> {error, {invalid_utf8, Filename}}
     end.
 
--doc "Parses a token list into a document AST node.".
+-doc "Internal: parses a token list into a document AST node. Not a stable public contract.".
 -spec ast([token()]) -> {ok, ast_node()} | {error, term()}.
 ast(Tokens) ->
     thrift_parser:parse(strip_detached_docs(Tokens)).
@@ -416,7 +393,7 @@ closing_delimiter([{T, _} | _]) when T =:= '}'; T =:= ')'; T =:= ']'; T =:= '>' 
 closing_delimiter(_) ->
     false.
 
--doc "Reads, lexes and parses an IDL file in one step.".
+-doc "Internal: reads, lexes and parses an IDL file in one step. Not a stable public contract.".
 -spec parse_file(file:filename_all()) -> {ok, ast_node()} | {error, term()}.
 parse_file(Filename) ->
     maybe
@@ -427,7 +404,7 @@ parse_file(Filename) ->
         {error, Reason, _} -> {error, Reason}
     end.
 
--doc "Lexes and parses an IDL snippet given as text, without a file marker.".
+-doc "Internal: lexes and parses an IDL snippet given as text, without a file marker. Not a stable public contract.".
 -spec parse_string(string() | binary()) -> {ok, ast_node()} | {error, term()}.
 parse_string(Snippet) ->
     maybe
