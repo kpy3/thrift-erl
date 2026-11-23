@@ -126,7 +126,7 @@ everywhere else in the emitter.
 
 -define(ANNO, erl_anno:new(0)).
 
-%% The wire descriptor vocabulary of `thrift_generator_emitter:type_desc/2'
+%% The wire descriptor vocabulary of `thrift_generator_ir:type_desc/2`
 %% — the same shape the runtime codecs consume.
 
 -type wire_type() :: thrift_generator_codec_common:wire_type().
@@ -208,7 +208,7 @@ struct_blocks(Structs, Ctx, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s compact wire codecs", [thrift_generator_emitter:section_label(S)])
+                io_lib:format("~s compact wire codecs", [thrift_generator_ir:section_label(S)])
             )
         ] ++
             struct_forms(S, Ctx, Enums)
@@ -937,7 +937,7 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
 %% binary_to_atom is not guard-legal.
 -spec types_module_atom(binary()) -> module().
 types_module_atom(Name) ->
-    binary_to_atom(<<(thrift_generator_emitter:sanitize(Name))/binary, "_types">>, utf8).
+    thrift_generator_names:types_module_atom(Name).
 
 -spec decode_compact_expr(
     wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry(), string()
@@ -1572,7 +1572,7 @@ helper_forms(dec_string_c) ->
 
 -spec wtype(thrift_type(), #ectx{}) -> wire_type().
 wtype(Type, Ctx) ->
-    thrift_generator_emitter:type_desc(Type, Ctx).
+    thrift_generator_ir:type_desc(Type, Ctx).
 
 %% Compact type nibbles (the high bits of a field/collection header);
 %% the boolean entry is the cbool value a boolean ELEMENT rides as.

@@ -202,7 +202,7 @@ struct_blocks(Structs, Ctx, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s json wire codecs", [thrift_generator_emitter:section_label(S)])
+                io_lib:format("~s json wire codecs", [thrift_generator_ir:section_label(S)])
             )
         ] ++
             struct_forms(S, Ctx, Enums)
@@ -557,7 +557,7 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
 %% not a guard — binary_to_atom is not guard-legal.
 -spec types_module_atom(binary()) -> module().
 types_module_atom(Name) ->
-    binary_to_atom(<<(thrift_generator_emitter:sanitize(Name))/binary, "_types">>, utf8).
+    thrift_generator_names:types_module_atom(Name).
 
 %%--------------------------------------------------------------------
 %% Decode side
@@ -2048,7 +2048,7 @@ uuid_decode_error_clause(Arity) ->
 
 -spec wtype(thrift_type(), #ectx{}) -> wire_type().
 wtype(Type, Ctx) ->
-    thrift_generator_emitter:type_desc(Type, Ctx).
+    thrift_generator_ir:type_desc(Type, Ctx).
 
 %% The JSON type tags of the generic engine's tag/1, computed at emit
 %% time — the generated code carries them as literals.

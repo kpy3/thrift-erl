@@ -136,7 +136,7 @@ everywhere else in the emitter.
     enums :: map()
 }).
 
-%% The wire descriptor vocabulary of `thrift_generator_emitter:type_desc/2`
+%% The wire descriptor vocabulary of `thrift_generator_ir:type_desc/2`
 %% — the same shape the runtime codecs consume.
 
 -type wire_type() :: thrift_generator_codec_common:wire_type().
@@ -176,7 +176,7 @@ struct_blocks(Structs, Label, Ctx, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s ~ts", [thrift_generator_emitter:section_label(S), Label])
+                io_lib:format("~s ~ts", [thrift_generator_ir:section_label(S), Label])
             )
         ] ++
             struct_forms(S, Ctx, Enums)
@@ -666,7 +666,7 @@ struct_decode_call(TypesMod, Local, Bin, Ctx) ->
 %% binary_to_atom is not guard-legal.
 -spec types_module_atom(binary()) -> module().
 types_module_atom(Name) ->
-    binary_to_atom(<<(thrift_generator_emitter:sanitize(Name))/binary, "_types">>, utf8).
+    thrift_generator_names:types_module_atom(Name).
 
 -spec decode_wire_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry(), string()) ->
     ast().
@@ -1034,7 +1034,7 @@ dec_string_form() ->
 
 -spec wtype(thrift_type(), #ectx{}) -> wire_type().
 wtype(Type, Ctx) ->
-    thrift_generator_emitter:type_desc(Type, Ctx).
+    thrift_generator_ir:type_desc(Type, Ctx).
 
 -spec wire_byte(wire_type()) -> non_neg_integer().
 wire_byte({base, bool}) -> 2;
@@ -1140,7 +1140,7 @@ repr_index_clauses(S, Ctx) ->
         at(ok),
         tuple_t([at(repr_encode_name(Encode, map)), at(repr_decode_name(Decode, struct))])
     ]),
-    case thrift_generator_emitter:has_record(S) of
+    case thrift_generator_ir:has_record(S) of
         true ->
             [
                 clause([bin_lit(S#tg_struct.name), at(record)], none, [
@@ -1168,9 +1168,9 @@ repr_decode_struct_forms(S, Ctx, Enums) ->
     FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
     Fields = S#tg_struct.fields,
     Bits = required_bits(Fields),
-    Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
+    Tag = thrift_generator_ir:record_tag_of(S, thrift_generator_names:current_prefix(Ctx)),
     StructTag =
-        case thrift_generator_emitter:has_record(S) of
+        case thrift_generator_ir:has_record(S) of
             true -> Tag;
             %% Map-mode structs tag their struct maps by the wire name
             %% (the same rule the descriptor engine's
@@ -1190,7 +1190,7 @@ repr_decode_struct_forms(S, Ctx, Enums) ->
         flavor = struct,
         tag = StructTag
     }),
-    case thrift_generator_emitter:has_record(S) of
+    case thrift_generator_ir:has_record(S) of
         true ->
             RecName = repr_decode_name(Decode, record),
             NativeName = repr_decode_name(Decode, native),
@@ -1658,7 +1658,7 @@ repr_codec_export_entries(S, Ctx) ->
     {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
     EncEntries = [{repr_encode_name(Encode, map), 1}],
     Enc =
-        case thrift_generator_emitter:has_record(S) of
+        case thrift_generator_ir:has_record(S) of
             true -> [{repr_encode_name(Encode, record), 1} | EncEntries];
             false -> EncEntries
         end,
@@ -1667,7 +1667,7 @@ repr_codec_export_entries(S, Ctx) ->
         {repr_decode_name(Decode, struct), 1}
     ],
     Dec =
-        case thrift_generator_emitter:has_record(S) of
+        case thrift_generator_ir:has_record(S) of
             true ->
                 [
                     {repr_decode_name(Decode, record), 1},
@@ -1771,7 +1771,7 @@ repr_convertible_structs(Structs) ->
 repr_convertible(#tg_struct{kind = struct}) ->
     true;
 repr_convertible(#tg_struct{kind = union} = S) ->
-    S#tg_struct.fields =/= [] andalso thrift_generator_emitter:has_record(S);
+    S#tg_struct.fields =/= [] andalso thrift_generator_ir:has_record(S);
 repr_convertible(_) ->
     false.
 
@@ -1782,9 +1782,9 @@ repr_encode_struct_forms(S, Ctx, Enums) ->
     MapForms =
         repr_encode_entry(S, MapName, undefined, FieldTypes, map) ++
             repr_encode_chain(S, MapName, FieldTypes, map, Ctx, Enums),
-    case thrift_generator_emitter:has_record(S) of
+    case thrift_generator_ir:has_record(S) of
         true ->
-            Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
+            Tag = thrift_generator_ir:record_tag_of(S, thrift_generator_names:current_prefix(Ctx)),
             RecName = repr_encode_name(Encode, record),
             repr_encode_entry(S, RecName, Tag, FieldTypes, record) ++
                 repr_encode_chain(S, RecName, FieldTypes, record, Ctx, Enums) ++
@@ -2098,9 +2098,9 @@ nested_mode(TypesMod, Local, Ctx) ->
         Mod ->
             case lists:search(fun(S) -> S#tg_struct.name =:= Local end, Mod#tg_module.structs) of
                 {value, S} ->
-                    case thrift_generator_emitter:has_record(S) of
+                    case thrift_generator_ir:has_record(S) of
                         true -> record;
-                        false -> {map, thrift_generator_emitter:map_key_type(S)}
+                        false -> {map, thrift_generator_ir:map_key_type(S)}
                     end;
                 false ->
                     record

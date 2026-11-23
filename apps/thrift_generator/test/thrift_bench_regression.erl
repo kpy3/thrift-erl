@@ -138,7 +138,7 @@ rename_module(Module0, Base, Suffix, Count) ->
     NewName =
         case Count of
             1 -> <<Base/binary, Suffix/binary>>;
-            _ -> <<Base/binary, "_", (thrift_generator_emitter:sanitize(Name))/binary, Suffix/binary>>
+            _ -> <<Base/binary, "_", (thrift_generator_names:sanitize(Name))/binary, Suffix/binary>>
         end,
     NewPrefix =
         case Count of

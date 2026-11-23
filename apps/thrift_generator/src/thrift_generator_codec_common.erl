@@ -32,8 +32,6 @@ runtime are their only callers.
 -export([
     enum_registry/1,
     type_name/2,
-    typed_prefix/2,
-    current_prefix/1,
     codec_pair/3,
     ref_codec_pair/4,
     service_structs/1,
@@ -122,24 +120,14 @@ type_name({struct, {ref, TypesMod, Local}}, _Enums) ->
 module_tag(TypesMod) ->
     binary:replace(atom_to_binary(TypesMod, utf8), <<"_types">>, <<>>).
 
--doc "Joins a namespace prefix and a snake-case definition name.".
--spec typed_prefix(binary(), binary()) -> binary().
-typed_prefix(<<>>, Name) ->
-    Name;
-typed_prefix(Prefix, Name) ->
-    <<Prefix/binary, "_", Name/binary>>.
-
--doc "Returns the namespace prefix of the module being generated.".
--spec current_prefix(#ectx{}) -> binary().
-current_prefix(Ctx) ->
-    (maps:get(Ctx#ectx.current, Ctx#ectx.modules))#tg_module.prefix.
-
 -doc "Returns the generated encode/decode function names for a struct and protocol.".
 -spec codec_pair(wire | compact | json, binary() | #tg_struct{}, #ectx{}) -> {atom(), atom()}.
 codec_pair(Protocol, #tg_struct{name = Name}, Ctx) ->
     codec_pair(Protocol, Name, Ctx);
 codec_pair(Protocol, Name, Ctx) when is_binary(Name) ->
-    Prefix = typed_prefix(current_prefix(Ctx), thrift_generator_names:snake(Name)),
+    Prefix = thrift_generator_names:typed_prefix(
+        thrift_generator_names:current_prefix(Ctx), thrift_generator_names:snake(Name)
+    ),
     Suffix = protocol_suffix(Protocol),
     {
         binary_to_atom(<<"encode_", Prefix/binary, Suffix/binary>>, utf8),

@@ -25,6 +25,7 @@
 
 -export([
     compile_all_modules_test/0,
+    ir_local_struct_descriptor_test/0,
     struct_info_descriptor_test/0,
     enum_info_descriptor_test/0,
     function_info_descriptor_test/0,
@@ -123,6 +124,35 @@ compile_all_modules_test() ->
     Names = [Name || {ok, Name, _} <- Results],
     ?assertEqual([t_svc_client, t_svc_handler, t_svc_server, t_types, t_types_repr], lists:sort(Names)),
     ok.
+
+%% The IR layer lowers model types to wire descriptors against the
+%% module context: a local struct ref resolves to the current module's
+%% types module, and the naming helpers derive module atoms from
+%% namespace keys.
+
+ir_local_struct_descriptor_test() ->
+    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
+    Ctx = model_ctx(Model),
+    ?assertEqual(
+        {struct, {ref, t_types, <<"Inner">>}},
+        thrift_generator_ir:type_desc({ref, <<"Inner">>, #{}}, Ctx)
+    ),
+    ?assertEqual(demo_widgets_types, thrift_generator_names:types_module_atom(<<"demo.widgets">>)),
+    ok.
+
+-spec model_ctx(#tg_model{}) -> #ectx{}.
+model_ctx(Model) ->
+    #ectx{
+        modules = #{M#tg_module.name => M || M <- Model#tg_model.modules},
+        type_modules =
+            #{
+                M#tg_module.name => thrift_generator_names:types_module_atom(M#tg_module.name)
+             || M <- Model#tg_model.modules
+            },
+        current = <<"t">>
+    }.
 
 struct_info_descriptor_test() ->
     generate(),

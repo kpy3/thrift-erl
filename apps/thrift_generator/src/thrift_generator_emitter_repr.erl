@@ -93,7 +93,7 @@ source_forms(Mod, Ctx) ->
 
 -spec repr_module(#tg_module{}) -> module().
 repr_module(Mod) ->
-    TypesMod = thrift_generator_emitter:types_module_atom(Mod#tg_module.name),
+    TypesMod = thrift_generator_names:types_module_atom(Mod#tg_module.name),
     binary_to_atom(<<(atom_to_binary(TypesMod, utf8))/binary, "_repr">>, utf8).
 
 -spec export_entries([#tg_struct{}]) -> [{atom(), arity()}].
@@ -115,7 +115,7 @@ export_entries(Structs) ->
 convertible(S) ->
     %% An empty union has no value to convert; its dead converter would
     %% only grow the module.
-    thrift_generator_emitter:has_record(S) andalso
+    thrift_generator_ir:has_record(S) andalso
         not (S#tg_struct.kind =:= union andalso S#tg_struct.fields =:= []).
 
 -spec to_wire_name(#tg_struct{}) -> atom().
@@ -433,16 +433,16 @@ elem_var(Depth) ->
 
 -spec field_type(#tg_field{}, #ectx{}) -> ast().
 field_type(Field, Ctx) ->
-    thrift_generator_emitter:type_desc(Field#tg_field.type, Ctx).
+    thrift_generator_ir:type_desc(Field#tg_field.type, Ctx).
 
 -spec field_atom(binary()) -> atom().
 field_atom(Name) ->
-    thrift_generator_emitter:field_atom(Name).
+    thrift_generator_ir:field_atom(Name).
 
 -spec tag(#tg_struct{}, #ectx{}) -> atom().
 tag(S, Ctx) ->
-    thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)).
+    thrift_generator_ir:record_tag_of(S, thrift_generator_names:current_prefix(Ctx)).
 
 -spec types_module(#tg_module{}) -> module().
 types_module(Mod) ->
-    thrift_generator_emitter:types_module_atom(Mod#tg_module.name).
+    thrift_generator_names:types_module_atom(Mod#tg_module.name).
