@@ -194,7 +194,7 @@ service_struct_names(Svc, Mod) ->
         ]),
     expand_structs(Seeds, ByName, #{}).
 
--spec function_types(#tg_function{}) -> [thrift_type()].
+-spec function_types(#tg_function{}) -> [resolved_thrift_type()].
 function_types(F) ->
     [T || P <- F#tg_function.params, T <- [P#tg_field.type]] ++
         case F#tg_function.return_type of
@@ -203,9 +203,9 @@ function_types(F) ->
         end ++
         [P#tg_field.type || P <- F#tg_function.throws].
 
--spec ref_names(thrift_type()) -> [binary()].
-ref_names({ref, Name, _}) ->
-    [Name];
+-spec ref_names(resolved_thrift_type()) -> [binary()].
+ref_names({resolved_ref, _Mod, Local, _}) ->
+    [Local];
 ref_names({list, T, _}) ->
     ref_names(T);
 ref_names({set, T, _}) ->

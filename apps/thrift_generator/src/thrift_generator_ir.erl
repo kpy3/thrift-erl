@@ -65,10 +65,11 @@ reaching into the core emitter.
 
 -doc """
 Converts a model type into the wire descriptor vocabulary the runtime
-codecs consume (resolving references, expanding typedefs and inlining
-enum descriptors); shared with the codec emitter.
+codecs consume (expanding typedefs and inlining enum descriptors);
+shared with the codec emitter. References are already resolved by the
+semantic pass: the descriptor names the defining module directly.
 """.
--spec type_desc(thrift_type(), #ectx{}) -> desc().
+-spec type_desc(resolved_thrift_type(), #ectx{}) -> desc().
 type_desc({base, B, _}, _Ctx) ->
     {base, B};
 type_desc({list, T, _}, Ctx) ->
@@ -77,12 +78,21 @@ type_desc({set, T, Ann}, Ctx) ->
     {set, type_desc(T, Ctx), set_impl(Ann)};
 type_desc({map, K, V, _}, Ctx) ->
     {map, type_desc(K, Ctx), type_desc(V, Ctx)};
-type_desc({ref, Name, _}, Ctx) ->
-    case binary:split(Name, <<".">>) of
-        [ModKey, Local] ->
-            qualified_desc(ModKey, Local, Ctx);
-        [Local] ->
-            local_desc(Local, Ctx)
+type_desc({resolved_ref, ModKey, Local, _}, Ctx) ->
+    Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
+    TypesMod = maps:get(ModKey, Ctx#ectx.type_modules, undefined),
+    case find_def(Module, Local) of
+        {struct, _S} ->
+            {struct, {ref, TypesMod, Local}};
+        {enum, E} ->
+            {enum, enum_desc(E)};
+        {typedef, Type} ->
+            %% A typedef from another module (base.Timestamp and
+            %% friends) resolves in its own module's context, so
+            %% refs inside its body stay home.
+            type_desc(Type, Ctx#ectx{current = ModKey});
+        error ->
+            error({unresolved_type, ModKey, Local})
     end.
 
 %% The in-process set implementation carried in the descriptor. `list`
@@ -100,73 +110,6 @@ set_impl(Ann) ->
             ordset;
         _ ->
             list
-    end.
-
--spec module_key_of(module_key(), #ectx{}) -> module_key().
-module_key_of(Key, Ctx) ->
-    case maps:is_key(Key, Ctx#ectx.modules) of
-        true -> Key;
-        false -> maps:get(Key, Ctx#ectx.include_modules, Key)
-    end.
-
--spec qualified_desc(module_key(), binary(), #ectx{}) -> desc().
-qualified_desc(ModKey0, Local, Ctx) ->
-    ModKey = module_key_of(ModKey0, Ctx),
-    Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
-    TypesMod = maps:get(ModKey, Ctx#ectx.type_modules, undefined),
-    case find_def(Module, Local) of
-        {struct, _S} ->
-            {struct, {ref, TypesMod, Local}};
-        {enum, E} ->
-            {enum, enum_desc(E)};
-        {typedef, Type} ->
-            %% A typedef from another module (base.Timestamp and
-            %% friends) resolves in its own module's context, so
-            %% refs inside its body stay home.
-            type_desc(Type, Ctx#ectx{current = ModKey});
-        error ->
-            error({unresolved_type, ModKey, Local})
-    end.
-
--spec local_desc(binary(), #ectx{}) -> desc().
-local_desc(Name, Ctx) ->
-    Module = maps:get(Ctx#ectx.current, Ctx#ectx.modules),
-    case find_def(Module, Name) of
-        {struct, _S} ->
-            {struct, {ref, thrift_generator_names:types_module_atom(Ctx#ectx.current), Name}};
-        {enum, E} ->
-            {enum, enum_desc(E)};
-        {typedef, Type} ->
-            type_desc(Type, Ctx);
-        error ->
-            %% Inherited service functions reference the parent module's
-            %% types; resolve across every loaded module.
-            cross_module_desc(Name, Ctx)
-    end.
-
--spec cross_module_desc(binary(), #ectx{}) -> desc().
-cross_module_desc(Name, Ctx) ->
-    Hits = [
-        {ModKey, Kind}
-     || {ModKey, Module} <- maps:to_list(Ctx#ectx.modules),
-        Kind <- [
-            case find_def(Module, Name) of
-                {struct, _} -> struct;
-                {enum, _} -> enum;
-                _ -> none
-            end
-        ],
-        Kind =/= none
-    ],
-    case lists:usort(Hits) of
-        [{ModKey, struct}] ->
-            {struct, {ref, thrift_generator_names:types_module_atom(ModKey), Name}};
-        [{ModKey, enum}] ->
-            Module = maps:get(ModKey, Ctx#ectx.modules),
-            {enum, E} = find_def(Module, Name),
-            {enum, enum_desc(E)};
-        _ ->
-            error({unresolved_type, Name})
     end.
 
 -spec find_def(#tg_module{} | undefined, binary()) ->
@@ -372,7 +315,7 @@ section_label(#tg_typedef{name = Name}) ->
 %% Erlang type mapping (specs and callbacks)
 %%--------------------------------------------------------------------
 
--spec erlang_type(thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
+-spec erlang_type(resolved_thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
 erlang_type({base, B, _}, _) ->
     thrift_generator_emitter_syntax:base_erlang_type(B);
 erlang_type({list, T, _}, Ctx) ->
@@ -402,14 +345,23 @@ erlang_type({set, T, Ann}, Ctx) ->
 erlang_type({map, K, V, _}, Ctx) ->
     Anno = erl_anno:new(0),
     {type, Anno, map, [{type, Anno, map_field_assoc, [erlang_type(K, Ctx), erlang_type(V, Ctx)]}]};
-erlang_type({ref, Name, _}, Ctx) ->
-    case binary:split(Name, <<".">>) of
-        [ModKey, Local] ->
+erlang_type({resolved_ref, ModKey, Local, Ann}, Ctx) ->
+    %% Qualified spellings render as the defining module's remote alias.
+    %% Plain spellings render by name in the emitting module — inherited
+    %% service functions carry the parent's references, and the legacy
+    %% handler specs resolve the bare name against the child.
+    case {maps:is_key(?TG_REF_SOURCE, Ann), ModKey =:= Ctx#ectx.current} of
+        {true, _} ->
             qualified_ref_type(ModKey, Local, Ctx);
-        [Local] when Ctx#ectx.qualify ->
-            qualified_ref_type(Ctx#ectx.current, Local, Ctx);
-        [Local] ->
-            local_ref_type(Local, Ctx)
+        {false, true} when Ctx#ectx.qualify ->
+            qualified_ref_type(ModKey, Local, Ctx);
+        {false, true} ->
+            local_ref_type(Local, Ctx);
+        {false, false} ->
+            case Ctx#ectx.qualify of
+                true -> qualified_ref_type(Ctx#ectx.current, Local, Ctx);
+                false -> local_ref_type(Local, Ctx)
+            end
     end.
 
 -spec list_type(thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
@@ -432,8 +384,7 @@ local_ref_type(Local, Ctx) ->
     end.
 
 -spec qualified_ref_type(module_key(), binary(), #ectx{}) -> erl_syntax:syntaxTree().
-qualified_ref_type(ModKey0, Local, Ctx) ->
-    ModKey = module_key_of(ModKey0, Ctx),
+qualified_ref_type(ModKey, Local, Ctx) ->
     Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
     case def_alias(Module, Local) of
         {ok, Alias} ->

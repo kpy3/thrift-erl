@@ -42,6 +42,7 @@
     service_extends_merge_test/0,
     override_inherited_error_test/0,
     recursive_struct_ok_test/0,
+    resolved_recursive_ref_test/0,
     default_from_const_test/0,
     generated_tag_clash_error_test/0,
     enum_prefix_clash_error_test/0,
@@ -134,7 +135,8 @@ throw_typedef_exception_test() ->
         >>
     ),
     [#tg_service{functions = [Function]}] = (model_module(Model))#tg_module.services,
-    [#tg_field{type = {ref, <<"Alias2">>, #{}}}] = Function#tg_function.throws,
+    %% the throw keeps the typedef alias, now resolved to its module
+    [#tg_field{type = {resolved_ref, <<"t">>, <<"Alias2">>, #{}}}] = Function#tg_function.throws,
     ok.
 
 throw_typedef_struct_error_test() ->
@@ -257,6 +259,18 @@ recursive_struct_ok_test() ->
     %% "next" is a reserved IDL keyword; "tail" is not.
     {ok, Model} = analyze(<<"struct N { 1: optional N tail }">>),
     [#tg_struct{name = <<"N">>}] = (model_module(Model))#tg_module.structs,
+    ok.
+
+%% Successful models carry resolved references: every typed position names
+%% the defining module and the local name, replacing the parsed {ref, ...}
+%% spelling. A self-recursive struct resolves to its own module; the
+%% emission layer lowers the ref to a named struct descriptor instead of
+%% expanding it (pinned end to end in thrift_generator_SUITE).
+
+resolved_recursive_ref_test() ->
+    {ok, Model} = analyze(<<"struct N { 1: optional N tail }">>),
+    [#tg_struct{name = <<"N">>, fields = [Tail]}] = (model_module(Model))#tg_module.structs,
+    ?assertEqual({resolved_ref, <<"t">>, <<"N">>, #{}}, Tail#tg_field.type),
     ok.
 
 default_from_const_test() ->

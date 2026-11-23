@@ -1227,11 +1227,12 @@ load_fixture() ->
             ok;
         false ->
             DataDir = filename:join(code:lib_dir(thrift_generator), "test/thrift_golden_SUITE_data"),
-            {ok, Loaded} = thrift_generator_loader:load(filename:join(DataDir, "ThriftTest.thrift")),
-            {ok, Model0} = thrift_generator_semantic:analyze(Loaded),
-            Model = Model0#tg_model{
-                modules = [M#tg_module{name = <<"goldentest">>} || M <- Model0#tg_model.modules]
-            },
+            {ok, Loaded0} = thrift_generator_loader:load(filename:join(DataDir, "ThriftTest.thrift")),
+            %% Resolution bakes the module keys into the model's
+            %% references, so the golden module name must be set before
+            %% analysis, not patched into the finished model.
+            Loaded = [L#tg_loaded{name = <<"goldentest">>} || L <- Loaded0],
+            {ok, Model} = thrift_generator_semantic:analyze(Loaded),
             lists:foreach(
                 fun
                     ({ok, Name, Beam}) ->
@@ -1253,11 +1254,11 @@ load_uuid_fixture() ->
             ok;
         false ->
             DataDir = filename:join(code:lib_dir(thrift_generator), "test/thrift_codec_test_data"),
-            {ok, Loaded} = thrift_generator_loader:load(filename:join(DataDir, "CompactUuid.thrift")),
-            {ok, Model0} = thrift_generator_semantic:analyze(Loaded),
-            Model = Model0#tg_model{
-                modules = [M#tg_module{name = <<"compactuuid">>} || M <- Model0#tg_model.modules]
-            },
+            {ok, Loaded0} = thrift_generator_loader:load(filename:join(DataDir, "CompactUuid.thrift")),
+            %% Same pre-analysis rename as load_fixture/0: resolved
+            %% references carry the module keys analysis ran with.
+            Loaded = [L#tg_loaded{name = <<"compactuuid">>} || L <- Loaded0],
+            {ok, Model} = thrift_generator_semantic:analyze(Loaded),
             lists:foreach(
                 fun
                     ({ok, Name, Beam}) ->

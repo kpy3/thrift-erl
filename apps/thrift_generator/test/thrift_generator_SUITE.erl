@@ -30,6 +30,7 @@
     reject_reserved_keyword/1,
     reject_syntax_error/1,
     semantic_pipeline/1,
+    recursive_value_roundtrip/1,
     loader_cycle/1,
     loader_shared_namespace_modules/1,
     loader_shared_namespace_module_key_normalization/1,
@@ -82,6 +83,7 @@ all() ->
         reject_reserved_keyword,
         reject_syntax_error,
         semantic_pipeline,
+        recursive_value_roundtrip,
         loader_cycle,
         loader_shared_namespace_modules,
         loader_shared_namespace_module_key_normalization,
@@ -299,7 +301,12 @@ semantic_pipeline(Config) ->
     ),
 
     [Fetch] = [F || F <- MainService#tg_service.functions, F#tg_function.name =:= <<"fetch">>],
-    [#tg_field{type = {ref, <<"Failed">>, #{}}}] = Fetch#tg_function.throws,
+    [#tg_field{type = {resolved_ref, <<"main">>, <<"Failed">>, #{}}}] = Fetch#tg_function.throws,
+
+    %% Inherited functions keep the already resolved parent refs: area's
+    %% Boom throw points at the shared module, not the child's spelling.
+    [Area] = [F || F <- MainService#tg_service.functions, F#tg_function.name =:= <<"area">>],
+    [#tg_field{type = {resolved_ref, <<"shared">>, <<"Boom">>, #{}}}] = Area#tg_function.throws,
 
     %% The included module is analyzed on its own terms.
     ?assertEqual(<<"shared">>, SharedMod#tg_module.name),
@@ -353,6 +360,33 @@ cross_module_exception_typedef(Config) ->
     ),
     ok.
 
+%% A self-recursive struct resolves to a named struct descriptor, never
+%% to an infinite expansion: the generated descriptor stays finite and a
+%% nested value round-trips through the binary runtime.
+
+recursive_value_roundtrip(Config) ->
+    Path = write_snippet(
+        Config,
+        "recursive.thrift",
+        <<
+            "namespace erl rec\n"
+            "struct N {\n"
+            "  1: required i32 v,\n"
+            "  2: optional N tail\n"
+            "}\n"
+        >>
+    ),
+    ok = generate_modules(Path),
+    ?assertMatch(
+        {ok, {struct, {ref, rec_types, <<"N">>}}},
+        rec_types:descriptor(n)
+    ),
+    Value = #{<<"v">> => 1, <<"tail">> => #{<<"v">> => 2}},
+    {ok, Desc} = rec_types:descriptor(n),
+    {ok, Io} = thrift_runtime_binary:encode(Desc, Value),
+    ?assertEqual({ok, Value, <<>>}, thrift_runtime_binary:decode(Desc, iolist_to_binary(Io))),
+    ok.
+
 loader_cycle(Config) ->
     CycleA = data_file(Config, "semantic/cycle_a.thrift"),
     ?assertMatch({error, {cycle, CycleA}}, thrift_generator_loader:load(CycleA)).
@@ -376,12 +410,16 @@ cross_module_include_qualifier(Config) ->
     ?assertEqual(<<"qualified_includee">>, IncludeeMod#tg_module.name),
 
     [Holder] = IncluderMod#tg_module.structs,
+    %% Both qualification spellings resolve to the defining module; the
+    %% original qualifier survives in the ref annotations (the emission
+    %% layer renders qualified spellings as remote aliases).
+    Source = fun(Name) -> #{?TG_REF_SOURCE => Name} end,
     ?assertEqual(
         [
-            {ref, <<"includee.Payload">>, #{}},
-            {ref, <<"includee.Color">>, #{}},
-            {ref, <<"includee.Stamp">>, #{}},
-            {ref, <<"qualified_includee.Payload">>, #{}}
+            {resolved_ref, <<"qualified_includee">>, <<"Payload">>, Source(<<"includee.Payload">>)},
+            {resolved_ref, <<"qualified_includee">>, <<"Color">>, Source(<<"includee.Color">>)},
+            {resolved_ref, <<"qualified_includee">>, <<"Stamp">>, Source(<<"includee.Stamp">>)},
+            {resolved_ref, <<"qualified_includee">>, <<"Payload">>, Source(<<"qualified_includee.Payload">>)}
         ],
         [F#tg_field.type || F <- Holder#tg_struct.fields]
     ),

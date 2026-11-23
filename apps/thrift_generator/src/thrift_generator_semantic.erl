@@ -18,12 +18,14 @@
 Semantic analysis: turns documents loaded by `thrift_generator_loader`
 into the validated `#tg_model{}` IR consumed by the code emitter.
 
-The pass numbers enum members and implicit field ids, resolves constant
-and enum references, merges inherited service functions and validates
-the result: duplicate names and field ids, union field requiredness,
-oneway function shapes, throw clauses pointing at exceptions,
-unresolved type references, typedef cycles and constant type
-mismatches. All errors are collected as `{File, Loc, Message}`
+The pass numbers enum members and implicit field ids, resolves type,
+constant and enum references, merges inherited service functions and
+validates the result: duplicate names and field ids, union field
+requiredness, oneway function shapes, throw clauses pointing at
+exceptions, unresolved type references, typedef cycles and constant
+type mismatches. Type references resolve once, to the module and name
+of their definition; inherited service functions keep the parent's
+resolved references. All errors are collected as `{File, Loc, Message}`
 triples before failing, where `Loc` is a line number or a
 `{Line, Column}` pair (whatever the error site knows).
 """.
@@ -43,10 +45,12 @@ triples before failing, where `Loc` is a line number or a
 
 -type sem_error() :: {File :: binary(), Loc :: loc(), Message :: binary()}.
 
-%% A resolved reference: which module the definition lives in, its name
-%% within that module and its kind.
+%% The resolution of one definition name during analysis: which module
+%% the definition lives in, its name within that module and its kind.
+%% (The model carries the public resolved_ref() shape from
+%% thrift_generator.hrl; this index entry is internal to the pass.)
 
--type resolved_ref() :: {Module :: binary(), Name :: binary(), def_kind()}.
+-type def_ref() :: {Module :: binary(), Name :: binary(), def_kind()}.
 
 %% Invocation-wide option axes of analyze/2 (mirrored by the generate
 %% and check frontends); every axis is optional and applies only where
@@ -282,6 +286,18 @@ enum_member_case(Name, lower) ->
 typedef_type_of(#thrift_generator_node{payload = #thrift_generator_typedef{type = T}}) -> T;
 typedef_type_of(_) -> skip.
 
+%% The typedef index serves the module itself and the modules analyzed
+%% after it: once a module's typedefs are resolved, its index entry holds
+%% the resolved bodies, so constant checking and throws validation follow
+%% typedef chains through resolved references instead of resolving the
+%% original spellings again. Modules not analyzed yet keep their parsed
+%% bodies (references into them fail validation anyway).
+
+-spec publish_typedefs([#tg_typedef{}], #ctx{}) -> #ctx{}.
+publish_typedefs(Typedefs, Ctx) ->
+    Resolved = #{T#tg_typedef.name => T#tg_typedef.type || T <- Typedefs},
+    Ctx#ctx{all_typedefs = (Ctx#ctx.all_typedefs)#{Ctx#ctx.module => Resolved}}.
+
 %%--------------------------------------------------------------------
 %% Module analysis
 %%--------------------------------------------------------------------
@@ -296,7 +312,8 @@ analyze_module(Loaded, Ctx00) ->
     {Structs, Ctx2} = lists:foldl(fun analyze_struct/2, {[], Ctx1}, Defs),
     {Enums, Ctx3} = lists:foldl(fun analyze_enum/2, {[], Ctx2}, Defs),
     {Typedefs, Ctx4} = lists:foldl(fun analyze_typedef/2, {[], Ctx3}, Defs),
-    {Consts, Ctx5} = lists:foldl(fun analyze_const/2, {[], Ctx4}, Defs),
+    Ctx4b = publish_typedefs(Typedefs, Ctx4),
+    {Consts, Ctx5} = lists:foldl(fun analyze_const/2, {[], Ctx4b}, Defs),
     {Services, Ctx6} = analyze_services(Defs, Ctx5),
     Ctx7 = check_typedef_cycles(Typedefs, Ctx6),
     Module =
@@ -632,7 +649,7 @@ analyze_fields([FieldNode | Rest], Kind, NextImplicit, Seen, Acc, Ctx0) ->
         #tg_field{
             id = Id,
             required = Required,
-            type = Type1,
+            type = resolve_model_type(Type1, Ctx3),
             name = FieldName,
             default = DefaultResolved,
             doc = FieldNode#thrift_generator_node.doc
@@ -776,7 +793,7 @@ analyze_typedef(Node, {Acc, Ctx}) ->
             Typedef =
                 #tg_typedef{
                     name = Name,
-                    type = apply_set_default(Type, Ctx1),
+                    type = resolve_model_type(apply_set_default(Type, Ctx1), Ctx1),
                     erl = typedef_default_annotation(Node#thrift_generator_node.annotations, Ctx2),
                     doc = Node#thrift_generator_node.doc,
                     line = Node#thrift_generator_node.line,
@@ -825,17 +842,35 @@ visit_typedef(Name, Loc, LocalTypedefs, Visiting, Ctx) ->
             err(Loc, "typedef cycle through ~ts", [Name], Ctx);
         _ ->
             case LocalTypedefs of
-                #{Name := #tg_typedef{type = {ref, Target, _}}} ->
-                    case is_local_name(Target) andalso maps:is_key(Target, LocalTypedefs) of
-                        true ->
+                #{Name := #tg_typedef{type = Type}} ->
+                    case typedef_chain_target(Type, Ctx#ctx.module, LocalTypedefs) of
+                        {ok, Target} ->
                             visit_typedef(Target, Loc, LocalTypedefs, Visiting#{Name => true}, Ctx);
-                        false ->
+                        error ->
                             Ctx
                     end;
                 _ ->
                     Ctx
             end
     end.
+
+%% The next link of a local typedef chain: a resolved reference counts
+%% only when it points back into the module being checked; anything else
+%% (base types, containers, cross-module references) ends the walk —
+%% includes are acyclic, so cycles can only form locally. Unresolvable
+%% references keep their raw spelling after a failed analysis, and a name
+%% that failed to resolve is never one of the module's typedefs, so the
+%% walk ends there exactly as it does for any non-reference body.
+
+-spec typedef_chain_target(resolved_thrift_type(), binary(), #{binary() => #tg_typedef{}}) ->
+    {ok, binary()} | error.
+typedef_chain_target({resolved_ref, Mod, Target, _}, Mod, LocalTypedefs) ->
+    case maps:is_key(Target, LocalTypedefs) of
+        true -> {ok, Target};
+        false -> error
+    end;
+typedef_chain_target(_NonRef, _Mod, _LocalTypedefs) ->
+    error.
 
 %% -- consts ----------------------------------------------------------
 
@@ -849,16 +884,17 @@ analyze_const(Node, {Acc, Ctx}) ->
             Ctx1 = validate_type(Type, Loc, Ctx),
             case resolve_value(Value, #{}, Ctx1) of
                 {ok, Resolved} ->
+                    TypeResolved = resolve_model_type(apply_set_default(Type, Ctx1), Ctx1),
                     Const =
                         #tg_const{
                             name = Name,
-                            type = apply_set_default(Type, Ctx1),
+                            type = TypeResolved,
                             value = Resolved,
                             doc = Node#thrift_generator_node.doc,
                             line = Node#thrift_generator_node.line,
                             col = Node#thrift_generator_node.col
                         },
-                    case check_value(Type, Resolved, Ctx1) of
+                    case check_value(TypeResolved, Resolved, Ctx1) of
                         ok ->
                             {[Const | Acc], Ctx1};
                         {error, Msg} ->
@@ -875,13 +911,20 @@ analyze_const(Node, {Acc, Ctx}) ->
 %% type. Int literals pass for double; list literals pass for set;
 %% local typedefs are expanded before matching.
 
--spec check_value(thrift_type(), const_value(), #ctx{}) -> ok | {error, binary()}.
-check_value({ref, Ref, _}, Value, Ctx) ->
+-spec check_value(thrift_type() | resolved_thrift_type(), const_value(), #ctx{}) -> ok | {error, binary()}.
+check_value({resolved_ref, Mod, Name, Ann}, Value, Ctx) ->
+    case maps:find(Name, maps:get(Mod, Ctx#ctx.all_typedefs, #{})) of
+        {ok, Target} ->
+            check_value(Target, Value, Ctx);
+        error ->
+            check_named_value(Mod, Name, Ann, Value, Ctx)
+    end;
+check_value({ref, Ref, Ann}, Value, Ctx) ->
     case local_typedef_target(Ref, Ctx) of
         {ok, Target} ->
             check_value(Target, Value, Ctx);
         error ->
-            check_named_value(Ref, Value, Ctx)
+            check_named_value(Ctx#ctx.module, Ref, Ann, Value, Ctx)
     end;
 check_value({base, bool, _}, Value, _Ctx) when is_boolean(Value) ->
     ok;
@@ -917,9 +960,9 @@ check_value(Type, Value, _Ctx) ->
 %% A named type that is not a (local) typedef: enum members arrive as
 %% binaries; struct/union/exception constants as map literals.
 
--spec check_named_value(binary(), const_value(), #ctx{}) -> ok | {error, binary()}.
-check_named_value(Ref, Value, Ctx) when is_binary(Value) ->
-    case enum_members(Ref, Ctx) of
+-spec check_named_value(binary(), binary(), annotations(), const_value(), #ctx{}) -> ok | {error, binary()}.
+check_named_value(Mod, Name, Ann, Value, Ctx) when is_binary(Value) ->
+    case enum_members(Mod, Name, Ctx) of
         {ok, Members} ->
             %% Resolved constants and defaults carry the surfaced member
             %% name (post erl.enum_case), so membership checks the same
@@ -929,22 +972,22 @@ check_named_value(Ref, Value, Ctx) when is_binary(Value) ->
                 true ->
                     ok;
                 false ->
-                    {error, format("~ts is not a member of enum ~ts", [Value, Ref])}
+                    {error, format("~ts is not a member of enum ~ts", [Value, ref_spelling(Name, Ann)])}
             end;
         error ->
-            {error, format("value ~ts does not match non-enum type ~ts", [Value, Ref])}
+            {error, format("value ~ts does not match non-enum type ~ts", [Value, ref_spelling(Name, Ann)])}
     end;
-check_named_value(Ref, {map, _Pairs}, Ctx) ->
-    case resolve_type_ref(Ref, Ctx) of
-        {ok, {_, _, Kind}} when Kind =:= struct; Kind =:= union; Kind =:= exception ->
+check_named_value(Mod, Name, Ann, {map, _Pairs}, Ctx) ->
+    case maps:get(Mod, Ctx#ctx.all_defs, #{}) of
+        #{Name := Kind} when Kind =:= struct; Kind =:= union; Kind =:= exception ->
             ok;
-        {ok, {_, _, Kind}} ->
-            {error, format("map literal given for ~ts of kind ~w", [Ref, Kind])};
-        error ->
-            {error, format("unknown type ~ts", [Ref])}
+        #{Name := Kind} ->
+            {error, format("map literal given for ~ts of kind ~w", [ref_spelling(Name, Ann), Kind])};
+        _ ->
+            {error, format("unknown type ~ts", [ref_spelling(Name, Ann)])}
     end;
-check_named_value(Ref, Value, _Ctx) ->
-    {error, format("value ~tp does not match type ~ts", [Value, Ref])}.
+check_named_value(_Mod, Name, Ann, Value, _Ctx) ->
+    {error, format("value ~tp does not match type ~ts", [Value, ref_spelling(Name, Ann)])}.
 
 -spec check_each(thrift_type(), [const_value()], #ctx{}) -> ok | {error, binary()}.
 check_each(_Type, [], _Ctx) ->
@@ -1112,7 +1155,7 @@ analyze_functions(Nodes, Ctx) ->
                     #tg_function{
                         name = Name,
                         oneway = Oneway,
-                        return_type = apply_set_default(ReturnType, C1),
+                        return_type = resolve_model_type(apply_set_default(ReturnType, C1), C1),
                         params = ParamsResolved,
                         throws = ThrowsResolved,
                         doc = Node#thrift_generator_node.doc
@@ -1124,7 +1167,9 @@ analyze_functions(Nodes, Ctx) ->
         ),
     {lists:reverse(Fns), CtxEnd}.
 
-%% Declared throw fields must reference exceptions.
+%% Declared throw fields must reference exceptions; the field type is
+%% already resolved, so the definition index answers the kind directly and
+%% typedef aliases are followed through the resolved typedef index.
 
 -spec validate_throws([#tg_field{}], loc(), #ctx{}) -> #ctx{}.
 validate_throws(Fields, Loc, Ctx) ->
@@ -1134,13 +1179,28 @@ validate_throws(Fields, Loc, Ctx) ->
             %% (0.18, THRIFT-5669): the flag has no wire meaning there.
             (#tg_field{name = Name, required = required}, C) ->
                 err(Loc, "throw field ~ts cannot be required", [Name], C);
-            (#tg_field{type = {ref, Ref, _}}, C) ->
-                case throws_ref_kind(Ref, #{}, C) of
-                    {ok, exception} ->
+            (#tg_field{type = {resolved_ref, Mod, Name, Ann}}, C) ->
+                case maps:get(Mod, C#ctx.all_defs, #{}) of
+                    #{Name := exception} ->
                         C;
-                    {ok, not_exception} ->
-                        err(Loc, "throw field must be an exception, got ~ts", [Ref], C);
-                    error ->
+                    #{Name := typedef} ->
+                        case typedef_ref_kind(Mod, Name, #{}, C) of
+                            {ok, exception} ->
+                                C;
+                            {ok, not_exception} ->
+                                err(
+                                    Loc,
+                                    "throw field must be an exception, got ~ts",
+                                    [ref_spelling(Name, Ann)],
+                                    C
+                                );
+                            error ->
+                                C
+                        end;
+                    #{Name := _Other} ->
+                        err(Loc, "throw field must be an exception, got ~ts", [ref_spelling(Name, Ann)], C);
+                    _ ->
+                        %% unknown type: validate_type reported it already
                         C
                 end;
             (_, C) ->
@@ -1151,21 +1211,7 @@ validate_throws(Fields, Loc, Ctx) ->
     ).
 
 %% Throws validation follows typedef aliases to their terminal definition
-%% kind. The semantic field keeps the alias; only this check resolves it.
-
--spec throws_ref_kind(binary(), #{{binary(), binary()} => true}, #ctx{}) ->
-    {ok, exception | not_exception} | error.
-throws_ref_kind(Name, Visited, Ctx) ->
-    case resolve_type_ref(Name, Ctx) of
-        {ok, {_, _, exception}} ->
-            {ok, exception};
-        {ok, {Module, Name, typedef}} ->
-            typedef_ref_kind(Module, Name, Visited, Ctx);
-        {ok, {_, _, _}} ->
-            {ok, not_exception};
-        error ->
-            error
-    end.
+%% kind. The semantic field keeps the alias; only this check expands it.
 
 -spec typedef_ref_kind(binary(), binary(), #{{binary(), binary()} => true}, #ctx{}) ->
     {ok, exception | not_exception} | error.
@@ -1175,18 +1221,74 @@ typedef_ref_kind(Module, Name, Visited, Ctx) ->
             error;
         _ ->
             case maps:get(Module, Ctx#ctx.all_typedefs, #{}) of
-                #{Name := {ref, Target, _}} ->
-                    throws_ref_kind(Target, Visited#{{Module, Name} => true}, Ctx#ctx{module = Module});
-                #{Name := _NonRef} ->
-                    {ok, not_exception};
+                #{Name := Body} ->
+                    typedef_body_kind(Body, Visited#{{Module, Name} => true}, Ctx);
                 _ ->
                     error
             end
     end.
 
+-spec typedef_body_kind(thrift_type() | resolved_thrift_type(), #{{binary(), binary()} => true}, #ctx{}) ->
+    {ok, exception | not_exception} | error.
+typedef_body_kind({resolved_ref, Mod, Name, _}, Visited, Ctx) ->
+    case maps:get(Mod, Ctx#ctx.all_defs, #{}) of
+        #{Name := exception} ->
+            {ok, exception};
+        #{Name := typedef} ->
+            typedef_ref_kind(Mod, Name, Visited, Ctx);
+        #{Name := _Other} ->
+            {ok, not_exception};
+        _ ->
+            error
+    end;
+typedef_body_kind(_NonRef, _Visited, _Ctx) ->
+    {ok, not_exception}.
+
+%% The diagnostic spelling of a resolved reference: the original
+%% qualified spelling when there was one, the local name otherwise.
+
+-spec ref_spelling(binary(), annotations()) -> binary().
+ref_spelling(Name, Ann) ->
+    maps:get(?TG_REF_SOURCE, Ann, Name).
+
 %%--------------------------------------------------------------------
 %% Reference resolution and validation
 %%--------------------------------------------------------------------
+
+%% Resolves every {ref, Name, Ann} inside a validated type to a
+%% {resolved_ref, Module, LocalName, Ann} naming the defining module.
+%% Runs after validate_type/3: unresolvable references keep their raw
+%% spelling (only successful models guarantee resolved refs), and no new
+%% errors are produced here. Qualified spellings survive under
+%% ?TG_REF_SOURCE — the emission layer renders them as remote aliases,
+%% where plain spellings keep the legacy name-based rendering inherited
+%% service functions rely on.
+
+-spec resolve_model_type(thrift_type() | void, #ctx{}) -> resolved_thrift_type() | void.
+resolve_model_type({ref, Name, Ann}, Ctx) ->
+    case resolve_type_ref(Name, Ctx) of
+        {ok, {Module, Local, _Kind}} ->
+            {resolved_ref, Module, Local, ref_annotations(Name, Ann)};
+        error ->
+            {ref, Name, Ann}
+    end;
+resolve_model_type({list, Elem, Ann}, Ctx) ->
+    {list, resolve_model_type(Elem, Ctx), Ann};
+resolve_model_type({set, Elem, Ann}, Ctx) ->
+    {set, resolve_model_type(Elem, Ctx), Ann};
+resolve_model_type({map, Key, Value, Ann}, Ctx) ->
+    {map, resolve_model_type(Key, Ctx), resolve_model_type(Value, Ctx), Ann};
+resolve_model_type(Type, _Ctx) ->
+    Type.
+
+-spec ref_annotations(binary(), annotations()) -> annotations().
+ref_annotations(Name, Ann) ->
+    case is_local_name(Name) of
+        true ->
+            Ann;
+        false ->
+            Ann#{?TG_REF_SOURCE => Name}
+    end.
 
 %% Validates every {ref, Name, _} inside a type (recursing through
 %% containers) against the local module and every loaded module.
@@ -1370,7 +1472,7 @@ apply_set_default(Type, _Ctx) ->
 %% A name without dots resolves locally; a dotted name resolves as
 %% Module.Name across every loaded module.
 
--spec resolve_type_ref(binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+-spec resolve_type_ref(binary(), #ctx{}) -> {ok, def_ref()} | error.
 resolve_type_ref(Name, Ctx) ->
     case is_local_name(Name) of
         true ->
@@ -1395,14 +1497,14 @@ resolve_type_ref(Name, Ctx) ->
 %% The Apache qualification spelling: the qualifier is the included
 %% file's base name, which need not match the target file's module name.
 
--spec include_type_ref(binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+-spec include_type_ref(binary(), #ctx{}) -> {ok, def_ref()} | error.
 include_type_ref(Name, Ctx) ->
     case split_ref(Name) of
         {Qualifier, Local} -> include_type_ref(Qualifier, Local, Ctx);
         error -> error
     end.
 
--spec include_type_ref(binary(), binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+-spec include_type_ref(binary(), binary(), #ctx{}) -> {ok, def_ref()} | error.
 include_type_ref(Qualifier, Local, Ctx) ->
     case Ctx#ctx.include_modules of
         #{Qualifier := Module} -> module_ref(Module, Local, Ctx);
@@ -1435,7 +1537,7 @@ split_ref(Name) ->
         [Name] -> error
     end.
 
--spec module_ref(binary(), binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+-spec module_ref(binary(), binary(), #ctx{}) -> {ok, def_ref()} | error.
 module_ref(Module, Local, Ctx) ->
     case maps:get(Module, Ctx#ctx.all_defs, #{}) of
         #{Local := Kind} -> {ok, {Module, Local, Kind}};
@@ -1444,7 +1546,7 @@ module_ref(Module, Local, Ctx) ->
 
 %% Resolves `Name` as `Module.Name`: the part after the prefix must be
 %% a definition of the module.
--spec dotted_ref(binary(), binary(), #ctx{}) -> {ok, resolved_ref()} | error.
+-spec dotted_ref(binary(), binary(), #ctx{}) -> {ok, def_ref()} | error.
 dotted_ref(Name, Module, Ctx) ->
     case strip_prefix(Name, Module) of
         error ->
@@ -1456,10 +1558,10 @@ dotted_ref(Name, Module, Ctx) ->
             end
     end.
 
--spec enum_members(binary(), #ctx{}) -> {ok, [{binary(), binary()}]} | error.
-enum_members(Ref, Ctx) ->
-    case resolve_type_ref(Ref, Ctx) of
-        {ok, {Module, Name, enum}} ->
+-spec enum_members(binary(), binary(), #ctx{}) -> {ok, [{binary(), binary()}]} | error.
+enum_members(Module, Name, Ctx) ->
+    case maps:get(Module, Ctx#ctx.all_defs, #{}) of
+        #{Name := enum} ->
             {ok, maps:get(Name, maps:get(Module, Ctx#ctx.all_enum_members, #{}), [])};
         _ ->
             error

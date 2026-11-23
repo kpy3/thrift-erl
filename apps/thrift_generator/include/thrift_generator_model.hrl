@@ -23,10 +23,22 @@
 %% (see thrift_generator.hrl for the shared vocabulary: thrift_type(),
 %% const_value(), erl_annotations(), doc(), requiredness()).
 %%
-%% Type references stay as {ref, Name, Ann} tuples; the semantic pass
-%% validates that every reference resolves within its module or one of
-%% its includes, but does not expand them. Enum members in default
-%% values and constants resolve to member name binaries.
+%% Type references are resolved during analysis: every typed position
+%% carries resolved_thrift_type() values whose {resolved_ref, ModuleKey,
+%% LocalName, Ann} nodes name the defining module directly, so emission
+%% needs no second resolution pass. Enum members in default values and
+%% constants resolve to member name binaries.
+%% --------------------------------------------------------------------
+
+%% Internal annotation key of a resolved reference that was written with a
+%% qualified spelling (`includee.Payload'): the value is the original
+%% `Qualifier.Name' binary. The emission layer renders qualified spellings
+%% as remote aliases of the resolved module, while plain spellings keep
+%% their legacy name-based rendering (inherited service functions resolve
+%% the bare name against the emitting module). The key contains a dash,
+%% which IDL annotation keys (identifiers) can never carry, so a written
+%% annotation cannot collide with it.
+-define(TG_REF_SOURCE, <<"resolved-source">>).
 %% --------------------------------------------------------------------
 
 %% One struct/union/exception member field. Fields written without an
@@ -35,7 +47,7 @@
 -record(tg_field, {
     id :: integer(),
     required :: requiredness(),
-    type :: thrift_type(),
+    type :: resolved_thrift_type(),
     name :: binary(),
     default :: const_value() | undefined,
     doc = undefined :: doc()
@@ -69,7 +81,7 @@
 
 -record(tg_typedef, {
     name :: binary(),
-    type :: thrift_type(),
+    type :: resolved_thrift_type(),
     erl = #{} :: erl_annotations(),
     doc = undefined :: doc(),
     line = 0 :: non_neg_integer(),
@@ -81,7 +93,7 @@
 %% referenced literal or enum member name).
 -record(tg_const, {
     name :: binary(),
-    type :: thrift_type(),
+    type :: resolved_thrift_type(),
     value :: const_value(),
     doc = undefined :: doc(),
     line = 0 :: non_neg_integer(),
@@ -92,7 +104,7 @@
 -record(tg_function, {
     name :: binary(),
     oneway :: boolean(),
-    return_type :: thrift_type() | void,
+    return_type :: resolved_thrift_type() | void,
     params :: [#tg_field{}],
     throws :: [#tg_field{}],
     doc = undefined :: doc()
@@ -136,8 +148,8 @@
 
 %% The emitter's cross-module resolution context: the loaded modules by
 %% name, the emitted types-module atoms, and the module whose
-%% definitions are being emitted (reference resolution scope). Shared by
-%% the core emitter and the service emitter.
+%% definitions are being emitted (the scope reference targets resolve
+%% against). Shared by the core emitter and the service emitter.
 
 -type module_key() :: binary().
 
@@ -146,9 +158,6 @@
     modules :: #{module_key() => #tg_module{}},
     %% binary module name -> emitted types module atom
     type_modules :: #{module_key() => module()},
-    %% include basename (the Apache qualification spelling) -> binary
-    %% module name
-    include_modules = #{} :: #{module_key() => module_key()},
     current :: undefined | module_key(),
     %% hrl context: type references qualify with the defining module —
     %% the hrl carries no type definitions, and remote types compile at

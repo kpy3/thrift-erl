@@ -137,7 +137,7 @@ ir_local_struct_descriptor_test() ->
     Ctx = model_ctx(Model),
     ?assertEqual(
         {struct, {ref, t_types, <<"Inner">>}},
-        thrift_generator_ir:type_desc({ref, <<"Inner">>, #{}}, Ctx)
+        thrift_generator_ir:type_desc({resolved_ref, <<"t">>, <<"Inner">>, #{}}, Ctx)
     ),
     ?assertEqual(demo_widgets_types, thrift_generator_names:types_module_atom(<<"demo.widgets">>)),
     ok.

@@ -109,34 +109,12 @@ module_triplets(Model) ->
                 M#tg_module.name => thrift_generator_names:types_module_atom(M#tg_module.name)
              || M <- Model#tg_model.modules
             },
-        include_modules = include_module_index(Model#tg_model.modules),
         current = undefined
     },
     lists:append([
         module_sources(Mod, Ctx0#ectx{current = Mod#tg_module.name})
      || Mod <- Model#tg_model.modules
     ]).
-
-%% References from other modules qualify either with the target's module
-%% key (the erl namespace value) or — the Apache Thrift spelling — with
-%% the included file's base name, which need not match it. Two files
-%% sharing a base name leave the first module in the index: such a
-%% reference is ambiguous in Apache Thrift too, and the module-key
-%% spelling still resolves exactly.
-
--spec include_module_index([#tg_module{}]) -> #{module_key() => module_key()}.
-include_module_index(Modules) ->
-    lists:foldl(
-        fun(M, Acc) ->
-            Qualifier = thrift_generator_loader:include_qualifier(M#tg_module.path),
-            case Acc of
-                #{Qualifier := _} -> Acc;
-                _ -> Acc#{Qualifier => M#tg_module.name}
-            end
-        end,
-        #{},
-        Modules
-    ).
 
 -spec module_sources(#tg_module{}, #ectx{}) ->
     [{module(), erl_syntax:forms(), erl_syntax:forms() | undefined}].
@@ -1105,7 +1083,7 @@ const_name(Mod, C) ->
 %% Constant spec types without a resolution context: refs (enum
 %% members) surface as term, containers mirror erlang_type/2.
 
--spec const_spec_type(thrift_type()) -> erl_syntax:syntaxTree().
+-spec const_spec_type(resolved_thrift_type()) -> erl_syntax:syntaxTree().
 const_spec_type({base, B, _}) ->
     thrift_generator_emitter_syntax:base_erlang_type(B);
 const_spec_type({list, T, _}) ->
@@ -1117,7 +1095,7 @@ const_spec_type({map, K, V, _}) ->
     {type, Anno, map, [
         {type, Anno, map_field_assoc, [const_spec_type(K), const_spec_type(V)]}
     ]};
-const_spec_type({ref, _, _}) ->
+const_spec_type({resolved_ref, _, _, _}) ->
     thrift_generator_emitter_syntax:raw_type(term).
 
 %%--------------------------------------------------------------------

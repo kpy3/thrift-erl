@@ -2107,23 +2107,12 @@ nested_mode(TypesMod, Local, Ctx) ->
             end
     end.
 
+%% The descriptor carries the generated types-module atom, where the
+%% module index is keyed by module name: find the owner by its derived
+%% types-module name.
+
+-spec nested_module(module(), #ectx{}) -> #tg_module{} | undefined.
 nested_module(TypesMod, Ctx) ->
-    case maps:get(TypesMod, Ctx#ectx.modules, undefined) of
-        undefined ->
-            nested_include_module(TypesMod, Ctx);
-        M ->
-            M
-    end.
-
-nested_include_module(TypesMod, Ctx) ->
-    case maps:get(TypesMod, Ctx#ectx.include_modules, undefined) of
-        undefined ->
-            find_module_by_types_name(TypesMod, Ctx);
-        Key ->
-            maps:get(Key, Ctx#ectx.modules, undefined)
-    end.
-
-find_module_by_types_name(TypesMod, Ctx) ->
     Matches = [
         M
      || M <- maps:values(Ctx#ectx.modules),
