@@ -570,18 +570,20 @@ wire_result(Result, Info, #state{}) ->
 %% either shape and were handled before this runs.
 
 -spec reply_value(term(), thrift_runtime_service:function_info()) -> {ok, term()} | error.
-reply_value(ok, Info) ->
-    case maps:get(reply, Info, undefined) of
-        undefined -> {ok, undefined};
-        _ReplyType -> error
-    end;
-reply_value({ok, Value}, Info) ->
-    case maps:get(reply, Info, undefined) of
-        undefined -> error;
-        _ReplyType -> {ok, Value}
-    end;
-reply_value(_WireResult, _Info) ->
-    error.
+reply_value(Result, Info) ->
+    ReplyType = maps:get(reply, Info, undefined),
+    case Result of
+        ok when ReplyType =:= undefined ->
+            {ok, undefined};
+        ok ->
+            error;
+        {ok, _Value} when ReplyType =:= undefined ->
+            error;
+        {ok, Value} ->
+            {ok, Value};
+        _Other ->
+            error
+    end.
 
 %% Answers a wire-valid result with the reply; an unsupported one is
 %% logged and emitted as a `handler_error', then answered with

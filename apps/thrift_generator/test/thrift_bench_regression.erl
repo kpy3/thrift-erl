@@ -55,6 +55,9 @@ and cleanup.
 -export([main/1, median/1, evaluate/2, cases/1, schema_case/4, schema_cases/1]).
 -export([repeat/3, encode/1, decode/1, call/1, to_wire/1, from_wire/1]).
 -export([decode_twopass/1, decode_onepass/1, encode_twopass/1, encode_onepass/1, onepass_cases/1]).
+%% Internal test seam for the resolved-ref rename walk (models can park
+%% references in map keys, so the walk rewrites keys and values alike).
+-export([rewrite_resolved_refs/2]).
 -export_type([sample/0, evaluation/0]).
 
 -type protocol_name() :: binary | compact | json.
@@ -171,7 +174,12 @@ rewrite_resolved_refs(Tuple, RefMap) when is_tuple(Tuple) ->
 rewrite_resolved_refs(List, RefMap) when is_list(List) ->
     [rewrite_resolved_refs(E, RefMap) || E <- List];
 rewrite_resolved_refs(Map, RefMap) when is_map(Map) ->
-    maps:map(fun(_Key, Value) -> rewrite_resolved_refs(Value, RefMap) end, Map);
+    %% References can sit in keys as well as values, so the walk is
+    %% shape-agnostic over both sides of every pair.
+    maps:from_list([
+        {rewrite_resolved_refs(K, RefMap), rewrite_resolved_refs(V, RefMap)}
+     || {K, V} <- maps:to_list(Map)
+    ]);
 rewrite_resolved_refs(Other, _RefMap) ->
     Other.
 

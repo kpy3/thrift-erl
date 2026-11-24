@@ -169,7 +169,24 @@ answers `{error, {unknown_option, Key}}`; an invalid value answers
     {ok, thrift_generator:generate_opts()}
     | {error, {unknown_option, atom()} | {bad_option, {atom(), term(), [atom()]}}}.
 thrift_gen_opts(Opts) ->
-    thrift_generator_options:normalize(maps:from_list(proplists:delete(files, Opts))).
+    thrift_generator_options:normalize(proplist_to_map(proplists:delete(files, Opts))).
+
+%% First occurrence wins, exactly like the proplists lookup the provider
+%% answered before the config became a map: a later duplicate neither
+%% overrides an earlier value nor re-validates it.
+
+-spec proplist_to_map(proplists:proplist()) -> map().
+proplist_to_map(Proplist) ->
+    lists:foldl(
+        fun({Key, Value}, Acc) ->
+            case maps:is_key(Key, Acc) of
+                true -> Acc;
+                false -> Acc#{Key => Value}
+            end
+        end,
+        #{},
+        Proplist
+    ).
 
 -spec generate(file:filename_all(), thrift_generator:generate_opts()) -> ok.
 generate(File, GenOpts) ->

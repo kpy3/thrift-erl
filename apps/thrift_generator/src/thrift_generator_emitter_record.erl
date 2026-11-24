@@ -68,7 +68,7 @@ field_type_node(F, Ctx) ->
 %% sets/ordset impl the record default builds the declared collection
 %% instead, so a constructed record matches the field's emitted type.
 
--spec set_default_expr(thrift_type(), erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
+-spec set_default_expr(resolved_thrift_type(), erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
 set_default_expr({set, _, Ann}, Default) ->
     case thrift_generator_ir:set_impl(Ann) of
         list ->

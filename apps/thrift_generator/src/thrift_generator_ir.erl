@@ -29,7 +29,7 @@ the Erlang type syntax for specs (`erlang_type/2`), the representation
 predicates (`has_record/1`, `struct_type/1`, `sum_mode/1`,
 `native_mode/1`, `mode/1`, `map_key_type/1`) and the shared definition
 naming (`field_atom/1`, `record_tag_of/2`, `enum_desc/1`,
-`section_label/1`). Keeping the lowering here lets the codec, service
+`section_label/1`, `type_alias/1`). Keeping the lowering here lets the codec, service
 and representation emitters share one resolution algorithm instead of
 reaching into the core emitter.
 """.
@@ -53,7 +53,8 @@ reaching into the core emitter.
     set_impl/1,
     enum_desc/1,
     enum_case/1,
-    enum_atom/2
+    enum_atom/2,
+    type_alias/1
 ]).
 
 -include("thrift_generator.hrl").
@@ -118,7 +119,7 @@ set_impl(Ann) ->
     end.
 
 -spec find_def(#tg_module{} | undefined, binary()) ->
-    {struct, #tg_struct{}} | {enum, #tg_enum{}} | {typedef, thrift_type()} | error.
+    {struct, #tg_struct{}} | {enum, #tg_enum{}} | {typedef, resolved_thrift_type()} | error.
 find_def(undefined, _Name) ->
     error;
 find_def(Module, Name) ->
@@ -369,7 +370,7 @@ erlang_type({resolved_ref, ModKey, Local, Ann}, Ctx) ->
             end
     end.
 
--spec list_type(thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
+-spec list_type(resolved_thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
 list_type(T, Ctx) ->
     {type, erl_anno:new(0), list, [erlang_type(T, Ctx)]}.
 
@@ -418,6 +419,7 @@ def_alias(Module, Local) ->
             error
     end.
 
+-doc false.
 -spec type_alias(binary()) -> atom().
 type_alias(Name) ->
     binary_to_atom(Name, utf8).

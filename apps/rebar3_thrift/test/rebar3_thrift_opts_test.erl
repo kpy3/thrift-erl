@@ -31,7 +31,8 @@
     unknown_option_test/0,
     bad_out_dir_test/0,
     clean_out_dir_test/0,
-    bad_opt_rendering_test/0
+    bad_opt_rendering_test/0,
+    duplicate_keys_first_wins_test/0
 ]).
 
 defaults_test() ->
@@ -150,7 +151,7 @@ clean_out_dir_test() ->
     %% the shared reason renders through the same formatter the command
     %% path uses
     ?assertEqual(
-        "{bad_option,{out_dir,42,[string,binary]}}",
+        "invalid value for out_dir: 42 (allowed: string, binary)",
         unicode:characters_to_list(
             rebar3_thrift_clean:format_error({bad_option, {out_dir, 42, [string, binary]}})
         )
@@ -162,13 +163,29 @@ clean_out_dir_test() ->
 
 bad_opt_rendering_test() ->
     ?assertEqual(
-        "{bad_option,{repr,\"map\",[record,map,native]}}",
+        "invalid value for repr: \"map\" (allowed: record, map, native)",
         unicode:characters_to_list(
             rebar3_thrift:format_error({bad_option, {repr, "map", [record, map, native]}})
         )
     ),
     ?assertEqual(
-        "{unknown_option,reper}",
+        "unknown option reper",
         unicode:characters_to_list(rebar3_thrift:format_error({unknown_option, reper}))
+    ),
+    ok.
+
+%% A duplicate key keeps the first occurrence, exactly like the
+%% proplists lookup the provider answered before the map conversion: a
+%% later value never overrides an earlier one (and a bad later value
+%% must not fail a config the first entry already settled).
+
+duplicate_keys_first_wins_test() ->
+    ?assertMatch(
+        {ok, #{repr := map}},
+        rebar3_thrift:thrift_gen_opts([{repr, map}, {repr, native}])
+    ),
+    ?assertMatch(
+        {ok, #{repr := native}},
+        rebar3_thrift:thrift_gen_opts([{repr, native}, {repr, "bad"}])
     ),
     ok.

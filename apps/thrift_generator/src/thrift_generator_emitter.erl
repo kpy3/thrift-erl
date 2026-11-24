@@ -195,16 +195,12 @@ types_forms(Mod, Ctx) ->
 -spec type_alias_entries(#tg_module{}) -> [{atom(), 0}].
 type_alias_entries(Mod) ->
     [
-        {type_alias(S#tg_struct.name), 0}
+        {thrift_generator_ir:type_alias(S#tg_struct.name), 0}
      || S <- Mod#tg_module.structs,
         not thrift_generator_ir:native_mode(S)
     ] ++
-        [{type_alias(E#tg_enum.name), 0} || E <- Mod#tg_module.enums] ++
-        [{type_alias(T#tg_typedef.name), 0} || T <- Mod#tg_module.typedefs].
-
--spec type_alias(binary()) -> atom().
-type_alias(Name) ->
-    binary_to_atom(Name, utf8).
+        [{thrift_generator_ir:type_alias(E#tg_enum.name), 0} || E <- Mod#tg_module.enums] ++
+        [{thrift_generator_ir:type_alias(T#tg_typedef.name), 0} || T <- Mod#tg_module.typedefs].
 
 %% Per struct/union/exception section: the record declaration (record
 %% mode) and the exported alias — the record itself, the map shape or
@@ -229,7 +225,7 @@ struct_type_one(S, Prefix, Ctx) ->
     AliasForm =
         case alias_type_node(S, Ctx) of
             undefined -> [];
-            Node -> [{attribute, Anno, type, {type_alias(S#tg_struct.name), Node, []}}]
+            Node -> [{attribute, Anno, type, {thrift_generator_ir:type_alias(S#tg_struct.name), Node, []}}]
         end,
     RecordForm ++ AliasForm.
 
@@ -306,7 +302,11 @@ typedef_one(T, Ctx) ->
         end,
     [
         {attribute, Anno, Keyword,
-            {type_alias(T#tg_typedef.name), thrift_generator_ir:erlang_type(T#tg_typedef.type, Ctx), []}}
+            {
+                thrift_generator_ir:type_alias(T#tg_typedef.name),
+                thrift_generator_ir:erlang_type(T#tg_typedef.type, Ctx),
+                []
+            }}
     ].
 
 %%--------------------------------------------------------------------
@@ -486,7 +486,7 @@ facade_default_repr(S) ->
 facade_default_type(S) ->
     case thrift_generator_ir:native_mode(S) of
         true -> thrift_generator_emitter_syntax:term_type();
-        false -> thrift_generator_emitter_syntax:user_type(type_alias(S#tg_struct.name))
+        false -> thrift_generator_emitter_syntax:user_type(thrift_generator_ir:type_alias(S#tg_struct.name))
     end.
 
 %% A literal atom type node (`inner') for the overloaded facade specs.
@@ -909,7 +909,7 @@ struct_ref(S, Ctx) ->
 
 -spec value_type(#tg_struct{}) -> erl_syntax:syntaxTree().
 value_type(S) ->
-    Alias = thrift_generator_emitter_syntax:user_type(type_alias(S#tg_struct.name)),
+    Alias = thrift_generator_emitter_syntax:user_type(thrift_generator_ir:type_alias(S#tg_struct.name)),
     case thrift_generator_ir:mode(S) of
         record ->
             {type, erl_anno:new(0), union, [Alias, thrift_generator_emitter_syntax:raw_type(map)]};
@@ -943,7 +943,8 @@ enum_helper_forms(Mod) ->
     lists:append([
         [thrift_generator_emitter_syntax:section_form(thrift_generator_ir:section_label(E))] ++
             [
-                {attribute, erl_anno:new(0), type, {type_alias(E#tg_enum.name), enum_type_node(E), []}}
+                {attribute, erl_anno:new(0), type,
+                    {thrift_generator_ir:type_alias(E#tg_enum.name), enum_type_node(E), []}}
             ] ++
             enum_helper_one(
                 E,

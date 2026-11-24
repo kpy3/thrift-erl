@@ -2068,7 +2068,16 @@ generated_handler_result_contract(Config) ->
     {ok, RawSrc} = file:read_file(filename:join(PrivDir, "result_contract_svc_handler.erl")),
     Src = doc_text(RawSrc),
     ?assertMatch({match, _}, re:run(Src, <<"Handler callback for ping[\\s\\S]*?answer `ok`">>)),
-    ?assertMatch({match, _}, re:run(Src, <<"Handler callback for add[\\s\\S]*?answers `{ok, Value}`">>)),
+    ?assertMatch(
+        {match, _},
+        re:run(
+            Src,
+            <<
+                "Handler callback for add[\\s\\S]*?answers `{ok, Value}`"
+                "[\\s\\S]*?`{error, {exception, ...}}`"
+            >>
+        )
+    ),
     ?assertMatch(
         {match, _},
         re:run(Src, <<"Handler callback for the oneway poke[\\s\\S]*?answer `ok`">>)
@@ -2109,7 +2118,7 @@ doc_text(Source) ->
 
 -spec standalone_generate_check_clean(ct:config()) -> ok.
 standalone_generate_check_clean(Config) ->
-    Escript = build_prod_escript(),
+    Escript = build_prod_escript(Config),
     Priv = proplists:get_value(priv_dir, Config),
     Work = filename:join(Priv, "cli_work"),
     Out = filename:join(Work, "src"),
@@ -2173,21 +2182,45 @@ standalone_generate_check_clean(Config) ->
 %% Builds _build/prod/bin/thrift_generator from the repo root and
 %% returns its path. Slow on a cold build — this case is the real-CLI
 %% acceptance scenario, so it pays the escriptize cost on purpose.
-build_prod_escript() ->
+build_prod_escript(Config) ->
     Rebar3 =
         case os:find_executable("rebar3") of
             false -> ct:fail("rebar3 not found on PATH");
             Path -> Path
         end,
-    Root = repo_root(),
+    Root = repo_root(Config),
     {0, _} = run_cli(Rebar3, ["as", "prod", "escriptize"], Root),
     filename:join(Root, "_build/prod/bin/thrift_generator").
 
-%% The suite runs from _build/test/lib/thrift_generator: four levels up
-%% is the repo root (the umbrella's _build dir sits right there).
-repo_root() ->
-    LibDir = code:lib_dir(thrift_generator),
-    filename:dirname(filename:dirname(filename:dirname(filename:dirname(LibDir)))).
+%% The repo root is derived by walking up from the suite's CT data dir
+%% (under the test profile's _build) to the first directory that looks
+%% like the umbrella checkout — rebar.config, apps/ and _build/ together.
+%% No fixed hop count: a layout surprise fails loudly here instead of
+%% building in some unrelated directory.
+
+-spec repo_root(ct:config()) -> file:filename().
+repo_root(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    case find_repo_root(filename:split(DataDir)) of
+        {ok, Root} ->
+            Root;
+        error ->
+            ct:fail({repo_root_not_found, DataDir})
+    end.
+
+find_repo_root([]) ->
+    error;
+find_repo_root(Path) ->
+    case
+        filelib:is_file(filename:join(Path ++ ["rebar.config"])) andalso
+            filelib:is_dir(filename:join(Path ++ ["apps"])) andalso
+            filelib:is_dir(filename:join(Path ++ ["_build"]))
+    of
+        true ->
+            {ok, filename:join(Path)};
+        false ->
+            find_repo_root(lists:droplast(Path))
+    end.
 
 %% Runs the CLI (or any executable) with the given args in Dir; returns
 %% the exit status and the merged stdout/stderr output.

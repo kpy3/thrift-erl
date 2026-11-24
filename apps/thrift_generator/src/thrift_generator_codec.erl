@@ -905,7 +905,7 @@ dec_string_form() ->
 %% Wire vocabulary
 %%--------------------------------------------------------------------
 
--spec wtype(thrift_type(), #ectx{}) -> wire_type().
+-spec wtype(resolved_thrift_type(), #ectx{}) -> wire_type().
 wtype(Type, Ctx) ->
     thrift_generator_ir:type_desc(Type, Ctx).
 

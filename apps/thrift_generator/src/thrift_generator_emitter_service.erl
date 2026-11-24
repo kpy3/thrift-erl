@@ -274,7 +274,9 @@ callback_doc(F) ->
                             "Handler callback for ~ts: called as"
                             " `Handler:~ts(Args...)` in declaration order;"
                             " answers `{ok, Value}` with the reply value"
-                            " — a `thrift_runtime_service:handler_result()`.",
+                            " — a `thrift_runtime_service:handler_result()`;"
+                            " a declared exception is still"
+                            " `{error, {exception, ...}}`.",
                             [Name, Name]
                         )
                     )
