@@ -30,6 +30,7 @@
     reject_reserved_keyword/1,
     reject_syntax_error/1,
     semantic_pipeline/1,
+    recursive_value_roundtrip/1,
     loader_cycle/1,
     loader_shared_namespace_modules/1,
     loader_shared_namespace_module_key_normalization/1,
@@ -82,6 +83,7 @@ all() ->
         reject_reserved_keyword,
         reject_syntax_error,
         semantic_pipeline,
+        recursive_value_roundtrip,
         loader_cycle,
         loader_shared_namespace_modules,
         loader_shared_namespace_module_key_normalization,
@@ -299,7 +301,12 @@ semantic_pipeline(Config) ->
     ),
 
     [Fetch] = [F || F <- MainService#tg_service.functions, F#tg_function.name =:= <<"fetch">>],
-    [#tg_field{type = {ref, <<"Failed">>, #{}}}] = Fetch#tg_function.throws,
+    [#tg_field{type = {resolved_ref, <<"main">>, <<"Failed">>, #{}}}] = Fetch#tg_function.throws,
+
+    %% Inherited functions keep the already resolved parent refs: area's
+    %% Boom throw points at the shared module, not the child's spelling.
+    [Area] = [F || F <- MainService#tg_service.functions, F#tg_function.name =:= <<"area">>],
+    [#tg_field{type = {resolved_ref, <<"shared">>, <<"Boom">>, #{}}}] = Area#tg_function.throws,
 
     %% The included module is analyzed on its own terms.
     ?assertEqual(<<"shared">>, SharedMod#tg_module.name),
@@ -353,6 +360,33 @@ cross_module_exception_typedef(Config) ->
     ),
     ok.
 
+%% A self-recursive struct resolves to a named struct descriptor, never
+%% to an infinite expansion: the generated descriptor stays finite and a
+%% nested value round-trips through the binary runtime.
+
+recursive_value_roundtrip(Config) ->
+    Path = write_snippet(
+        Config,
+        "recursive.thrift",
+        <<
+            "namespace erl rec\n"
+            "struct N {\n"
+            "  1: required i32 v,\n"
+            "  2: optional N tail\n"
+            "}\n"
+        >>
+    ),
+    ok = generate_modules(Path),
+    ?assertMatch(
+        {ok, {struct, {ref, rec_types, <<"N">>}}},
+        rec_types:descriptor(n)
+    ),
+    Value = #{<<"v">> => 1, <<"tail">> => #{<<"v">> => 2}},
+    {ok, Desc} = rec_types:descriptor(n),
+    {ok, Io} = thrift_runtime_binary:encode(Desc, Value),
+    ?assertEqual({ok, Value, <<>>}, thrift_runtime_binary:decode(Desc, iolist_to_binary(Io))),
+    ok.
+
 loader_cycle(Config) ->
     CycleA = data_file(Config, "semantic/cycle_a.thrift"),
     ?assertMatch({error, {cycle, CycleA}}, thrift_generator_loader:load(CycleA)).
@@ -376,12 +410,16 @@ cross_module_include_qualifier(Config) ->
     ?assertEqual(<<"qualified_includee">>, IncludeeMod#tg_module.name),
 
     [Holder] = IncluderMod#tg_module.structs,
+    %% Both qualification spellings resolve to the defining module; the
+    %% original qualifier survives in the ref annotations (the emission
+    %% layer renders qualified spellings as remote aliases).
+    Source = fun(Name) -> #{?TG_REF_SOURCE => Name} end,
     ?assertEqual(
         [
-            {ref, <<"includee.Payload">>, #{}},
-            {ref, <<"includee.Color">>, #{}},
-            {ref, <<"includee.Stamp">>, #{}},
-            {ref, <<"qualified_includee.Payload">>, #{}}
+            {resolved_ref, <<"qualified_includee">>, <<"Payload">>, Source(<<"includee.Payload">>)},
+            {resolved_ref, <<"qualified_includee">>, <<"Color">>, Source(<<"includee.Color">>)},
+            {resolved_ref, <<"qualified_includee">>, <<"Stamp">>, Source(<<"includee.Stamp">>)},
+            {resolved_ref, <<"qualified_includee">>, <<"Payload">>, Source(<<"qualified_includee.Payload">>)}
         ],
         [F#tg_field.type || F <- Holder#tg_struct.fields]
     ),
@@ -2030,7 +2068,16 @@ generated_handler_result_contract(Config) ->
     {ok, RawSrc} = file:read_file(filename:join(PrivDir, "result_contract_svc_handler.erl")),
     Src = doc_text(RawSrc),
     ?assertMatch({match, _}, re:run(Src, <<"Handler callback for ping[\\s\\S]*?answer `ok`">>)),
-    ?assertMatch({match, _}, re:run(Src, <<"Handler callback for add[\\s\\S]*?answers `{ok, Value}`">>)),
+    ?assertMatch(
+        {match, _},
+        re:run(
+            Src,
+            <<
+                "Handler callback for add[\\s\\S]*?answers `{ok, Value}`"
+                "[\\s\\S]*?`{error, {exception, ...}}`"
+            >>
+        )
+    ),
     ?assertMatch(
         {match, _},
         re:run(Src, <<"Handler callback for the oneway poke[\\s\\S]*?answer `ok`">>)
@@ -2071,7 +2118,7 @@ doc_text(Source) ->
 
 -spec standalone_generate_check_clean(ct:config()) -> ok.
 standalone_generate_check_clean(Config) ->
-    Escript = build_prod_escript(),
+    Escript = build_prod_escript(Config),
     Priv = proplists:get_value(priv_dir, Config),
     Work = filename:join(Priv, "cli_work"),
     Out = filename:join(Work, "src"),
@@ -2135,21 +2182,45 @@ standalone_generate_check_clean(Config) ->
 %% Builds _build/prod/bin/thrift_generator from the repo root and
 %% returns its path. Slow on a cold build — this case is the real-CLI
 %% acceptance scenario, so it pays the escriptize cost on purpose.
-build_prod_escript() ->
+build_prod_escript(Config) ->
     Rebar3 =
         case os:find_executable("rebar3") of
             false -> ct:fail("rebar3 not found on PATH");
             Path -> Path
         end,
-    Root = repo_root(),
+    Root = repo_root(Config),
     {0, _} = run_cli(Rebar3, ["as", "prod", "escriptize"], Root),
     filename:join(Root, "_build/prod/bin/thrift_generator").
 
-%% The suite runs from _build/test/lib/thrift_generator: four levels up
-%% is the repo root (the umbrella's _build dir sits right there).
-repo_root() ->
-    LibDir = code:lib_dir(thrift_generator),
-    filename:dirname(filename:dirname(filename:dirname(filename:dirname(LibDir)))).
+%% The repo root is derived by walking up from the suite's CT data dir
+%% (under the test profile's _build) to the first directory that looks
+%% like the umbrella checkout — rebar.config, apps/ and _build/ together.
+%% No fixed hop count: a layout surprise fails loudly here instead of
+%% building in some unrelated directory.
+
+-spec repo_root(ct:config()) -> file:filename().
+repo_root(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    case find_repo_root(filename:split(DataDir)) of
+        {ok, Root} ->
+            Root;
+        error ->
+            ct:fail({repo_root_not_found, DataDir})
+    end.
+
+find_repo_root([]) ->
+    error;
+find_repo_root(Path) ->
+    case
+        filelib:is_file(filename:join(Path ++ ["rebar.config"])) andalso
+            filelib:is_dir(filename:join(Path ++ ["apps"])) andalso
+            filelib:is_dir(filename:join(Path ++ ["_build"]))
+    of
+        true ->
+            {ok, filename:join(Path)};
+        false ->
+            find_repo_root(lists:droplast(Path))
+    end.
 
 %% Runs the CLI (or any executable) with the given args in Dir; returns
 %% the exit status and the merged stdout/stderr output.

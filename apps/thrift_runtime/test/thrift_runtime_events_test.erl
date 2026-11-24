@@ -412,19 +412,23 @@ take_events(N, Acc) ->
         erlang:error({events_timeout, N})
     end.
 
-%% Waits for `N' events of the given type; anything else in between is
-%% skipped over.
+%% Waits for `N' events of the given type within one overall deadline;
+%% anything else in between is skipped over without extending it.
 
 wait_for_events(Type, N) ->
     wait_for_events(Type, N, 6000).
 
-wait_for_events(_Type, 0, _Timeout) ->
-    [];
 wait_for_events(Type, N, Timeout) ->
+    collect_events(Type, N, erlang:monotonic_time(millisecond) + Timeout).
+
+collect_events(_Type, 0, _Deadline) ->
+    [];
+collect_events(Type, N, Deadline) ->
+    Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
     receive
-        {collect, #{type := Type} = E} -> [E | wait_for_events(Type, N - 1, Timeout)];
-        {collect, _} -> wait_for_events(Type, N, Timeout)
-    after Timeout ->
+        {collect, #{type := Type} = E} -> [E | collect_events(Type, N - 1, Deadline)];
+        {collect, _} -> collect_events(Type, N, Deadline)
+    after Remaining ->
         erlang:error({event_timeout, Type})
     end.
 

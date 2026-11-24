@@ -45,8 +45,8 @@ of its own: `{repr, record | map | native}`,
 `{typedef_type, alias | nominal}` and `{enum_case, preserve | lower}`.
 Every entry is validated by the generator's own options contract — a
 config typo or an invalid value fails the provider with the same
-rendered `{unknown_option, Key}` / `{bad_option, {Key, Value,
-Allowed}}` diagnostic the standalone CLI prints.
+rendered `unknown option <key>` / `invalid value for <key>: <value>
+(allowed: ...)` diagnostic the standalone CLI prints.
 
 See the [repository README](https://github.com/kpy3/thrift-erl) for
 the full story.

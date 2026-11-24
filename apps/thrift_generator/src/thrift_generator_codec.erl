@@ -51,7 +51,7 @@ options and guards have no convenient `erl_syntax` constructors — so
 everywhere else in the emitter.
 """.
 
--export([module_forms/2, repr_encode_export_entries/2]).
+-export([module_forms/1, repr_encode_export_entries/1]).
 -export([repr_index_entries/1]).
 
 -include("thrift_generator.hrl").
@@ -111,6 +111,13 @@ everywhere else in the emitter.
     full_mask/1,
     missing_names/2,
     key_filter/3,
+    enum_from_clauses/3,
+    integer_guard/2,
+    sequence_encoder_form/3,
+    sequence_encode_elements_form/2,
+    sequence_decode_elements_form/3,
+    map_decode_pairs_form/5,
+    base_field_clauses/5,
     t_atom/1,
     t_atom_lit/1,
     t_map_exact/0,
@@ -126,17 +133,19 @@ everywhere else in the emitter.
 
 %% Parameter bundles for the repr emission helpers: passing the chain
 %% context as one record keeps arities under the lint ceiling.
--record(rcc, {chain :: atom(), k :: non_neg_integer(), flavor :: record | map, ctx :: tuple(), enums :: map()}).
+-record(rcc, {
+    chain :: atom(), k :: non_neg_integer(), flavor :: record | map, plan :: #tg_codec_plan{}, enums :: map()
+}).
 -record(rdc, {
     fields_name = undefined :: atom() | undefined,
     flavor = map :: record | map | struct | native,
     tag = undefined :: atom() | undefined,
     mod :: atom(),
-    ctx :: tuple(),
+    plan :: #tg_codec_plan{},
     enums :: map()
 }).
 
-%% The wire descriptor vocabulary of `thrift_generator_emitter:type_desc/2`
+%% The wire descriptor vocabulary of `thrift_generator_ir:type_desc/2`
 %% — the same shape the runtime codecs consume.
 
 -type wire_type() :: thrift_generator_codec_common:wire_type().
@@ -151,36 +160,32 @@ everywhere else in the emitter.
 %%--------------------------------------------------------------------
 
 -doc "Every wire-codec form of the module: per-struct encode/decode functions, container helpers, `binary_codec/1`.".
--spec module_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-module_forms(Mod, Ctx) ->
+-spec module_forms(#tg_codec_plan{}) -> erl_syntax:forms().
+module_forms(Plan) ->
     %% The synthetic RPC codecs go last: the hooks in service_info reach
     %% them directly, and keeping the declared structs' code layout
     %% untouched matters more than grouping (BEAM layout sensitivity).
-    ServiceStructs = thrift_generator_codec_common:service_structs(Mod),
-    WireTypes = [
-        wtype(F#tg_field.type, Ctx)
-     || S <- Mod#tg_module.structs ++ ServiceStructs,
-        F <- S#tg_struct.fields
-    ],
-    Enums = thrift_generator_codec_common:enum_registry(WireTypes),
-    struct_blocks(Mod#tg_module.structs, <<"wire codecs">>, Ctx, Enums) ++
-        helper_forms(WireTypes, Ctx, Enums) ++
-        thrift_generator_codec_common:codec_index_forms(wire, Mod, Ctx) ++
-        struct_blocks(ServiceStructs, <<"wire codecs">>, Ctx, Enums) ++
-        repr_encode_forms(Mod#tg_module.structs, Ctx, Enums) ++
-        repr_decode_forms(Mod#tg_module.structs, Ctx, Enums).
+    Enums = Plan#tg_codec_plan.enums,
+    struct_blocks(Plan#tg_codec_plan.declared, <<"wire codecs">>, Plan, Enums) ++
+        helper_forms(Plan, Enums) ++
+        thrift_generator_codec_common:codec_index_forms(wire, Plan) ++
+        struct_blocks(Plan#tg_codec_plan.rpc, <<"wire codecs">>, Plan, Enums) ++
+        repr_encode_forms(Plan#tg_codec_plan.declared, Plan, Enums) ++
+        repr_decode_forms(Plan#tg_codec_plan.declared, Plan, Enums).
 
--spec struct_blocks([#tg_struct{}], binary(), #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec struct_blocks([#tg_codec_struct{}], binary(), #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_blocks(Structs, Label, Ctx, Enums) ->
+struct_blocks(Entries, Label, Plan, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s ~ts", [thrift_generator_emitter:section_label(S), Label])
+                io_lib:format("~s ~ts", [
+                    thrift_generator_ir:section_label(CS#tg_codec_struct.struct), Label
+                ])
             )
         ] ++
-            struct_forms(S, Ctx, Enums)
-     || S <- Structs
+            struct_forms(CS, Plan, Enums)
+     || CS <- Entries
     ]).
 
 %%--------------------------------------------------------------------
@@ -199,21 +204,21 @@ dec_name(T, Enums) ->
 %% Per-struct blocks
 %%--------------------------------------------------------------------
 
--spec struct_forms(#tg_struct{}, #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec struct_forms(#tg_codec_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_forms(S, Ctx, Enums) ->
-    {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
-    FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
-    encode_forms(S, Encode, FieldTypes, Ctx, Enums) ++
-        decode_forms(S, Decode, FieldTypes, Ctx, Enums).
+struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
+    {Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
+    encode_forms(S, Encode, CS#tg_codec_struct.field_types, Plan, Enums) ++
+        decode_forms(S, Decode, CS#tg_codec_struct.field_types, Plan, Enums).
 
 %% Encode side: entry clauses (map guard, required/union check) plus a
 %% chain of per-field functions assembling iodata forward — the same
 %% difference-list shape the generic engine's encode_fields_c walks.
 
--spec encode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec encode_forms(#tg_struct{}, atom(), [wire_type()], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
+encode_forms(S, Encode, FieldTypes, Plan, Enums) ->
     Chain = atom_concat(Encode, <<"_fields">>),
     %% The checks hand off to the FIRST chain function; with no fields
     %% the chain name itself is the terminator that closes the struct.
@@ -236,7 +241,7 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
         %% it would leave an unused function under warnings_as_errors.
         case {S#tg_struct.kind, S#tg_struct.fields} of
             {union, []} -> [];
-            _ -> chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Ctx, Enums, 1)
+            _ -> chain_forms(Chain, lists:zip(S#tg_struct.fields, FieldTypes), Plan, Enums, 1)
         end.
 
 %% One function per field, declaration order: field K encodes its value
@@ -245,42 +250,42 @@ encode_forms(S, Encode, FieldTypes, Ctx, Enums) ->
 %% function and the last one closes with the stop byte.
 
 -spec chain_forms(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #tg_codec_plan{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
-chain_forms(Chain, [], _Ctx, _Enums, _N) ->
+chain_forms(Chain, [], _Plan, _Enums, _N) ->
     %% Zero fields: the chain name itself is the terminator.
     [{function, ?ANNO, Chain, 1, [clause([v("_Value")], none, [ok_t(list_lit([i(0)]))])]}];
-chain_forms(Chain, Fields, Ctx, Enums, 1) when Fields =/= [] ->
-    chain_fns(Chain, Fields, Ctx, Enums, 1).
+chain_forms(Chain, Fields, Plan, Enums, 1) when Fields =/= [] ->
+    chain_fns(Chain, Fields, Plan, Enums, 1).
 
 %% The field functions proper: the last one closes the struct with the
 %% stop byte inline, so no terminator function follows the chain.
 
 -spec chain_fns(
-    atom(), [{#tg_field{}, wire_type()}], #ectx{}, thrift_generator_codec_common:registry(), pos_integer()
+    atom(), [{#tg_field{}, wire_type()}], #tg_codec_plan{}, thrift_generator_codec_common:registry(), pos_integer()
 ) ->
     erl_syntax:forms().
-chain_fns(_Chain, [], _Ctx, _Enums, _N) ->
+chain_fns(_Chain, [], _Plan, _Enums, _N) ->
     [];
-chain_fns(Chain, [{F, T}], Ctx, Enums, N) ->
-    [chain_fn(Chain, N, F, T, ok_t(list_lit([i(0)])), Ctx, Enums)];
-chain_fns(Chain, [{F, T} | Rest], Ctx, Enums, N) ->
+chain_fns(Chain, [{F, T}], Plan, Enums, N) ->
+    [chain_fn(Chain, N, F, T, ok_t(list_lit([i(0)])), Plan, Enums)];
+chain_fns(Chain, [{F, T} | Rest], Plan, Enums, N) ->
     Next = call_local(chain_fn_name(Chain, N + 1), [v("Value")]),
-    [chain_fn(Chain, N, F, T, Next, Ctx, Enums)] ++ chain_fns(Chain, Rest, Ctx, Enums, N + 1).
+    [chain_fn(Chain, N, F, T, Next, Plan, Enums)] ++ chain_fns(Chain, Rest, Plan, Enums, N + 1).
 
 -spec chain_fn(
-    atom(), pos_integer(), #tg_field{}, wire_type(), ast(), #ectx{}, thrift_generator_codec_common:registry()
+    atom(), pos_integer(), #tg_field{}, wire_type(), ast(), #tg_codec_plan{}, thrift_generator_codec_common:registry()
 ) ->
     ast().
-chain_fn(Chain, N, F, {base, _} = T, Next, _Ctx, _Enums) ->
+chain_fn(Chain, N, F, {base, _} = T, Next, _Plan, _Enums) ->
     base_chain_fn(Chain, N, F, T, Next);
-chain_fn(Chain, N, F, T, Next, Ctx, Enums) ->
+chain_fn(Chain, N, F, T, Next, Plan, Enums) ->
     Header = header_bin(wire_byte(T), F#tg_field.id),
     Body =
         'case'(v("Value"), [
             clause([map_exact(name_lit(F#tg_field.name), v("V"))], none, [
-                'case'(encode_wire_expr(T, v("V"), Ctx, Enums, ""), [
+                'case'(encode_wire_expr(T, v("V"), Plan, Enums, ""), [
                     clause([tuple_t([at(ok), v("E")])], none, [
                         'case'(Next, [
                             ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, v("E")]), v("Rest")))),
@@ -306,78 +311,28 @@ base_chain_fn(Chain, N, F, {base, B} = T, Next) ->
     Header = header_bin(wire_byte(T), F#tg_field.id),
     Name = name_lit(F#tg_field.name),
     Body =
-        'case'(v("Value"), base_field_clauses(B, Name, Header, Next) ++ [clause([v("_")], none, [Next])]),
+        'case'(
+            v("Value"),
+            base_field_clauses(B, Name, Header, Next, fun base_payload/2) ++ [clause([v("_")], none, [Next])]
+        ),
     {function, ?ANNO, chain_fn_name(Chain, N), 1, [clause([v("Value")], none, [Body])]}.
 
--spec base_field_clauses(atom(), ast(), ast(), ast()) -> [ast()].
-base_field_clauses(B, Name, Header, Next) ->
-    V = v("V"),
-    Present =
-        case B of
-            bool ->
-                [
-                    base_present_clause(map_exact(Name, at(true)), none, Header, bin_lit(<<1>>), Next),
-                    base_present_clause(map_exact(Name, at(false)), none, Header, bin_lit(<<0>>), Next)
-                ];
-            double ->
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        [remote(erlang, is_number, [V])],
-                        Header,
-                        bin_seg(remote(erlang, float, [V]), i(64), [big, float]),
-                        Next
-                    )
-                ];
-            S when S =:= string; S =:= binary ->
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        [remote(erlang, is_binary, [V])],
-                        Header,
-                        list_lit([i32_seg(call_local(byte_size, [V])), V]),
-                        Next
-                    )
-                ];
-            uuid ->
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        [
-                            remote(erlang, is_binary, [V]),
-                            {op, ?ANNO, '=:=', call_local(byte_size, [V]), i(16)}
-                        ],
-                        Header,
-                        V,
-                        Next
-                    )
-                ];
-            _ ->
-                Bits = bits(B),
-                [
-                    base_present_clause(
-                        map_exact(Name, V),
-                        [
-                            remote(erlang, is_integer, [V]),
-                            {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
-                            {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
-                        ],
-                        Header,
-                        bin_seg(V, i(Bits), [big, signed]),
-                        Next
-                    )
-                ]
-        end,
-    Present ++ [clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])].
+%% The binary-protocol payload of a present base field: bare big-endian
+%% segments for the integer widths, an i32 length prefix before strings,
+%% the raw 16 bytes of a uuid. A bool pays no payload — the shared clause
+%% builder takes the {<<1>>, <<0>>} byte pair instead.
 
--spec base_present_clause(ast(), [ast()] | none, ast(), ast(), ast()) -> ast().
-base_present_clause(MapPat, Guard, Header, Payload, Next) ->
-    clause([MapPat], Guard, [
-        'case'(Next, [
-            ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, Payload]), v("Rest")))),
-            error_clause()
-        ])
-    ]).
+-spec base_payload(atom(), ast()) -> ast() | {ast(), ast()}.
+base_payload(bool, _V) ->
+    {bin_lit(<<1>>), bin_lit(<<0>>)};
+base_payload(double, V) ->
+    bin_seg(remote(erlang, float, [V]), i(64), [big, float]);
+base_payload(S, V) when S =:= string; S =:= binary ->
+    list_lit([i32_seg(call_local(byte_size, [V])), V]);
+base_payload(uuid, V) ->
+    V;
+base_payload(B, V) ->
+    bin_seg(V, i(bits(B)), [big, signed]).
 
 -spec chain_fn_name(atom(), pos_integer()) -> atom().
 chain_fn_name(Chain, N) ->
@@ -387,9 +342,9 @@ chain_fn_name(Chain, N) ->
 %% Decode side
 %%--------------------------------------------------------------------
 
--spec decode_forms(#tg_struct{}, atom(), [wire_type()], #ectx{}, thrift_generator_codec_common:registry()) ->
+-spec decode_forms(#tg_struct{}, atom(), [wire_type()], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
+decode_forms(S, Decode, FieldTypes, Plan, Enums) ->
     Fields = S#tg_struct.fields,
     FieldsName = atom_concat(Decode, <<"_fields">>),
     Bits = required_bits(Fields),
@@ -411,7 +366,7 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
                 ])
             ]},
             {function, ?ANNO, FieldsName, 3,
-                decode_field_clauses(lists:zip(Fields, FieldTypes), Bits, FieldsName, Ctx, Enums)}
+                decode_field_clauses(lists:zip(Fields, FieldTypes), Bits, FieldsName, Plan, Enums)}
         ].
 
 %% Stop byte closes the struct: the full required-presence bitmask is
@@ -425,11 +380,11 @@ decode_forms(S, Decode, FieldTypes, Ctx, Enums) ->
     [{#tg_field{}, wire_type()}],
     [{integer(), pos_integer(), binary()}],
     atom(),
-    #ectx{},
+    #tg_codec_plan{},
     thrift_generator_codec_common:registry()
 ) ->
     [ast()].
-decode_field_clauses(FieldPairs, Bits, FieldsName, Ctx, Enums) ->
+decode_field_clauses(FieldPairs, Bits, FieldsName, Plan, Enums) ->
     StopClauses =
         case Bits of
             %% No required fields: the stop byte just closes the struct,
@@ -464,7 +419,7 @@ decode_field_clauses(FieldPairs, Bits, FieldsName, Ctx, Enums) ->
         clause([header_pat(), v("Req"), v("Acc")], none, [
             'case'(
                 v("Id"),
-                field_clauses(FieldPairs, Bits, FieldsName, Ctx, Enums) ++ [skip_clause(FieldsName)]
+                field_clauses(FieldPairs, Bits, FieldsName, Plan, Enums) ++ [skip_clause(FieldsName)]
             )
         ]),
     MoreClause =
@@ -479,13 +434,13 @@ decode_field_clauses(FieldPairs, Bits, FieldsName, Ctx, Enums) ->
     [{#tg_field{}, wire_type()}],
     [{integer(), pos_integer(), binary()}],
     atom(),
-    #ectx{},
+    #tg_codec_plan{},
     thrift_generator_codec_common:registry()
 ) ->
     [ast()].
-field_clauses(FieldPairs, Bits, FieldsName, Ctx, Enums) ->
+field_clauses(FieldPairs, Bits, FieldsName, Plan, Enums) ->
     lists:append([
-        field_clauses_one(F, T, Bits, FieldsName, Ctx, Enums)
+        field_clauses_one(F, T, Bits, FieldsName, Plan, Enums)
      || {F, T} <- FieldPairs
     ]).
 
@@ -498,11 +453,11 @@ field_clauses(FieldPairs, Bits, FieldsName, Ctx, Enums) ->
     wire_type(),
     [{integer(), pos_integer(), binary()}],
     atom(),
-    #ectx{},
+    #tg_codec_plan{},
     thrift_generator_codec_common:registry()
 ) ->
     [ast()].
-field_clauses_one(F, T, Bits, FieldsName, Ctx, Enums) ->
+field_clauses_one(F, T, Bits, FieldsName, Plan, Enums) ->
     Id = F#tg_field.id,
     Wire = wire_byte(T),
     %% Only required fields set their presence bit — optional and default
@@ -516,7 +471,7 @@ field_clauses_one(F, T, Bits, FieldsName, Ctx, Enums) ->
         end,
     [
         clause([i(Id)], [{op, ?ANNO, '=:=', v("Type"), i(Wire)}], [
-            'case'(decode_wire_expr(T, v("Rest"), Ctx, Enums, ""), [
+            'case'(decode_wire_expr(T, v("Rest"), Plan, Enums, ""), [
                 ok3_bind_clause(
                     v("V"),
                     v("Rest1"),
@@ -562,22 +517,24 @@ skip_clause(FieldsName) ->
 %% inline cases — the map pair's key and value decodes — from rebinding
 %% the same names, which erl_lint reports as unsafe variables.
 
--spec encode_wire_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry(), string()) ->
+-spec encode_wire_expr(
+    wire_type(), ast(), #tg_codec_plan{} | undefined, thrift_generator_codec_common:registry(), string()
+) ->
     ast().
-encode_wire_expr({base, bool}, V, _Ctx, _Enums, _Suffix) ->
+encode_wire_expr({base, bool}, V, _Plan, _Enums, _Suffix) ->
     'case'(V, [
         clause([at(true)], none, [ok_t(bin_lit(<<1>>))]),
         clause([at(false)], none, [ok_t(bin_lit(<<0>>))]),
         mismatch_tail(V)
     ]);
-encode_wire_expr({base, S}, V, _Ctx, _Enums, _Suffix) when S =:= string; S =:= binary ->
+encode_wire_expr({base, S}, V, _Plan, _Enums, _Suffix) when S =:= string; S =:= binary ->
     'case'(V, [
         clause([v("_")], [remote(erlang, is_binary, [V])], [
             ok_t(list_lit([i32_seg(call_local(byte_size, [V])), V]))
         ]),
         mismatch_tail(V)
     ]);
-encode_wire_expr({base, double}, V, _Ctx, _Enums, Suffix) ->
+encode_wire_expr({base, double}, V, _Plan, _Enums, Suffix) ->
     Dbl = v("Dbl" ++ Suffix),
     'case'(V, [
         clause([Dbl], [remote(erlang, is_number, [Dbl])], [
@@ -585,7 +542,7 @@ encode_wire_expr({base, double}, V, _Ctx, _Enums, Suffix) ->
         ]),
         mismatch_tail(V)
     ]);
-encode_wire_expr({base, uuid}, V, _Ctx, _Enums, _Suffix) ->
+encode_wire_expr({base, uuid}, V, _Plan, _Enums, _Suffix) ->
     'case'(V, [
         clause(
             [v("_")],
@@ -594,21 +551,16 @@ encode_wire_expr({base, uuid}, V, _Ctx, _Enums, _Suffix) ->
         ),
         mismatch_tail(V)
     ]);
-encode_wire_expr({base, B}, V, _Ctx, _Enums, _Suffix) ->
-    Bits = bits(B),
+encode_wire_expr({base, B}, V, _Plan, _Enums, _Suffix) ->
     'case'(V, [
         clause(
             [v("_")],
-            [
-                remote(erlang, is_integer, [V]),
-                {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
-                {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
-            ],
-            [ok_t(bin_seg(V, i(Bits), [big, signed]))]
+            integer_guard(B, V),
+            [ok_t(bin_seg(V, i(bits(B)), [big, signed]))]
         ),
         clause([v("_")], none, [err_encode(mismatch(V))])
     ]);
-encode_wire_expr({enum, Desc}, V, _Ctx, _Enums, Suffix) ->
+encode_wire_expr({enum, Desc}, V, _Plan, _Enums, Suffix) ->
     Int = v("Int" ++ Suffix),
     'case'(
         V,
@@ -625,52 +577,24 @@ encode_wire_expr({enum, Desc}, V, _Ctx, _Enums, Suffix) ->
                 ])
             ]
     );
-encode_wire_expr({struct, {ref, TypesMod, Local}}, V, Ctx, _Enums, _Suffix) ->
-    struct_encode_call(TypesMod, Local, V, Ctx);
-encode_wire_expr({list, _} = T, V, _Ctx, Enums, _Suffix) ->
+encode_wire_expr({struct, {ref, TypesMod, Local}}, V, Plan, _Enums, _Suffix) ->
+    thrift_generator_codec_plan:struct_call(wire, encode, TypesMod, Local, V, Plan);
+encode_wire_expr({list, _} = T, V, _Plan, Enums, _Suffix) ->
     call_local(enc_name(T, Enums), [V]);
-encode_wire_expr({set, _, _} = T, V, _Ctx, Enums, _Suffix) ->
+encode_wire_expr({set, _, _} = T, V, _Plan, Enums, _Suffix) ->
     call_local(enc_name(T, Enums), [V]);
-encode_wire_expr({map, _, _} = T, V, _Ctx, Enums, _Suffix) ->
+encode_wire_expr({map, _, _} = T, V, _Plan, Enums, _Suffix) ->
     call_local(enc_name(T, Enums), [V]).
 
 -spec encode_base_expr(atom(), ast(), string()) -> ast().
 encode_base_expr(B, V, Suffix) ->
     encode_wire_expr({base, B}, V, undefined, #{}, Suffix).
 
--spec struct_encode_call(module(), binary(), ast(), #ectx{}) -> ast().
-struct_encode_call(TypesMod, Local, V, Ctx) ->
-    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-        true ->
-            {Encode, _Decode} = thrift_generator_codec_common:codec_pair(wire, Local, Ctx),
-            call_local(Encode, [V]);
-        false ->
-            {Encode, _Decode} = thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx),
-            remote(TypesMod, Encode, [V])
-    end.
-
--spec struct_decode_call(module(), binary(), ast(), #ectx{}) -> ast().
-struct_decode_call(TypesMod, Local, Bin, Ctx) ->
-    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-        true ->
-            {_Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, Local, Ctx),
-            call_local(Decode, [Bin]);
-        false ->
-            {_Encode, Decode} = thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx),
-            remote(TypesMod, Decode, [Bin])
-    end.
-
-%% Same-module refs become direct sibling calls; the check rebuilds the
-%% module atom from `#ectx.current', which keeps the binary key (`wtype'
-%% derives the ref's module the same way). A case body, not a guard —
-%% binary_to_atom is not guard-legal.
--spec types_module_atom(binary()) -> module().
-types_module_atom(Name) ->
-    binary_to_atom(<<(thrift_generator_emitter:sanitize(Name))/binary, "_types">>, utf8).
-
--spec decode_wire_expr(wire_type(), ast(), #ectx{} | undefined, thrift_generator_codec_common:registry(), string()) ->
+-spec decode_wire_expr(
+    wire_type(), ast(), #tg_codec_plan{} | undefined, thrift_generator_codec_common:registry(), string()
+) ->
     ast().
-decode_wire_expr({base, bool}, Bin, _Ctx, _Enums, Suffix) ->
+decode_wire_expr({base, bool}, Bin, _Plan, _Enums, Suffix) ->
     R = v("R" ++ Suffix),
     'case'(Bin, [
         clause([bin_pat([{i(1), default, default}, {R, default, [binary]}])], none, [ok3(at(true), R)]),
@@ -680,15 +604,15 @@ decode_wire_expr({base, bool}, Bin, _Ctx, _Enums, Suffix) ->
         ]),
         more_tail()
     ]);
-decode_wire_expr({base, S}, Bin, _Ctx, _Enums, _Suffix) when S =:= string; S =:= binary ->
+decode_wire_expr({base, S}, Bin, _Plan, _Enums, _Suffix) when S =:= string; S =:= binary ->
     call_local(dec_string, [Bin]);
-decode_wire_expr({base, double}, Bin, _Ctx, _Enums, Suffix) ->
+decode_wire_expr({base, double}, Bin, _Plan, _Enums, Suffix) ->
     int_decode_case(Bin, 64, [big, float], Suffix);
-decode_wire_expr({base, uuid}, Bin, _Ctx, _Enums, Suffix) ->
+decode_wire_expr({base, uuid}, Bin, _Plan, _Enums, Suffix) ->
     int_decode_case(Bin, 16, [binary], Suffix);
-decode_wire_expr({base, B}, Bin, _Ctx, _Enums, Suffix) ->
+decode_wire_expr({base, B}, Bin, _Plan, _Enums, Suffix) ->
     int_decode_case(Bin, bits(B), [big, signed], Suffix);
-decode_wire_expr({enum, Desc}, Bin, _Ctx, _Enums, Suffix) ->
+decode_wire_expr({enum, Desc}, Bin, _Plan, _Enums, Suffix) ->
     Int = v("Int" ++ Suffix),
     R = v("R" ++ Suffix),
     'case'(Bin, [
@@ -697,13 +621,13 @@ decode_wire_expr({enum, Desc}, Bin, _Ctx, _Enums, Suffix) ->
         ]),
         more_tail()
     ]);
-decode_wire_expr({struct, {ref, TypesMod, Local}}, Bin, Ctx, _Enums, _Suffix) ->
-    struct_decode_call(TypesMod, Local, Bin, Ctx);
-decode_wire_expr({list, _} = T, Bin, _Ctx, Enums, _Suffix) ->
+decode_wire_expr({struct, {ref, TypesMod, Local}}, Bin, Plan, _Enums, _Suffix) ->
+    thrift_generator_codec_plan:struct_call(wire, decode, TypesMod, Local, Bin, Plan);
+decode_wire_expr({list, _} = T, Bin, _Plan, Enums, _Suffix) ->
     call_local(dec_name(T, Enums), [Bin]);
-decode_wire_expr({set, _, _} = T, Bin, _Ctx, Enums, _Suffix) ->
+decode_wire_expr({set, _, _} = T, Bin, _Plan, Enums, _Suffix) ->
     call_local(dec_name(T, Enums), [Bin]);
-decode_wire_expr({map, _, _} = T, Bin, _Ctx, Enums, _Suffix) ->
+decode_wire_expr({map, _, _} = T, Bin, _Plan, Enums, _Suffix) ->
     call_local(dec_name(T, Enums), [Bin]).
 
 %% The fixed-size base decoder: a binary segment match or `more' —
@@ -722,25 +646,18 @@ int_decode_case(Bin, Bits, Types, Suffix) ->
 decode_base_expr(B, Bin, Suffix) ->
     decode_wire_expr({base, B}, Bin, undefined, #{}, Suffix).
 
--spec enum_from_clauses([{integer(), atom()}], ast(), ast()) -> [ast()].
-enum_from_clauses(Desc, Int, R) ->
-    [
-        clause([i(Value)], none, [ok3(at(Atom), R)])
-     || {Value, Atom} <- Desc
-    ] ++ [clause([v("_")], none, [ok3(Int, R)])].
-
 %%--------------------------------------------------------------------
 %% Container helpers
 %%--------------------------------------------------------------------
 
--spec helper_forms([wire_type()], #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
-helper_forms(WireTypes, Ctx, Enums) ->
-    Containers = lists:usort(lists:append([thrift_generator_codec_common:containers(T) || T <- WireTypes])),
-    %% dec_string exists only when some field type (at any depth)
-    %% actually decodes a string, so string-free modules stay
+-spec helper_forms(#tg_codec_plan{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
+helper_forms(Plan, Enums) ->
+    %% The container inventory is the plan's, computed once for all
+    %% backends; dec_string exists only when some field type (at any
+    %% depth) actually decodes a string, so string-free modules stay
     %% warning-free.
-    DecString = [dec_string_form() || has_string(WireTypes)],
-    DecString ++ lists:append([container_forms(C, Ctx, Enums) || C <- Containers]).
+    DecString = [dec_string_form() || has_string(Plan#tg_codec_plan.wire_types)],
+    DecString ++ lists:append([container_forms(C, Plan, Enums) || C <- Plan#tg_codec_plan.containers]).
 
 -spec has_string([wire_type()]) -> boolean().
 has_string(Types) ->
@@ -758,8 +675,8 @@ children({set, T, _Impl}) -> [T];
 children({map, K, V}) -> [K, V];
 children(_) -> [].
 
--spec container_forms(wire_type(), #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
-container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
+-spec container_forms(wire_type(), #tg_codec_plan{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
+container_forms({Kind, _} = T, Plan, Enums) when Kind =:= list; Kind =:= set ->
     %% The container header carries the ELEMENT's wire byte; the
     %% container's own byte only appears in the field header.
     Wire = wire_byte(thrift_generator_codec_common:elem_type(T)),
@@ -769,38 +686,13 @@ container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
     EncElems = atom_concat(Enc, <<"_elems">>),
     DecElems = atom_concat(Dec, <<"_elems">>),
     [
-        {function, ?ANNO, Enc, 1, [
-            clause([v("Values")], [remote(erlang, is_list, [v("Values")])], [
-                'case'(call_local(EncElems, [v("Values")]), [
-                    clause([tuple_t([at(ok), v("Es")])], none, [
-                        ok_t(
-                            list_lit([
-                                list_lit([
-                                    bin_seg(i(Wire), i(8), [big, unsigned]), i32_seg(call_local(length, [v("Values")]))
-                                ]),
-                                v("Es")
-                            ])
-                        )
-                    ]),
-                    error_clause()
-                ])
-            ]),
-            mismatch_fn_tail()
-        ]},
-        {function, ?ANNO, EncElems, 1, [
-            clause([nil()], none, [ok_t(nil())]),
-            clause([cons(v("V"), v("Rest"))], none, [
-                'case'(encode_elem_expr(Elem, v("V"), Ctx, Enums, ""), [
-                    clause([tuple_t([at(ok), v("E")])], none, [
-                        'case'(call_local(EncElems, [v("Rest")]), [
-                            ok_bind_clause(v("RestIo"), ok_t(cons(v("E"), v("RestIo")))),
-                            error_clause()
-                        ])
-                    ]),
-                    error_clause()
-                ])
-            ])
-        ]},
+        sequence_encoder_form(
+            Enc,
+            EncElems,
+            list_lit([bin_seg(i(Wire), i(8), [big, unsigned]), i32_seg(call_local(length, [v("Values")]))])
+        ),
+        {function, ?ANNO, EncElems, 1,
+            sequence_encode_elements_form(EncElems, encode_elem_expr(Elem, v("V"), Plan, Enums, ""))},
         {function, ?ANNO, Dec, 1, [
             clause(
                 [bin_pat([{v("_"), default, default}, {v("Size"), i(32), [big, signed]}, {v("_"), default, [binary]}])],
@@ -831,19 +723,10 @@ container_forms({Kind, _} = T, Ctx, Enums) when Kind =:= list; Kind =:= set ->
             ),
             clause([v("_")], none, [at(more)])
         ]},
-        {function, ?ANNO, DecElems, 3, [
-            clause([i(0), v("Rest"), v("Acc")], none, [ok3(remote(lists, reverse, [v("Acc")]), v("Rest"))]),
-            clause([v("N"), v("Bin"), v("Acc")], none, [
-                'case'(decode_elem_expr(Elem, v("Bin"), Ctx, Enums, ""), [
-                    clause([tuple_t([at(ok), v("V"), v("Rest")])], none, [
-                        call_local(DecElems, [{op, ?ANNO, '-', v("N"), i(1)}, v("Rest"), cons(v("V"), v("Acc"))])
-                    ]),
-                    other_tail()
-                ])
-            ])
-        ]}
+        {function, ?ANNO, DecElems, 3,
+            sequence_decode_elements_form(DecElems, decode_elem_expr(Elem, v("Bin"), Plan, Enums, ""), other_tail())}
     ];
-container_forms({map, K, V} = T, Ctx, Enums) ->
+container_forms({map, K, V} = T, Plan, Enums) ->
     KeyWire = wire_byte(K),
     ValWire = wire_byte(V),
     Enc = enc_name(T, Enums),
@@ -889,9 +772,9 @@ container_forms({map, K, V} = T, Ctx, Enums) ->
         {function, ?ANNO, EncPairs, 2, [
             clause([nil(), v("Acc")], none, [ok_t(remote(lists, reverse, [v("Acc")]))]),
             clause([cons(tuple_pat([v("K"), v("V")]), v("Rest")), v("Acc")], none, [
-                'case'(encode_elem_expr(K, v("K"), Ctx, Enums, "K"), [
+                'case'(encode_elem_expr(K, v("K"), Plan, Enums, "K"), [
                     clause([tuple_t([at(ok), v("KE")])], none, [
-                        'case'(encode_elem_expr(V, v("V"), Ctx, Enums, "V"), [
+                        'case'(encode_elem_expr(V, v("V"), Plan, Enums, "V"), [
                             clause([tuple_t([at(ok), v("VE")])], none, [
                                 call_local(EncPairs, [v("Rest"), cons(tuple_t([v("KE"), v("VE")]), v("Acc"))])
                             ]),
@@ -941,26 +824,14 @@ container_forms({map, K, V} = T, Ctx, Enums) ->
             ),
             clause([v("_")], none, [at(more)])
         ]},
-        {function, ?ANNO, DecPairs, 3, [
-            clause([i(0), v("Rest"), v("Acc")], none, [ok3(v("Acc"), v("Rest"))]),
-            clause([v("N"), v("Bin"), v("Acc")], none, [
-                'case'(decode_elem_expr(K, v("Bin"), Ctx, Enums, "K"), [
-                    clause([tuple_t([at(ok), v("K"), v("Rest")])], none, [
-                        'case'(decode_elem_expr(V, v("Rest"), Ctx, Enums, "V"), [
-                            clause([tuple_t([at(ok), v("V"), v("Rest1")])], none, [
-                                call_local(DecPairs, [
-                                    {op, ?ANNO, '-', v("N"), i(1)},
-                                    v("Rest1"),
-                                    map_put(v("Acc"), v("K"), v("V"))
-                                ])
-                            ]),
-                            other_tail()
-                        ])
-                    ]),
-                    other_tail()
-                ])
-            ])
-        ]}
+        {function, ?ANNO, DecPairs, 3,
+            map_decode_pairs_form(
+                DecPairs,
+                decode_elem_expr(K, v("Bin"), Plan, Enums, "K"),
+                decode_elem_expr(V, v("Rest"), Plan, Enums, "V"),
+                other_tail(),
+                other_tail()
+            )}
     ].
 
 %% The encoded pairs of a map, in wire order (the generic engine sorts
@@ -977,24 +848,26 @@ pairs_lc() ->
 %% site, struct references as struct calls, nested containers as helper
 %% calls — the same dispatch the struct fields go through.
 
--spec encode_elem_expr(wire_type(), ast(), #ectx{}, thrift_generator_codec_common:registry(), string()) -> ast().
-encode_elem_expr({base, B}, V, _Ctx, _Enums, Suffix) ->
+-spec encode_elem_expr(wire_type(), ast(), #tg_codec_plan{}, thrift_generator_codec_common:registry(), string()) ->
+    ast().
+encode_elem_expr({base, B}, V, _Plan, _Enums, Suffix) ->
     encode_base_expr(B, V, Suffix);
-encode_elem_expr({enum, _} = T, V, _Ctx, _Enums, Suffix) ->
+encode_elem_expr({enum, _} = T, V, _Plan, _Enums, Suffix) ->
     encode_wire_expr(T, V, undefined, #{}, Suffix);
-encode_elem_expr({struct, {ref, TypesMod, Local}}, V, Ctx, _Enums, _Suffix) ->
-    struct_encode_call(TypesMod, Local, V, Ctx);
-encode_elem_expr(T, V, _Ctx, Enums, _Suffix) ->
+encode_elem_expr({struct, {ref, TypesMod, Local}}, V, Plan, _Enums, _Suffix) ->
+    thrift_generator_codec_plan:struct_call(wire, encode, TypesMod, Local, V, Plan);
+encode_elem_expr(T, V, _Plan, Enums, _Suffix) ->
     call_local(enc_name(T, Enums), [V]).
 
--spec decode_elem_expr(wire_type(), ast(), #ectx{}, thrift_generator_codec_common:registry(), string()) -> ast().
-decode_elem_expr({base, B}, Bin, _Ctx, _Enums, Suffix) ->
+-spec decode_elem_expr(wire_type(), ast(), #tg_codec_plan{}, thrift_generator_codec_common:registry(), string()) ->
+    ast().
+decode_elem_expr({base, B}, Bin, _Plan, _Enums, Suffix) ->
     decode_base_expr(B, Bin, Suffix);
-decode_elem_expr({enum, _} = T, Bin, _Ctx, _Enums, Suffix) ->
+decode_elem_expr({enum, _} = T, Bin, _Plan, _Enums, Suffix) ->
     decode_wire_expr(T, Bin, undefined, #{}, Suffix);
-decode_elem_expr({struct, {ref, TypesMod, Local}}, Bin, Ctx, _Enums, _Suffix) ->
-    struct_decode_call(TypesMod, Local, Bin, Ctx);
-decode_elem_expr(T, Bin, _Ctx, Enums, _Suffix) ->
+decode_elem_expr({struct, {ref, TypesMod, Local}}, Bin, Plan, _Enums, _Suffix) ->
+    thrift_generator_codec_plan:struct_call(wire, decode, TypesMod, Local, Bin, Plan);
+decode_elem_expr(T, Bin, _Plan, Enums, _Suffix) ->
     call_local(dec_name(T, Enums), [Bin]).
 
 %% The shared string/binary decoder — the generic engine's decode_string
@@ -1031,10 +904,6 @@ dec_string_form() ->
 %%--------------------------------------------------------------------
 %% Wire vocabulary
 %%--------------------------------------------------------------------
-
--spec wtype(thrift_type(), #ectx{}) -> wire_type().
-wtype(Type, Ctx) ->
-    thrift_generator_emitter:type_desc(Type, Ctx).
 
 -spec wire_byte(wire_type()) -> non_neg_integer().
 wire_byte({base, bool}) -> 2;
@@ -1083,15 +952,23 @@ repr_decode_name(Decode, Flavor) ->
 %% conversion builds the value as-is), so the one-pass STOP must not
 %% either; the exactly-one rule is enforced on encode only.
 
--spec repr_decode_forms([#tg_struct{}], #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
-repr_decode_forms(Structs, Ctx, Enums) ->
-    Convertible = repr_convertible_structs(Structs),
-    lists:append([repr_decode_struct_forms(S, Ctx, Enums) || S <- Convertible]) ++
-        repr_decode_module_containers(Convertible, Ctx, Enums) ++
+-spec repr_decode_forms([#tg_codec_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+    erl_syntax:forms().
+repr_decode_forms(Entries, Plan, Enums) ->
+    Convertible = repr_convertible_entries(Entries),
+    lists:append([repr_decode_struct_forms(CS, Plan, Enums) || CS <- Convertible]) ++
+        repr_decode_module_containers(Convertible, Plan, Enums) ++
         case Convertible of
             [] -> [];
-            _ -> repr_index_forms(Convertible, Ctx)
+            _ -> repr_index_forms(Convertible, Plan)
         end.
+
+%% The convertible subset of plan entries: the field types travel with
+%% the struct, so the repr paths never re-derive them.
+
+-spec repr_convertible_entries([#tg_codec_struct{}]) -> [#tg_codec_struct{}].
+repr_convertible_entries(Entries) ->
+    [CS || CS <- Entries, repr_convertible(CS#tg_codec_struct.struct)].
 
 %% The repr codec index: per struct and representation, the
 %% {Encode, Decode} pair of the one-pass functions. Sum unions, empty
@@ -1100,9 +977,9 @@ repr_decode_forms(Structs, Ctx, Enums) ->
 %% the native decoder (native input values convert via
 %% thrift_runtime_native:fields/1 at the facade).
 
-repr_index_forms(Convertible, Ctx) ->
+repr_index_forms(Convertible, Plan) ->
     Clauses =
-        lists:append([repr_index_clauses(S, Ctx) || S <- Convertible]) ++
+        lists:append([repr_index_clauses(CS, Plan) || CS <- Convertible]) ++
             [clause([v("_"), v("_")], none, [at(error)])],
     thrift_generator_emitter_syntax:doc_false_form() ++
         [
@@ -1130,8 +1007,9 @@ repr_index_forms(Convertible, Ctx) ->
             {function, ?ANNO, binary_repr_codec, 2, Clauses}
         ].
 
-repr_index_clauses(S, Ctx) ->
-    {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
+repr_index_clauses(CS, Plan) ->
+    S = CS#tg_codec_struct.struct,
+    {Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
     MapPair = tuple_t([
         at(ok),
         tuple_t([at(repr_encode_name(Encode, map)), at(repr_decode_name(Decode, map))])
@@ -1140,7 +1018,7 @@ repr_index_clauses(S, Ctx) ->
         at(ok),
         tuple_t([at(repr_encode_name(Encode, map)), at(repr_decode_name(Decode, struct))])
     ]),
-    case thrift_generator_emitter:has_record(S) of
+    case thrift_generator_ir:has_record(S) of
         true ->
             [
                 clause([bin_lit(S#tg_struct.name), at(record)], none, [
@@ -1163,23 +1041,25 @@ repr_index_clauses(S, Ctx) ->
             clause([bin_lit(S#tg_struct.name), at(struct)], none, [StructPair])
         ].
 
-repr_decode_struct_forms(S, Ctx, Enums) ->
-    {_Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
-    FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
+repr_decode_struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
+    Ctx = Plan#tg_codec_plan.ctx,
+    {_Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
+    FieldTypes = CS#tg_codec_struct.field_types,
     Fields = S#tg_struct.fields,
     Bits = required_bits(Fields),
-    Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
+    Tag = thrift_generator_ir:record_tag_of(S, thrift_generator_names:current_prefix(Ctx)),
     StructTag =
-        case thrift_generator_emitter:has_record(S) of
+        case thrift_generator_ir:has_record(S) of
             true -> Tag;
             %% Map-mode structs tag their struct maps by the wire name
             %% (the same rule the descriptor engine's
             %% wire_to_struct_map(record_tag(Name)) follows).
             false -> binary_to_atom(thrift_generator_names:snake(S#tg_struct.name), utf8)
         end,
-    ModAtom = types_module_atom(Ctx#ectx.current),
+    ModAtom = thrift_generator_names:types_module_atom(Ctx#ectx.current),
     K = length(FieldTypes),
-    Base = #rdc{mod = ModAtom, ctx = Ctx, enums = Enums},
+    Base = #rdc{mod = ModAtom, plan = Plan, enums = Enums},
     MapForms = repr_decode_one(repr_decode_name(Decode, map), Fields, FieldTypes, Bits, K, Base#rdc{
         fields_name = atom_concat(repr_decode_name(Decode, map), <<"_fields">>),
         flavor = map,
@@ -1190,7 +1070,7 @@ repr_decode_struct_forms(S, Ctx, Enums) ->
         flavor = struct,
         tag = StructTag
     }),
-    case thrift_generator_emitter:has_record(S) of
+    case thrift_generator_ir:has_record(S) of
         true ->
             RecName = repr_decode_name(Decode, record),
             NativeName = repr_decode_name(Decode, native),
@@ -1315,7 +1195,7 @@ repr_field_clauses(Fields, FieldTypes, Bits, R) ->
     ]).
 
 repr_field_clause_one(F, T, N, Bits, R) ->
-    #rdc{fields_name = FieldsName, flavor = Flavor, ctx = Ctx, enums = Enums} = R,
+    #rdc{fields_name = FieldsName, flavor = Flavor, plan = Plan, enums = Enums} = R,
     Id = F#tg_field.id,
     Wire = wire_byte(T),
     ReqExpr =
@@ -1325,7 +1205,7 @@ repr_field_clause_one(F, T, N, Bits, R) ->
         end,
     [
         clause([i(Id)], [{op, ?ANNO, '=:=', v("Type"), i(Wire)}], [
-            'case'(repr_field_decode(T, v("Rest"), Flavor, Ctx, Enums, ""), [
+            'case'(repr_field_decode(T, v("Rest"), Flavor, Plan, Enums, ""), [
                 ok3_bind_clause(
                     v("V"),
                     v("Rest1"),
@@ -1359,14 +1239,15 @@ repr_acc_put(_Flavor, F, _N, V) ->
 %% targets answer to the map flavor); containers decode through the
 %% repr helpers with set-impl upgrades.
 
-repr_field_decode({struct, {ref, TypesMod, Local}}, Bin, Flavor, Ctx, Enums, Suffix) ->
+repr_field_decode({struct, {ref, TypesMod, Local}}, Bin, Flavor, Plan, Enums, Suffix) ->
+    Ctx = Plan#tg_codec_plan.ctx,
     case repr_nested_route(TypesMod, Local, Flavor, Ctx) of
         {repr, NestedFlavor} ->
-            repr_struct_decode_call(TypesMod, Local, Bin, NestedFlavor, Ctx);
+            repr_struct_call(decode, TypesMod, Local, Bin, NestedFlavor, Plan);
         wire ->
-            decode_wire_expr({struct, {ref, TypesMod, Local}}, Bin, Ctx, Enums, Suffix)
+            decode_wire_expr({struct, {ref, TypesMod, Local}}, Bin, Plan, Enums, Suffix)
     end;
-repr_field_decode({set, Elem, ordset}, Bin, Flavor, _Ctx, Enums, _Suffix) ->
+repr_field_decode({set, Elem, ordset}, Bin, Flavor, _Plan, Enums, _Suffix) ->
     {Dec, _Aux} = repr_decode_container_names({set, Elem}, Enums, Flavor),
     'case'(call_local(Dec, [Bin]), [
         %% The struct loop consumes the triple and recurses on the rest,
@@ -1378,17 +1259,17 @@ repr_field_decode({set, Elem, ordset}, Bin, Flavor, _Ctx, Enums, _Suffix) ->
         %% the pattern (the error_clause shape, renamed).
         clause([{match, ?ANNO, tuple_t([at(error), v("_")]), v("ErrSet")}], none, [v("ErrSet")])
     ]);
-repr_field_decode({set, Elem, sets}, Bin, Flavor, _Ctx, Enums, _Suffix) ->
+repr_field_decode({set, Elem, sets}, Bin, Flavor, _Plan, Enums, _Suffix) ->
     {Dec, _Aux} = repr_decode_container_names({set, Elem}, Enums, Flavor),
     'case'(call_local(Dec, [Bin]), [
         ok3_bind_clause(v("Vs"), v("RestSet"), ok3(remote(sets, from_list, [v("Vs")]), v("RestSet"))),
         clause([at(more)], none, [at(more)]),
         clause([{match, ?ANNO, tuple_t([at(error), v("_")]), v("ErrSet")}], none, [v("ErrSet")])
     ]);
-repr_field_decode({set, Elem}, Bin, Flavor, _Ctx, Enums, _Suffix) ->
+repr_field_decode({set, Elem}, Bin, Flavor, _Plan, Enums, _Suffix) ->
     {Dec, _Aux} = repr_decode_container_names({set, Elem}, Enums, Flavor),
     call_local(Dec, [Bin]);
-repr_field_decode(T, Bin, Flavor, _Ctx, Enums, Suffix) ->
+repr_field_decode(T, Bin, Flavor, _Plan, Enums, Suffix) ->
     case T of
         {list, _} ->
             {Dec, _Aux} = repr_decode_container_names(T, Enums, Flavor),
@@ -1400,16 +1281,30 @@ repr_field_decode(T, Bin, Flavor, _Ctx, Enums, Suffix) ->
             decode_wire_expr(T, Bin, undefined, Enums, Suffix)
     end.
 
-repr_struct_decode_call(TypesMod, Local, Bin, Flavor, Ctx) ->
-    {_Encode, Decode} =
-        case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-            true -> thrift_generator_codec_common:codec_pair(wire, Local, Ctx);
-            false -> thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx)
+%% The repr-family nested struct call: the same local-vs-remote
+%% dispatch as thrift_generator_codec_plan:struct_call/6, but the
+%% function names carry the representation flavor (and JSON's `_body'
+%% rule never applies — repr codecs are binary-protocol only).
+
+-spec repr_struct_call(encode | decode, module(), binary(), ast(), atom(), #tg_codec_plan{}) -> ast().
+repr_struct_call(Op, TypesMod, Local, Arg, Flavor, Plan) ->
+    Ctx = Plan#tg_codec_plan.ctx,
+    LocalMod = TypesMod =:= thrift_generator_names:types_module_atom(Ctx#ectx.current),
+    {Encode, Decode} =
+        case LocalMod of
+            true ->
+                maps:get(Local, maps:get(wire, Plan#tg_codec_plan.codec_names));
+            false ->
+                thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx)
         end,
-    Name = repr_decode_name(Decode, Flavor),
-    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-        true -> call_local(Name, [Bin]);
-        false -> remote(TypesMod, Name, [Bin])
+    Name =
+        case Op of
+            encode -> repr_encode_name(Encode, Flavor);
+            decode -> repr_decode_name(Decode, Flavor)
+        end,
+    case LocalMod of
+        true -> call_local(Name, [Arg]);
+        false -> remote(TypesMod, Name, [Arg])
     end.
 
 repr_decode_container_names(T, Enums, Flavor) ->
@@ -1426,18 +1321,15 @@ repr_decode_container_names(T, Enums, Flavor) ->
         binary_to_atom(<<Base/binary, AuxSuffix/binary, Suffix/binary>>, utf8)
     }.
 
-repr_decode_module_containers(Convertible, Ctx, Enums) ->
-    WireTypes = lists:append([
-        [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields]
-     || S <- Convertible
-    ]),
+repr_decode_module_containers(Convertible, Plan, Enums) ->
+    WireTypes = lists:append([CS#tg_codec_struct.field_types || CS <- Convertible]),
     Containers = repr_containers(WireTypes),
-    lists:append([repr_decode_container_forms(C, record, Ctx, Enums) || C <- Containers]) ++
-        lists:append([repr_decode_container_forms(C, map, Ctx, Enums) || C <- Containers]) ++
-        lists:append([repr_decode_container_forms(C, struct, Ctx, Enums) || C <- Containers]) ++
-        lists:append([repr_decode_container_forms(C, native, Ctx, Enums) || C <- Containers]).
+    lists:append([repr_decode_container_forms(C, record, Plan, Enums) || C <- Containers]) ++
+        lists:append([repr_decode_container_forms(C, map, Plan, Enums) || C <- Containers]) ++
+        lists:append([repr_decode_container_forms(C, struct, Plan, Enums) || C <- Containers]) ++
+        lists:append([repr_decode_container_forms(C, native, Plan, Enums) || C <- Containers]).
 
-repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= list; Kind =:= set ->
+repr_decode_container_forms({Kind, _} = T, Flavor, Plan, Enums) when Kind =:= list; Kind =:= set ->
     Wire = wire_byte(thrift_generator_codec_common:elem_type(T)),
     {Dec, DecElems} = repr_decode_container_names(T, Enums, Flavor),
     Elem = thrift_generator_codec_common:elem_type(T),
@@ -1498,7 +1390,7 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
                 [err_decode(at(bad_sequence_size))]
             ),
             clause([v("Rest"), v("Size"), v("Acc")], none, [
-                'case'(repr_field_decode(Elem, v("Rest"), Flavor, Ctx, Enums, "E"), [
+                'case'(repr_field_decode(Elem, v("Rest"), Flavor, Plan, Enums, "E"), [
                     ok3_bind_clause(
                         v("V"),
                         v("Rest1"),
@@ -1514,7 +1406,7 @@ repr_decode_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= lis
             ])
         ]}
     ];
-repr_decode_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
+repr_decode_container_forms({map, KType, VType} = T, Flavor, Plan, Enums) ->
     KWire = wire_byte(KType),
     VWire = wire_byte(VType),
     {Dec, DecPairs} = repr_decode_container_names(T, Enums, Flavor),
@@ -1574,11 +1466,11 @@ repr_decode_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
                 [err_decode(at(bad_map_size))]
             ),
             clause([v("Rest"), v("Size"), v("Acc")], none, [
-                'case'(repr_field_decode(KType, v("Rest"), Flavor, Ctx, Enums, "K"), [
+                'case'(repr_field_decode(KType, v("Rest"), Flavor, Plan, Enums, "K"), [
                     ok3_bind_clause(
                         v("K"),
                         v("Rest1"),
-                        'case'(repr_field_decode(VType, v("Rest1"), Flavor, Ctx, Enums, "V"), [
+                        'case'(repr_field_decode(VType, v("Rest1"), Flavor, Plan, Enums, "V"), [
                             ok3_bind_clause(
                                 v("V"),
                                 v("Rest2"),
@@ -1629,16 +1521,15 @@ repr_index_entries(Mod) ->
         _ -> [{binary_repr_codec, 2}]
     end.
 
--spec repr_encode_export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
-repr_encode_export_entries(Mod, Ctx) ->
-    Convertible = repr_convertible_structs(Mod#tg_module.structs),
-    WireTypes = [
-        wtype(F#tg_field.type, Ctx)
-     || S <- Convertible,
-        F <- S#tg_struct.fields
-    ],
-    StructPairs = [repr_codec_export_entries(S, Ctx) || S <- Convertible],
-    Enums = thrift_generator_codec_common:enum_registry(WireTypes),
+-spec repr_encode_export_entries(#tg_codec_plan{}) -> [{atom(), arity()}].
+repr_encode_export_entries(Plan) ->
+    %% The export list must agree with the repr forms exactly, so it
+    %% takes the codec names and the enum registry from the plan instead
+    %% of recomputing its own.
+    Convertible = repr_convertible_entries(Plan#tg_codec_plan.declared),
+    Enums = Plan#tg_codec_plan.enums,
+    StructPairs = [repr_codec_export_entries(CS, Plan) || CS <- Convertible],
+    WireTypes = lists:append([CS#tg_codec_struct.field_types || CS <- Convertible]),
     EncContainerEntries = lists:append([
         repr_enc_container_entries(C, Enums)
      || C <- repr_containers(WireTypes)
@@ -1654,11 +1545,12 @@ repr_encode_export_entries(Mod, Ctx) ->
 %% from_record/from_map encoders (record only when the struct has a
 %% record) and the map/struct decoders (record/native likewise).
 
-repr_codec_export_entries(S, Ctx) ->
-    {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
+repr_codec_export_entries(CS, Plan) ->
+    S = CS#tg_codec_struct.struct,
+    {Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
     EncEntries = [{repr_encode_name(Encode, map), 1}],
     Enc =
-        case thrift_generator_emitter:has_record(S) of
+        case thrift_generator_ir:has_record(S) of
             true -> [{repr_encode_name(Encode, record), 1} | EncEntries];
             false -> EncEntries
         end,
@@ -1667,7 +1559,7 @@ repr_codec_export_entries(S, Ctx) ->
         {repr_decode_name(Decode, struct), 1}
     ],
     Dec =
-        case thrift_generator_emitter:has_record(S) of
+        case thrift_generator_ir:has_record(S) of
             true ->
                 [
                     {repr_decode_name(Decode, record), 1},
@@ -1746,17 +1638,18 @@ repr_container_names(T, Enums, Flavor) ->
 %% get a family (empty unions never reach a chain; their wire entry
 %% errors first, and emitting one would leave it unreachable).
 
--spec repr_encode_forms([#tg_struct{}], #ectx{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
-repr_encode_forms(Structs, Ctx, Enums) ->
+-spec repr_encode_forms([#tg_codec_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+    erl_syntax:forms().
+repr_encode_forms(Entries, Plan, Enums) ->
     %% Every struct with fields gets the from_map encoder (its values
     %% are maps in map mode and map-repr inputs in record mode);
     %% from_record exists only for record-mode structs. Sum unions and
     %% empty unions stay on the wire path. Container helpers are
     %% module-level: the same container type used by several structs
     %% must be emitted exactly once.
-    Convertible = repr_convertible_structs(Structs),
-    lists:append([repr_encode_struct_forms(S, Ctx, Enums) || S <- Convertible]) ++
-        repr_encode_module_containers(Convertible, Ctx, Enums).
+    Convertible = repr_convertible_entries(Entries),
+    lists:append([repr_encode_struct_forms(CS, Plan, Enums) || CS <- Convertible]) ++
+        repr_encode_module_containers(Convertible, Plan, Enums).
 
 repr_convertible_structs(Structs) ->
     %% Empty structs get entry-only encoders (the chain closes with the
@@ -1771,34 +1664,33 @@ repr_convertible_structs(Structs) ->
 repr_convertible(#tg_struct{kind = struct}) ->
     true;
 repr_convertible(#tg_struct{kind = union} = S) ->
-    S#tg_struct.fields =/= [] andalso thrift_generator_emitter:has_record(S);
+    S#tg_struct.fields =/= [] andalso thrift_generator_ir:has_record(S);
 repr_convertible(_) ->
     false.
 
-repr_encode_struct_forms(S, Ctx, Enums) ->
-    {Encode, _Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
-    FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
+repr_encode_struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
+    Ctx = Plan#tg_codec_plan.ctx,
+    {Encode, _Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
+    FieldTypes = CS#tg_codec_struct.field_types,
     MapName = repr_encode_name(Encode, map),
     MapForms =
         repr_encode_entry(S, MapName, undefined, FieldTypes, map) ++
-            repr_encode_chain(S, MapName, FieldTypes, map, Ctx, Enums),
-    case thrift_generator_emitter:has_record(S) of
+            repr_encode_chain(S, MapName, FieldTypes, map, Plan, Enums),
+    case thrift_generator_ir:has_record(S) of
         true ->
-            Tag = thrift_generator_emitter:record_tag_of(S, thrift_generator_codec_common:current_prefix(Ctx)),
+            Tag = thrift_generator_ir:record_tag_of(S, thrift_generator_names:current_prefix(Ctx)),
             RecName = repr_encode_name(Encode, record),
             repr_encode_entry(S, RecName, Tag, FieldTypes, record) ++
-                repr_encode_chain(S, RecName, FieldTypes, record, Ctx, Enums) ++
+                repr_encode_chain(S, RecName, FieldTypes, record, Plan, Enums) ++
                 MapForms;
         false ->
             MapForms
     end.
 
-repr_encode_module_containers(Convertible, Ctx, Enums) ->
-    WireTypes = lists:append([
-        [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields]
-     || S <- Convertible
-    ]),
-    repr_encode_containers(WireTypes, Ctx, Enums).
+repr_encode_module_containers(Convertible, Plan, Enums) ->
+    WireTypes = lists:append([CS#tg_codec_struct.field_types || CS <- Convertible]),
+    repr_encode_containers(WireTypes, Plan, Enums).
 
 %% Entry functions: the record family matches the whole tuple once and
 %% hands the field values to the chain; the map family guards is_map.
@@ -1967,11 +1859,11 @@ repr_union_check_map(Fields, Call) ->
 %% trees). Record chains carry the remaining field values; map chains
 %% carry the map and read each field with binary-name-first lookup.
 
-repr_encode_chain(S, Name, FieldTypes, Flavor, Ctx, Enums) ->
+repr_encode_chain(S, Name, FieldTypes, Flavor, Plan, Enums) ->
     Chain = atom_concat(Name, <<"_fields">>),
     K = length(FieldTypes),
     Pairs = lists:zip(lists:seq(1, K), lists:zip(S#tg_struct.fields, FieldTypes)),
-    R = #rcc{chain = Chain, k = K, flavor = Flavor, ctx = Ctx, enums = Enums},
+    R = #rcc{chain = Chain, k = K, flavor = Flavor, plan = Plan, enums = Enums},
     repr_chain_fns(Pairs, R).
 
 repr_chain_fns([], _R) ->
@@ -1989,7 +1881,7 @@ repr_chain_fns([{N, {F, T}} | Rest], R) ->
     [repr_chain_fn(N, F, T, Next, R)] ++ repr_chain_fns(Rest, R).
 
 repr_chain_fn(N, F, T, Next, R) ->
-    #rcc{chain = Chain, k = K, flavor = Flavor, ctx = Ctx, enums = Enums} = R,
+    #rcc{chain = Chain, k = K, flavor = Flavor, plan = Plan, enums = Enums} = R,
     Header = header_bin(wire_byte(T), F#tg_field.id),
     Val =
         case Flavor of
@@ -1999,16 +1891,16 @@ repr_chain_fn(N, F, T, Next, R) ->
     Body =
         case Flavor of
             record ->
-                repr_record_field_body(T, Val, Header, Next, Ctx, Enums);
+                repr_record_field_body(T, Val, Header, Next, Plan, Enums);
             map ->
                 'case'(remote(maps, find, [name_lit(F#tg_field.name), v("Value")]), [
                     clause([tuple_t([at(ok), Val])], none, [
-                        repr_field_step(T, Val, Header, Next, Flavor, Ctx, Enums)
+                        repr_field_step(T, Val, Header, Next, Flavor, Plan, Enums)
                     ]),
                     clause([at(error)], none, [
                         'case'(remote(maps, find, [at(field_atom(F#tg_field.name)), v("Value")]), [
                             clause([tuple_t([at(ok), Val])], none, [
-                                repr_field_step(T, Val, Header, Next, Flavor, Ctx, Enums)
+                                repr_field_step(T, Val, Header, Next, Flavor, Plan, Enums)
                             ]),
                             clause([at(error)], none, [Next])
                         ])
@@ -2026,19 +1918,19 @@ repr_chain_fn(N, F, T, Next, R) ->
 %% base types (payload straight into the chunk, mirroring the wire
 %% chain's base fast path) or a {ok, E} step for the rest.
 
-repr_record_field_body({base, B}, Val, Header, Next, _Ctx, _Enums) ->
+repr_record_field_body({base, B}, Val, Header, Next, _Plan, _Enums) ->
     %% The base clauses end with the mismatch clause — a bound record
     %% field is either undefined, valid, or an error; there is no
     %% absent-shape fallthrough like the wire chain's missing key.
     'case'(Val, repr_base_clauses(B, Header, Next));
-repr_record_field_body(T, Val, Header, Next, Ctx, Enums) ->
+repr_record_field_body(T, Val, Header, Next, Plan, Enums) ->
     'case'(Val, [
         clause([at(undefined)], none, [Next]),
-        clause([v("_V")], none, [repr_field_step(T, v("_V"), Header, Next, record, Ctx, Enums)])
+        clause([v("_V")], none, [repr_field_step(T, v("_V"), Header, Next, record, Plan, Enums)])
     ]).
 
-repr_field_step(T, Val, Header, Next, Flavor, Ctx, Enums) ->
-    'case'(repr_field_encode(T, Val, Flavor, Ctx, Enums, ""), [
+repr_field_step(T, Val, Header, Next, Flavor, Plan, Enums) ->
+    'case'(repr_field_encode(T, Val, Flavor, Plan, Enums, ""), [
         clause([tuple_t([at(ok), v("E")])], none, [
             'case'(Next, [
                 ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, v("E")]), v("Rest")))),
@@ -2052,27 +1944,27 @@ repr_field_step(T, Val, Header, Next, Flavor, Ctx, Enums) ->
 %% inline, enums reuse the wire shape, structs recurse into the same
 %% repr's encoder, containers into the repr container helper.
 
-repr_field_encode({base, B}, Val, _Flavor, _Ctx, _Enums, Suffix) ->
+repr_field_encode({base, B}, Val, _Flavor, _Plan, _Enums, Suffix) ->
     'case'(Val, repr_base_value_clauses(B, Suffix));
-repr_field_encode({enum, Desc}, Val, _Flavor, Ctx, Enums, Suffix) ->
-    encode_wire_expr({enum, Desc}, Val, Ctx, Enums, Suffix);
-repr_field_encode({struct, {ref, TypesMod, Local}}, Val, Flavor, Ctx, _Enums, _Suffix) ->
+repr_field_encode({enum, Desc}, Val, _Flavor, Plan, Enums, Suffix) ->
+    encode_wire_expr({enum, Desc}, Val, Plan, Enums, Suffix);
+repr_field_encode({struct, {ref, TypesMod, Local}}, Val, Flavor, Plan, _Enums, _Suffix) ->
     %% A map-mode nested struct is a map in every representation (the
     %% conversion engine never builds a record for it), so the record
     %% chain reads it with the map encoder.
     NestedFlavor =
-        case Flavor =:= record andalso not nested_has_record(TypesMod, Local, Ctx) of
+        case Flavor =:= record andalso not nested_has_record(TypesMod, Local, Plan#tg_codec_plan.ctx) of
             true -> map;
             false -> Flavor
         end,
-    repr_struct_encode_call(TypesMod, Local, Val, NestedFlavor, Ctx);
-repr_field_encode({set, Elem, sets}, Val, Flavor, _Ctx, Enums, _Suffix) ->
+    repr_struct_call(encode, TypesMod, Local, Val, NestedFlavor, Plan);
+repr_field_encode({set, Elem, sets}, Val, Flavor, _Plan, Enums, _Suffix) ->
     {Enc, _Elems} = repr_container_names({set, Elem}, Enums, Flavor),
     call_local(Enc, [remote(sets, to_list, [Val])]);
-repr_field_encode({set, Elem, ordset}, Val, Flavor, _Ctx, Enums, _Suffix) ->
+repr_field_encode({set, Elem, ordset}, Val, Flavor, _Plan, Enums, _Suffix) ->
     {Enc, _Elems} = repr_container_names({set, Elem}, Enums, Flavor),
     call_local(Enc, [Val]);
-repr_field_encode(T, Val, Flavor, _Ctx, Enums, _Suffix) ->
+repr_field_encode(T, Val, Flavor, _Plan, Enums, _Suffix) ->
     {Enc, _Elems} = repr_container_names(T, Enums, Flavor),
     call_local(Enc, [Val]).
 
@@ -2098,36 +1990,25 @@ nested_mode(TypesMod, Local, Ctx) ->
         Mod ->
             case lists:search(fun(S) -> S#tg_struct.name =:= Local end, Mod#tg_module.structs) of
                 {value, S} ->
-                    case thrift_generator_emitter:has_record(S) of
+                    case thrift_generator_ir:has_record(S) of
                         true -> record;
-                        false -> {map, thrift_generator_emitter:map_key_type(S)}
+                        false -> {map, thrift_generator_ir:map_key_type(S)}
                     end;
                 false ->
                     record
             end
     end.
 
+%% The descriptor carries the generated types-module atom, where the
+%% module index is keyed by module name: find the owner by its derived
+%% types-module name.
+
+-spec nested_module(module(), #ectx{}) -> #tg_module{} | undefined.
 nested_module(TypesMod, Ctx) ->
-    case maps:get(TypesMod, Ctx#ectx.modules, undefined) of
-        undefined ->
-            nested_include_module(TypesMod, Ctx);
-        M ->
-            M
-    end.
-
-nested_include_module(TypesMod, Ctx) ->
-    case maps:get(TypesMod, Ctx#ectx.include_modules, undefined) of
-        undefined ->
-            find_module_by_types_name(TypesMod, Ctx);
-        Key ->
-            maps:get(Key, Ctx#ectx.modules, undefined)
-    end.
-
-find_module_by_types_name(TypesMod, Ctx) ->
     Matches = [
         M
      || M <- maps:values(Ctx#ectx.modules),
-        types_module_atom(M#tg_module.name) =:= TypesMod
+        thrift_generator_names:types_module_atom(M#tg_module.name) =:= TypesMod
     ],
     case Matches of
         [] -> undefined;
@@ -2136,18 +2017,6 @@ find_module_by_types_name(TypesMod, Ctx) ->
 
 nested_has_record(TypesMod, Local, Ctx) ->
     nested_mode(TypesMod, Local, Ctx) =:= record.
-
-repr_struct_encode_call(TypesMod, Local, V, Flavor, Ctx) ->
-    {Encode, _Decode} =
-        case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-            true -> thrift_generator_codec_common:codec_pair(wire, Local, Ctx);
-            false -> thrift_generator_codec_common:ref_codec_pair(wire, TypesMod, Local, Ctx)
-        end,
-    Name = repr_encode_name(Encode, Flavor),
-    case TypesMod =:= types_module_atom(Ctx#ectx.current) of
-        true -> call_local(Name, [V]);
-        false -> remote(TypesMod, Name, [V])
-    end.
 
 %% Base-type value clauses: the same guards and payloads the wire
 %% chain's base clauses use, but matched against a bound value.
@@ -2202,16 +2071,11 @@ repr_base_present_clauses(B, Header, Next) ->
                     )
                 ];
             _ ->
-                Bits = bits(B),
                 [
                     clause(
                         [V],
-                        [
-                            remote(erlang, is_integer, [V]),
-                            {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
-                            {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
-                        ],
-                        [Wrap(bin_seg(V, i(Bits), [big, signed]))]
+                        integer_guard(B, V),
+                        [Wrap(bin_seg(V, i(bits(B)), [big, signed]))]
                     )
                 ]
         end,
@@ -2254,16 +2118,11 @@ repr_base_value_clauses(B, Suffix) ->
                     )
                 ];
             _ ->
-                Bits = bits(B),
                 [
                     clause(
                         [V],
-                        [
-                            remote(erlang, is_integer, [V]),
-                            {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
-                            {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
-                        ],
-                        [ok_t(bin_seg(V, i(Bits), [big, signed]))]
+                        integer_guard(B, V),
+                        [ok_t(bin_seg(V, i(bits(B)), [big, signed]))]
                     )
                 ]
         end,
@@ -2272,12 +2131,12 @@ repr_base_value_clauses(B, Suffix) ->
 %% Repr container helpers: the wire container form with the element
 %% encode expression replaced by the same-repr field encode.
 
-repr_encode_containers(FieldTypes, Ctx, Enums) ->
+repr_encode_containers(FieldTypes, Plan, Enums) ->
     Containers = lists:usort(lists:append([thrift_generator_codec_common:containers(T) || T <- FieldTypes])),
-    lists:append([repr_container_forms(C, record, Ctx, Enums) || C <- Containers]) ++
-        lists:append([repr_container_forms(C, map, Ctx, Enums) || C <- Containers]).
+    lists:append([repr_container_forms(C, record, Plan, Enums) || C <- Containers]) ++
+        lists:append([repr_container_forms(C, map, Plan, Enums) || C <- Containers]).
 
-repr_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= list; Kind =:= set ->
+repr_container_forms({Kind, _} = T, Flavor, Plan, Enums) when Kind =:= list; Kind =:= set ->
     Wire = wire_byte(thrift_generator_codec_common:elem_type(T)),
     {Enc, EncElems} = repr_container_names(T, Enums, Flavor),
     Elem = thrift_generator_codec_common:elem_type(T),
@@ -2304,7 +2163,7 @@ repr_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= list; Kind
         {function, ?ANNO, EncElems, 1, [
             clause([nil()], none, [ok_t(nil())]),
             clause([cons(v("V"), v("Rest"))], none, [
-                'case'(repr_field_encode(Elem, v("V"), Flavor, Ctx, Enums, ""), [
+                'case'(repr_field_encode(Elem, v("V"), Flavor, Plan, Enums, ""), [
                     clause([tuple_t([at(ok), v("E")])], none, [
                         'case'(call_local(EncElems, [v("Rest")]), [
                             ok_bind_clause(v("RestIo"), ok_t(cons(v("E"), v("RestIo")))),
@@ -2316,7 +2175,7 @@ repr_container_forms({Kind, _} = T, Flavor, Ctx, Enums) when Kind =:= list; Kind
             ])
         ]}
     ];
-repr_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
+repr_container_forms({map, KType, VType} = T, Flavor, Plan, Enums) ->
     KeyWire = wire_byte(KType),
     ValWire = wire_byte(VType),
     {Enc, EncPairs} = repr_container_names(T, Enums, Flavor),
@@ -2360,9 +2219,9 @@ repr_container_forms({map, KType, VType} = T, Flavor, Ctx, Enums) ->
         {function, ?ANNO, EncPairs, 2, [
             clause([nil(), v("Acc")], none, [ok_t(remote(lists, reverse, [v("Acc")]))]),
             clause([cons(tuple_pat([v("K"), v("V")]), v("Rest")), v("Acc")], none, [
-                'case'(repr_field_encode(KType, v("K"), Flavor, Ctx, Enums, "K"), [
+                'case'(repr_field_encode(KType, v("K"), Flavor, Plan, Enums, "K"), [
                     clause([tuple_t([at(ok), v("KE")])], none, [
-                        'case'(repr_field_encode(VType, v("V"), Flavor, Ctx, Enums, "V"), [
+                        'case'(repr_field_encode(VType, v("V"), Flavor, Plan, Enums, "V"), [
                             clause([tuple_t([at(ok), v("VE")])], none, [
                                 call_local(EncPairs, [v("Rest"), cons(tuple_t([v("KE"), v("VE")]), v("Acc"))])
                             ]),

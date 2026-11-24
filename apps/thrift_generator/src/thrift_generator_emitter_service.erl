@@ -69,7 +69,7 @@ service_module(Mod, Name, Kind) ->
             P -> P
         end,
     Base =
-        <<Prefix/binary, "_", (thrift_generator_names:snake(thrift_generator_emitter:sanitize(Name)))/binary>>,
+        <<Prefix/binary, "_", (thrift_generator_names:snake(thrift_generator_names:sanitize(Name)))/binary>>,
     binary_to_atom(<<Base/binary, (kind_suffix(Kind))/binary>>, utf8).
 
 %% The service's IDL doc comment appended to a generated module doc.
@@ -105,11 +105,11 @@ repr_text(Svc, Mod, Template) ->
 repr_names(Svc, Mod) ->
     ByName = #{S#tg_struct.name => S || S <- Mod#tg_module.structs},
     lists:usort([
-        case thrift_generator_emitter:sum_mode(S) of
+        case thrift_generator_ir:sum_mode(S) of
             true ->
                 sum;
             false ->
-                thrift_generator_emitter:struct_type(S)
+                thrift_generator_ir:struct_type(S)
         end
      || Name <- service_struct_names(Svc, Mod),
         S <- [maps:get(Name, ByName)]
@@ -159,9 +159,9 @@ handler_forms(Svc, Mod, HandlerMod, Ctx) ->
     %% types module — the handler declares no local types itself.
     Ctx1 = Ctx#ectx{qualify = true},
     Records = lists:append([
-        thrift_generator_emitter:record_form(S, Mod#tg_module.prefix, Ctx1)
+        thrift_generator_emitter_record:record_form(S, Mod#tg_module.prefix, Ctx1)
      || S <- Mod#tg_module.structs,
-        thrift_generator_emitter:has_record(S),
+        thrift_generator_ir:has_record(S),
         lists:member(S#tg_struct.name, Needed)
     ]),
     Callbacks = lists:append([callback_form(F, Ctx1) || F <- Svc#tg_service.functions]),
@@ -194,7 +194,7 @@ service_struct_names(Svc, Mod) ->
         ]),
     expand_structs(Seeds, ByName, #{}).
 
--spec function_types(#tg_function{}) -> [thrift_type()].
+-spec function_types(#tg_function{}) -> [resolved_thrift_type()].
 function_types(F) ->
     [T || P <- F#tg_function.params, T <- [P#tg_field.type]] ++
         case F#tg_function.return_type of
@@ -203,9 +203,9 @@ function_types(F) ->
         end ++
         [P#tg_field.type || P <- F#tg_function.throws].
 
--spec ref_names(thrift_type()) -> [binary()].
-ref_names({ref, Name, _}) ->
-    [Name];
+-spec ref_names(resolved_thrift_type()) -> [binary()].
+ref_names({resolved_ref, _Mod, Local, _}) ->
+    [Local];
 ref_names({list, T, _}) ->
     ref_names(T);
 ref_names({set, T, _}) ->
@@ -236,7 +236,7 @@ expand_structs([Name | Rest], ByName, Seen) ->
 
 -spec callback_form(#tg_function{}, #ectx{}) -> erl_syntax:forms().
 callback_form(F, Ctx) ->
-    ParamTypes = [thrift_generator_emitter:erlang_type(Field#tg_field.type, Ctx) || Field <- F#tg_function.params],
+    ParamTypes = [thrift_generator_ir:erlang_type(Field#tg_field.type, Ctx) || Field <- F#tg_function.params],
     RetType = thrift_generator_emitter_syntax:remote_type(thrift_runtime_service, handler_result),
     FunType = thrift_generator_emitter_syntax:fun_type(ParamTypes, RetType),
     thrift_generator_emitter_syntax:doc_form(F#tg_function.doc, callback_doc(F)) ++
@@ -274,7 +274,9 @@ callback_doc(F) ->
                             "Handler callback for ~ts: called as"
                             " `Handler:~ts(Args...)` in declaration order;"
                             " answers `{ok, Value}` with the reply value"
-                            " — a `thrift_runtime_service:handler_result()`.",
+                            " — a `thrift_runtime_service:handler_result()`;"
+                            " a declared exception is still"
+                            " `{error, {exception, ...}}`.",
                             [Name, Name]
                         )
                     )
@@ -407,7 +409,7 @@ client_fn(F, Ctx) ->
             erl_syntax:atom(thrift_runtime_record),
             erl_syntax:atom(args_to_wire),
             [
-                thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:params_desc(F, Ctx)),
+                thrift_generator_emitter_syntax:abstract(thrift_generator_ir:params_desc(F, Ctx)),
                 erl_syntax:list(param_vars(NParams))
             ]
         ),
@@ -423,8 +425,8 @@ client_fn(F, Ctx) ->
                         erl_syntax:atom(thrift_runtime_record),
                         erl_syntax:atom(call_result_from_wire),
                         [
-                            thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:reply_desc(F, Ctx)),
-                            thrift_generator_emitter_syntax:abstract(thrift_generator_emitter:exceptions_desc(F, Ctx)),
+                            thrift_generator_emitter_syntax:abstract(thrift_generator_ir:reply_desc(F, Ctx)),
+                            thrift_generator_emitter_syntax:abstract(thrift_generator_ir:exceptions_desc(F, Ctx)),
                             RawCall
                         ]
                     )

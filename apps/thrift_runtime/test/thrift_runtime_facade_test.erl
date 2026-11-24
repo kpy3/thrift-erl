@@ -922,6 +922,10 @@ with_server(Opts, Test) ->
         stop_quietly(Server)
     end.
 
+%% Cleanup must never mask the failure under test: negative scenarios
+%% can already have taken the server down (a crashed connection closes
+%% it), so a stop that races the crash is as good as a quiet one.
+
 -spec stop_quietly(pid()) -> ok.
 stop_quietly(Server) ->
     try thrift_runtime_server:stop(Server) of

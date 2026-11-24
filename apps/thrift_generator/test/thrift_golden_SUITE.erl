@@ -431,17 +431,18 @@ compile_official_generated(GenDir) ->
 %% data dir). Our side is renamed as a whole: the committed official
 %% code owns `thrift_test_types` (from the same `namespace * thrift.test`),
 %% so module and the namespace-derived identifier prefix both become
-%% `goldentest` and the two generations coexist in the test VM.
+%% `goldentest` and the two generations coexist in the test VM. The
+%% rename happens on the loaded entries, before analysis: resolution
+%% bakes the module keys into the model's references, so the names
+%% analysis must resolve against have to be the final ones.
 load_our_thrift_test_modules(DataDir) ->
     ThriftFile = filename:join(DataDir, "ThriftTest.thrift"),
-    {ok, Loaded} = thrift_generator_loader:load(ThriftFile),
-    {ok, Model0} = thrift_generator_semantic:analyze(Loaded),
-    Model = Model0#tg_model{
-        modules = [
-            Mod#tg_module{name = <<"goldentest">>, prefix = <<"goldentest">>}
-         || Mod <- Model0#tg_model.modules
-        ]
-    },
+    {ok, Loaded0} = thrift_generator_loader:load(ThriftFile),
+    Loaded = [
+        L#tg_loaded{name = <<"goldentest">>, prefix = <<"goldentest">>}
+     || L <- Loaded0
+    ],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Beams = thrift_generator_emitter:compile_sources(Model),
     lists:foreach(
         fun

@@ -860,6 +860,9 @@ raw_http_oneway(Sock, Name) ->
     Request = thrift_runtime_http:request(<<"localhost">>, <<"/">>, [], Message),
     ok = gen_tcp:send(Sock, iolist_to_binary(Request)),
     {200, <<>>} = recv_http_response(Sock),
+    %% The acknowledgement is pinned by the silence that follows: 400 ms
+    %% is far beyond loopback latency yet short enough to keep the suite
+    %% honest — a second response would arrive well inside the window.
     {error, timeout} = gen_tcp:recv(Sock, 0, 400),
     ok.
 

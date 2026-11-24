@@ -117,19 +117,12 @@ run("clean", Parsed, _Options) ->
     clean(maps:get(out_dir, Parsed, <<"src">>), resolver(Parsed)).
 
 %% The parsed generate/check options are exactly the library's options
-%% map: argparse defaults and the library defaults agree, and the
-%% CLI-only keys (file, help, compact_errors) never reach it.
+%% map: argparse already applied every default, so the projection just
+%% keeps the library keys (file, help, compact_errors never reach it).
 
 -spec gen_opts(argparse:arg_map()) -> thrift_generator:generate_opts().
 gen_opts(Parsed) ->
-    #{
-        out_dir => maps:get(out_dir, Parsed, <<"src">>),
-        repr => maps:get(repr, Parsed, record),
-        union_type => maps:get(union_type, Parsed, record),
-        set => maps:get(set, Parsed, list),
-        typedef_type => maps:get(typedef_type, Parsed, alias),
-        enum_case => maps:get(enum_case, Parsed, preserve)
-    }.
+    maps:with([out_dir, repr, union_type, set, typedef_type, enum_case], Parsed).
 
 -spec resolver(argparse:arg_map()) -> thrift_generator_diagnostic:source_fun().
 resolver(Parsed) ->
@@ -145,7 +138,12 @@ parse_error(Message, Options) ->
     ]),
     halt(1).
 
--doc "The argparse dispatcher: one top-level help argument, and the generate/check/clean subcommand specs.".
+%% The argparse dispatcher: one top-level help argument, and the
+%% generate/check/clean subcommand specs. Exported for the CLI unit
+%% tests only — `main/1' halts the emulator, so the grammar is pinned
+%% through this function.
+
+-doc false.
 -spec command() -> argparse:command().
 command() ->
     #{

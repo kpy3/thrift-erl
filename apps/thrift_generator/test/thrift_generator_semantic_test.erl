@@ -30,6 +30,9 @@
     throw_not_exception_error_test/0,
     throw_required_field_error_test/0,
     throw_typedef_exception_test/0,
+    throw_typedef_chain_into_root_test/0,
+    const_typedef_chain_into_root_test/0,
+    const_typedef_chain_no_local_shadowing_test/0,
     throw_typedef_struct_error_test/0,
     throw_typedef_base_error_test/0,
     throw_typedef_cycle_error_test/0,
@@ -42,6 +45,7 @@
     service_extends_merge_test/0,
     override_inherited_error_test/0,
     recursive_struct_ok_test/0,
+    resolved_recursive_ref_test/0,
     default_from_const_test/0,
     generated_tag_clash_error_test/0,
     enum_prefix_clash_error_test/0,
@@ -134,7 +138,74 @@ throw_typedef_exception_test() ->
         >>
     ),
     [#tg_service{functions = [Function]}] = (model_module(Model))#tg_module.services,
-    [#tg_field{type = {ref, <<"Alias2">>, #{}}}] = Function#tg_function.throws,
+    %% the throw keeps the typedef alias, now resolved to its module
+    [#tg_field{type = {resolved_ref, <<"t">>, <<"Alias2">>, #{}}}] = Function#tg_function.throws,
+    ok.
+
+%% A typedef chain that hops into a module analyzed LATER (the root, from
+%% its include's point of view) must follow the chain in the OWNING
+%% module's context: the include is analyzed before the root published
+%% its resolved typedef bodies, so chain following has to normalize the
+%% root's parsed bodies on demand, at home.
+
+throw_typedef_chain_into_root_test() ->
+    ?assertMatch(
+        {ok, _},
+        analyze_root_include(
+            <<
+                "namespace erl root\n"
+                "exception E {}\n"
+                "typedef E Chained\n"
+            >>,
+            <<
+                "namespace erl inc\n"
+                "typedef root.Chained X\n"
+                "service S { void f() throws (1: X e) }"
+            >>
+        )
+    ),
+    ok.
+
+const_typedef_chain_into_root_test() ->
+    ?assertMatch(
+        {ok, _},
+        analyze_root_include(
+            <<
+                "namespace erl root\n"
+                "typedef i32 Base\n"
+                "typedef Base Chained\n"
+            >>,
+            <<
+                "namespace erl inc\n"
+                "typedef root.Chained X\n"
+                "const X c = 5"
+            >>
+        )
+    ),
+    ok.
+
+%% The same chain must not leak into the consuming module: a plain name
+%% inside the root's parsed body means the ROOT's definition, never the
+%% include's same-named typedef — following the local name would falsely
+%% accept a value the real chain (into a string) must reject.
+
+const_typedef_chain_no_local_shadowing_test() ->
+    ?assertMatch(
+        {error, [{<<"inc.thrift">>, _, <<"constant c: value 5 does not match type ", _/binary>>}]},
+        analyze_root_include(
+            <<
+                "namespace erl root\n"
+                "typedef string Base\n"
+                "typedef Base Chained\n"
+            >>,
+            <<
+                "namespace erl inc\n"
+                "typedef root.Chained X\n"
+                "typedef i32 Base\n"
+                "const X c = 5"
+            >>
+        )
+    ),
     ok.
 
 throw_typedef_struct_error_test() ->
@@ -257,6 +328,18 @@ recursive_struct_ok_test() ->
     %% "next" is a reserved IDL keyword; "tail" is not.
     {ok, Model} = analyze(<<"struct N { 1: optional N tail }">>),
     [#tg_struct{name = <<"N">>}] = (model_module(Model))#tg_module.structs,
+    ok.
+
+%% Successful models carry resolved references: every typed position names
+%% the defining module and the local name, replacing the parsed {ref, ...}
+%% spelling. A self-recursive struct resolves to its own module; the
+%% emission layer lowers the ref to a named struct descriptor instead of
+%% expanding it (pinned end to end in thrift_generator_SUITE).
+
+resolved_recursive_ref_test() ->
+    {ok, Model} = analyze(<<"struct N { 1: optional N tail }">>),
+    [#tg_struct{name = <<"N">>, fields = [Tail]}] = (model_module(Model))#tg_module.structs,
+    ?assertEqual({resolved_ref, <<"t">>, <<"N">>, #{}}, Tail#tg_field.type),
     ok.
 
 default_from_const_test() ->
@@ -661,3 +744,22 @@ analyze_opts(Snippet, Opts) ->
     {ok, Doc} = thrift_generator:parse_string(Snippet),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     thrift_generator_semantic:analyze(Loaded, Opts).
+
+%% Analyzes a root and its include the way the loader orders them (root
+%% first, dependencies resolved during analysis in reverse): the include
+%% is analyzed BEFORE the root, so the root's typedef index still holds
+%% parsed bodies while the include is being checked.
+
+-spec analyze_root_include(binary() | string(), binary() | string()) ->
+    {ok, #tg_model{}} | {error, term()}.
+analyze_root_include(RootSnippet, IncludeSnippet) ->
+    Loaded = [
+        begin
+            {ok, Doc} = thrift_generator:parse_string(Snippet),
+            #tg_loaded{
+                name = Name, path = <<Name/binary, ".thrift">>, includes = [], doc = Doc
+            }
+        end
+     || {Name, Snippet} <- [{<<"root">>, RootSnippet}, {<<"inc">>, IncludeSnippet}]
+    ],
+    thrift_generator_semantic:analyze(Loaded).

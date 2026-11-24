@@ -73,6 +73,14 @@ width headers, length prefixes) stay in their emitters.
     full_mask/1,
     missing_names/2,
     key_filter/3,
+    enum_from_clauses/3,
+    integer_guard/2,
+    sequence_encoder_form/3,
+    sequence_encode_elements_form/2,
+    sequence_decode_elements_form/3,
+    map_decode_pairs_form/5,
+    base_present_clause/5,
+    base_field_clauses/5,
     fun_type/2,
     t_atom/1,
     t_atom_lit/1,
@@ -390,6 +398,202 @@ key_filter(N, Map, true) ->
     remote(maps, is_key, [N, Map]);
 key_filter(N, Map, false) ->
     {op, ?ANNO, 'not', remote(maps, is_key, [N, Map])}.
+
+%% The enum decoder table shared by the binary and compact emitters:
+%% one clause per {Value, Atom} descriptor entry answering {ok, Atom,
+%% Rest}, with the dynamic-integer fallback binding the raw value.
+
+-spec enum_from_clauses([{integer(), atom()}], ast(), ast()) -> [ast()].
+enum_from_clauses(Desc, Int, R) ->
+    [
+        clause([i(Value)], none, [ok3(at(Atom), R)])
+     || {Value, Atom} <- Desc
+    ] ++ [clause([v("_")], none, [ok3(Int, R)])].
+
+%% The type/range guard sequence of every guarded base-int encode site:
+%% `is_integer(V), V >= Min, V =< Max' for the signed width of the base
+%% type (JSON folds the two range tests into one `andalso' — it builds
+%% that shape from the second and third elements of this list).
+
+-spec integer_guard(i8 | i16 | i32 | i64, ast()) -> [ast()].
+integer_guard(B, V) ->
+    Bits = int_bits(B),
+    [
+        remote(erlang, is_integer, [V]),
+        {op, ?ANNO, '>=', V, i(-(1 bsl (Bits - 1)))},
+        {op, ?ANNO, '=<', V, i((1 bsl (Bits - 1)) - 1)}
+    ].
+
+-spec int_bits(i8 | i16 | i32 | i64) -> 8 | 16 | 32 | 64.
+int_bits(i8) -> 8;
+int_bits(i16) -> 16;
+int_bits(i32) -> 32;
+int_bits(i64) -> 64.
+
+%%--------------------------------------------------------------------
+%% Shared container and base-field shapes
+%%--------------------------------------------------------------------
+
+%% The `Enc/1' form of a list/set container helper, identical for the
+%% binary and compact emitters: the is_list entry clause wraps the
+%% `_elems/1' recursion and prepends the protocol-specific `Header'
+%% (its own list, so the rendered body is `[Header, Es]'), and the
+%% mismatch tail reports the whole value.
+
+-spec sequence_encoder_form(atom(), atom(), ast()) -> ast().
+sequence_encoder_form(Enc, EncElems, Header) ->
+    {function, ?ANNO, Enc, 1, [
+        clause([v("Values")], [remote(erlang, is_list, [v("Values")])], [
+            'case'(call_local(EncElems, [v("Values")]), [
+                ok_bind_clause(v("Es"), ok_t(list_lit([Header, v("Es")]))),
+                error_clause()
+            ])
+        ]),
+        mismatch_fn_tail()
+    ]}.
+
+%% The clause body of the `_elems/1' encode helper: the empty list is
+%% `{ok, []}', a cons cell encodes the head through the caller-supplied
+%% `EncodeElem' expression and recurses on the tail, threading the
+%% encoded iodata.
+
+-spec sequence_encode_elements_form(atom(), ast()) -> [ast()].
+sequence_encode_elements_form(EncElems, EncodeElem) ->
+    [
+        clause([nil()], none, [ok_t(nil())]),
+        clause([cons(v("V"), v("Rest"))], none, [
+            'case'(EncodeElem, [
+                ok_bind_clause(
+                    v("E"),
+                    'case'(call_local(EncElems, [v("Rest")]), [
+                        ok_bind_clause(v("RestIo"), ok_t(cons(v("E"), v("RestIo")))),
+                        error_clause()
+                    ])
+                ),
+                error_clause()
+            ])
+        ])
+    ].
+
+%% The clause body of the `_elems/3' decode helper: the count-down stop
+%% clause reverses the accumulator, the loop clause decodes one element
+%% through the caller-supplied `DecodeElem' expression and recurses.
+%% `CatchAll' is passed in because a nested decode rebinds the fall-through
+%% variable: binary uses `Other', compact uses `OtherLoop', and the name
+%% must not collide with any variable the decode expression binds.
+
+-spec sequence_decode_elements_form(atom(), ast(), ast()) -> [ast()].
+sequence_decode_elements_form(DecElems, DecodeElem, CatchAll) ->
+    decode_loop_clauses(
+        ok3(remote(lists, reverse, [v("Acc")]), v("Rest")),
+        'case'(DecodeElem, [
+            ok3_bind_clause(
+                v("V"),
+                v("Rest"),
+                call_local(DecElems, [
+                    {op, ?ANNO, '-', v("N"), i(1)}, v("Rest"), cons(v("V"), v("Acc"))
+                ])
+            ),
+            CatchAll
+        ])
+    ).
+
+%% The clause body of the map `_pairs/3' decode helper: the stop clause
+%% answers the accumulator map as-is (wire order is irrelevant on
+%% decode), the loop clause decodes key then value through the
+%% caller-supplied expressions and puts the pair into the accumulator.
+%% The catch-alls are passed in for the same nested-rebinding reason as
+%% the sequence loop's: binary uses `Other' for both, compact uses the
+%% distinct `OtherPairK'/`OtherPairV'.
+
+-spec map_decode_pairs_form(atom(), ast(), ast(), ast(), ast()) -> [ast()].
+map_decode_pairs_form(DecPairs, DecodeKey, DecodeVal, KeyCatchAll, ValueCatchAll) ->
+    decode_loop_clauses(
+        ok3(v("Acc"), v("Rest")),
+        'case'(DecodeKey, [
+            ok3_bind_clause(
+                v("K"),
+                v("Rest"),
+                'case'(DecodeVal, [
+                    ok3_bind_clause(
+                        v("V"),
+                        v("Rest1"),
+                        call_local(DecPairs, [
+                            {op, ?ANNO, '-', v("N"), i(1)}, v("Rest1"), map_put(v("Acc"), v("K"), v("V"))
+                        ])
+                    ),
+                    ValueCatchAll
+                ])
+            ),
+            KeyCatchAll
+        ])
+    ).
+
+%% The two clauses every count-down decode loop pays: the zero clause
+%% answers `StopBody' (the reversed accumulator for sequences, the
+%% accumulator itself for maps), the loop clause evaluates `LoopCase' —
+%% one decode-and-recurse step built by the caller.
+
+-spec decode_loop_clauses(ast(), ast()) -> [ast()].
+decode_loop_clauses(StopBody, LoopCase) ->
+    [
+        clause([i(0), v("Rest"), v("Acc")], none, [StopBody]),
+        clause([v("N"), v("Bin"), v("Acc")], none, [LoopCase])
+    ].
+
+%% The present-field clause of a base-type chain link, identical for the
+%% binary and compact emitters: the guard-carrying map pattern pays the
+%% `Header' and `Payload' into the chunk list after `Next' succeeds.
+
+-spec base_present_clause(ast(), none | [ast()], ast(), ast(), ast()) -> ast().
+base_present_clause(MapPat, Guard, Header, Payload, Next) ->
+    clause([MapPat], Guard, [
+        'case'(Next, [
+            ok_bind_clause(v("Rest"), ok_t(cons(list_lit([Header, Payload]), v("Rest")))),
+            error_clause()
+        ])
+    ]).
+
+%% The value-case clauses of a base-type chain link: one present clause
+%% per wire shape of the base type, then the unguarded present clause
+%% reporting `value_does_not_match_type' exactly like the generic
+%% engines. The guards are protocol-independent; `PayloadFun(Base, V)'
+%% supplies the protocol-specific payload — a bare AST for every base
+%% type except bool, which pays no payload and instead returns the
+%% `{TruePayload, FalsePayload}' pair of its two present clauses.
+%% Binary passes payloads for bool/uuid too; compact never generates
+%% those chain links (uuid fields fail earlier, bools ride the header
+%% nibble), so its PayloadFun only sees double/string/binary/i8/i16/
+%% i32/i64.
+
+-spec base_field_clauses(atom(), ast(), ast(), ast(), fun((atom(), ast()) -> ast() | {ast(), ast()})) ->
+    [ast()].
+base_field_clauses(B, Name, Header, Next, PayloadFun) ->
+    V = v("V"),
+    Present =
+        case B of
+            bool ->
+                {TruePayload, FalsePayload} = PayloadFun(bool, V),
+                [
+                    base_present_clause(map_exact(Name, at(true)), none, Header, TruePayload, Next),
+                    base_present_clause(map_exact(Name, at(false)), none, Header, FalsePayload, Next)
+                ];
+            double ->
+                Guard = [remote(erlang, is_number, [V])],
+                [base_present_clause(map_exact(Name, V), Guard, Header, PayloadFun(double, V), Next)];
+            S when S =:= string; S =:= binary ->
+                Guard = [remote(erlang, is_binary, [V])],
+                [base_present_clause(map_exact(Name, V), Guard, Header, PayloadFun(B, V), Next)];
+            uuid ->
+                Guard = [
+                    remote(erlang, is_binary, [V]),
+                    {op, ?ANNO, '=:=', call_local(byte_size, [V]), i(16)}
+                ],
+                [base_present_clause(map_exact(Name, V), Guard, Header, PayloadFun(uuid, V), Next)];
+            _ ->
+                [base_present_clause(map_exact(Name, V), integer_guard(B, V), Header, PayloadFun(B, V), Next)]
+        end,
+    Present ++ [clause([map_exact(Name, v("OtherV"))], none, [err_encode(mismatch(v("OtherV")))])].
 
 %%--------------------------------------------------------------------
 %% Type AST helpers

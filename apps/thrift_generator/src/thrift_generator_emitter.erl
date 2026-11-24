@@ -38,22 +38,7 @@ the descriptor terms, which keeps the emitter declarative.
 
 -export([
     sources/1,
-    compile_sources/1,
-    erlang_type/2,
-    exceptions_desc/2,
-    has_record/1,
-    params_desc/2,
-    record_form/3,
-    reply_desc/2,
-    sanitize/1,
-    section_label/1,
-    struct_type/1,
-    sum_mode/1,
-    map_key_type/1,
-    type_desc/2,
-    field_atom/1,
-    record_tag_of/2,
-    types_module_atom/1
+    compile_sources/1
 ]).
 
 -export_type([compiled/0, source/0]).
@@ -121,10 +106,9 @@ module_triplets(Model) ->
         modules = #{M#tg_module.name => M || M <- Model#tg_model.modules},
         type_modules =
             #{
-                M#tg_module.name => types_module_atom(M#tg_module.name)
+                M#tg_module.name => thrift_generator_names:types_module_atom(M#tg_module.name)
              || M <- Model#tg_model.modules
             },
-        include_modules = include_module_index(Model#tg_model.modules),
         current = undefined
     },
     lists:append([
@@ -132,38 +116,10 @@ module_triplets(Model) ->
      || Mod <- Model#tg_model.modules
     ]).
 
-%% References from other modules qualify either with the target's module
-%% key (the erl namespace value) or — the Apache Thrift spelling — with
-%% the included file's base name, which need not match it. Two files
-%% sharing a base name leave the first module in the index: such a
-%% reference is ambiguous in Apache Thrift too, and the module-key
-%% spelling still resolves exactly.
-
--spec include_module_index([#tg_module{}]) -> #{module_key() => module_key()}.
-include_module_index(Modules) ->
-    lists:foldl(
-        fun(M, Acc) ->
-            Qualifier = thrift_generator_loader:include_qualifier(M#tg_module.path),
-            case Acc of
-                #{Qualifier := _} -> Acc;
-                _ -> Acc#{Qualifier => M#tg_module.name}
-            end
-        end,
-        #{},
-        Modules
-    ).
-
--spec module_key_of(module_key(), #ectx{}) -> module_key().
-module_key_of(Key, Ctx) ->
-    case maps:is_key(Key, Ctx#ectx.modules) of
-        true -> Key;
-        false -> maps:get(Key, Ctx#ectx.include_modules, Key)
-    end.
-
 -spec module_sources(#tg_module{}, #ectx{}) ->
     [{module(), erl_syntax:forms(), erl_syntax:forms() | undefined}].
 module_sources(Mod, Ctx) ->
-    TypesMod = types_module_atom(Mod#tg_module.name),
+    TypesMod = thrift_generator_names:types_module_atom(Mod#tg_module.name),
     ServiceForms = [
         thrift_generator_emitter_service:service_sources(Svc, Mod, Ctx)
      || Svc <- Mod#tg_module.services
@@ -179,7 +135,8 @@ module_sources(Mod, Ctx) ->
 
 -spec types_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 types_forms(Mod, Ctx) ->
-    TypesMod = types_module_atom(Mod#tg_module.name),
+    TypesMod = thrift_generator_names:types_module_atom(Mod#tg_module.name),
+    Plan = thrift_generator_codec_plan:build(Mod, Ctx),
     Exports =
         thrift_generator_emitter_syntax:exports_forms([
             {struct_info, 1},
@@ -196,17 +153,17 @@ types_forms(Mod, Ctx) ->
         ]) ++
             [thrift_generator_emitter_syntax:export_type_form(type_alias_entries(Mod))] ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec_common:export_entries(wire, Mod, Ctx)
+                thrift_generator_codec_common:export_entries(wire, Plan)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec:repr_encode_export_entries(Mod, Ctx) ++
+                thrift_generator_codec:repr_encode_export_entries(Plan) ++
                     thrift_generator_codec:repr_index_entries(Mod)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec_common:export_entries(compact, Mod, Ctx)
+                thrift_generator_codec_common:export_entries(compact, Plan)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec_common:export_entries(json, Mod, Ctx)
+                thrift_generator_codec_common:export_entries(json, Plan)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(enum_helper_entries(Mod)) ++
             thrift_generator_emitter_syntax:exports_forms(const_entries(Mod)),
@@ -216,12 +173,12 @@ types_forms(Mod, Ctx) ->
         struct_info_forms(Mod, Ctx) ++
         enum_info_forms(Mod) ++
         function_info_forms(Mod, Ctx) ++
-        service_info_forms(Mod, Ctx) ++
+        service_info_forms(Mod, Ctx, Plan) ++
         record_fields_forms(Mod) ++
         schema_codec_forms(Mod, Ctx) ++
-        thrift_generator_codec:module_forms(Mod, Ctx) ++
-        thrift_generator_codec_compact:module_forms(Mod, Ctx) ++
-        thrift_generator_codec_json:module_forms(Mod, Ctx) ++
+        thrift_generator_codec:module_forms(Plan) ++
+        thrift_generator_codec_compact:module_forms(Plan) ++
+        thrift_generator_codec_json:module_forms(Plan) ++
         enum_helper_forms(Mod) ++
         typedef_forms(Mod, Ctx) ++
         const_forms(Mod).
@@ -238,16 +195,12 @@ types_forms(Mod, Ctx) ->
 -spec type_alias_entries(#tg_module{}) -> [{atom(), 0}].
 type_alias_entries(Mod) ->
     [
-        {type_alias(S#tg_struct.name), 0}
+        {thrift_generator_ir:type_alias(S#tg_struct.name), 0}
      || S <- Mod#tg_module.structs,
-        not native_mode(S)
+        not thrift_generator_ir:native_mode(S)
     ] ++
-        [{type_alias(E#tg_enum.name), 0} || E <- Mod#tg_module.enums] ++
-        [{type_alias(T#tg_typedef.name), 0} || T <- Mod#tg_module.typedefs].
-
--spec type_alias(binary()) -> atom().
-type_alias(Name) ->
-    binary_to_atom(Name, utf8).
+        [{thrift_generator_ir:type_alias(E#tg_enum.name), 0} || E <- Mod#tg_module.enums] ++
+        [{thrift_generator_ir:type_alias(T#tg_typedef.name), 0} || T <- Mod#tg_module.typedefs].
 
 %% Per struct/union/exception section: the record declaration (record
 %% mode) and the exported alias — the record itself, the map shape or
@@ -256,7 +209,7 @@ type_alias(Name) ->
 -spec struct_type_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 struct_type_forms(Mod, Ctx) ->
     lists:append([
-        [thrift_generator_emitter_syntax:section_form(section_label(S))] ++
+        [thrift_generator_emitter_syntax:section_form(thrift_generator_ir:section_label(S))] ++
             struct_type_one(S, Mod#tg_module.prefix, Ctx)
      || S <- Mod#tg_module.structs
     ]).
@@ -265,14 +218,14 @@ struct_type_forms(Mod, Ctx) ->
 struct_type_one(S, Prefix, Ctx) ->
     Anno = erl_anno:new(0),
     RecordForm =
-        case has_record(S) of
-            true -> record_form(S, Prefix, Ctx);
+        case thrift_generator_ir:has_record(S) of
+            true -> thrift_generator_emitter_record:record_form(S, Prefix, Ctx);
             false -> []
         end,
     AliasForm =
         case alias_type_node(S, Ctx) of
             undefined -> [];
-            Node -> [{attribute, Anno, type, {type_alias(S#tg_struct.name), Node, []}}]
+            Node -> [{attribute, Anno, type, {thrift_generator_ir:type_alias(S#tg_struct.name), Node, []}}]
         end,
     RecordForm ++ AliasForm.
 
@@ -282,11 +235,11 @@ struct_type_one(S, Prefix, Ctx) ->
 
 -spec alias_type_node(#tg_struct{}, #ectx{}) -> erl_syntax:syntaxTree() | undefined.
 alias_type_node(S, Ctx) ->
-    case mode(S) of
+    case thrift_generator_ir:mode(S) of
         sum ->
             sum_type_node(S, Ctx);
         record ->
-            Tag = record_tag_of(S, current_prefix(Ctx)),
+            Tag = thrift_generator_ir:record_tag_of(S, thrift_generator_names:current_prefix(Ctx)),
             {type, erl_anno:new(0), record, [{atom, erl_anno:new(0), Tag}]};
         native ->
             undefined;
@@ -301,7 +254,7 @@ alias_type_node(S, Ctx) ->
 -spec map_type_node(#tg_struct{}, #ectx{}) -> erl_syntax:syntaxTree().
 map_type_node(S, Ctx) ->
     Anno = erl_anno:new(0),
-    case map_key_type(S) of
+    case thrift_generator_ir:map_key_type(S) of
         binary ->
             {type, Anno, map, [
                 {type, Anno, map_field_assoc, [{type, Anno, binary, []}, {type, Anno, term, []}]}
@@ -323,12 +276,15 @@ map_type_node(S, Ctx) ->
 
 -spec field_type_pair(#tg_field{}, #ectx{}) -> [erl_syntax:syntaxTree()].
 field_type_pair(F, Ctx) ->
-    [{atom, erl_anno:new(0), field_atom(F#tg_field.name)}, erlang_type(F#tg_field.type, Ctx)].
+    [
+        {atom, erl_anno:new(0), thrift_generator_ir:field_atom(F#tg_field.name)},
+        thrift_generator_ir:erlang_type(F#tg_field.type, Ctx)
+    ].
 
 -spec typedef_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 typedef_forms(Mod, Ctx) ->
     lists:append([
-        [thrift_generator_emitter_syntax:section_form(section_label(T))] ++ typedef_one(T, Ctx)
+        [thrift_generator_emitter_syntax:section_form(thrift_generator_ir:section_label(T))] ++ typedef_one(T, Ctx)
      || T <- Mod#tg_module.typedefs
     ]).
 
@@ -345,7 +301,12 @@ typedef_one(T, Ctx) ->
                 type
         end,
     [
-        {attribute, Anno, Keyword, {type_alias(T#tg_typedef.name), erlang_type(T#tg_typedef.type, Ctx), []}}
+        {attribute, Anno, Keyword,
+            {
+                thrift_generator_ir:type_alias(T#tg_typedef.name),
+                thrift_generator_ir:erlang_type(T#tg_typedef.type, Ctx),
+                []
+            }}
     ].
 
 %%--------------------------------------------------------------------
@@ -390,11 +351,11 @@ hrl_guard(Mod) ->
 -spec hrl_record_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 hrl_record_forms(Mod, Ctx) ->
     lists:append([
-        [thrift_generator_emitter_syntax:section_form(section_label(S))] ++
+        [thrift_generator_emitter_syntax:section_form(thrift_generator_ir:section_label(S))] ++
             doc_comment_forms(S#tg_struct.doc) ++
-            record_form(S, Mod#tg_module.prefix, Ctx#ectx{qualify = true})
+            thrift_generator_emitter_record:record_form(S, Mod#tg_module.prefix, Ctx#ectx{qualify = true})
      || S <- Mod#tg_module.structs,
-        has_record(S)
+        thrift_generator_ir:has_record(S)
     ]).
 
 %% The struct's IDL doc comment above its hrl record declaration: the
@@ -427,7 +388,10 @@ sum_type_node(S, Ctx) ->
 -spec enum_type_node(#tg_enum{}) -> erl_syntax:syntaxTree().
 enum_type_node(E) ->
     Anno = erl_anno:new(0),
-    Atoms = [{atom, Anno, enum_atom(Name, enum_case(E))} || {_Value, Name} <- E#tg_enum.values],
+    Atoms = [
+        {atom, Anno, thrift_generator_ir:enum_atom(Name, thrift_generator_ir:enum_case(E))}
+     || {_Value, Name} <- E#tg_enum.values
+    ],
     case Atoms of
         [One] -> One;
         Many -> {type, Anno, union, Many}
@@ -444,7 +408,7 @@ hrl_const_forms(Mod) ->
                 erl_syntax:variable(
                     unicode:characters_to_list(const_macro_name(Mod#tg_module.prefix, C#tg_const.name))
                 ),
-                const_literal(C#tg_const.value)
+                thrift_generator_emitter_record:const_literal(C#tg_const.value)
             ])
         ]
      || C <- Mod#tg_module.consts,
@@ -457,7 +421,7 @@ hrl_const_forms(Mod) ->
 
 -spec const_macro_name(binary(), binary()) -> binary().
 const_macro_name(Prefix, Name) ->
-    string:uppercase(typed_prefix(Prefix, thrift_generator_names:snake(Name))).
+    string:uppercase(thrift_generator_names:typed_prefix(Prefix, thrift_generator_names:snake(Name))).
 
 -spec scalar_const(#tg_const{}) -> boolean().
 scalar_const(#tg_const{value = {ref, _}}) ->
@@ -507,7 +471,7 @@ facade_type(S) ->
 
 -spec facade_default_repr(#tg_struct{}) -> record | native | map.
 facade_default_repr(S) ->
-    case mode(S) of
+    case thrift_generator_ir:mode(S) of
         sum -> record;
         record -> record;
         native -> native;
@@ -520,9 +484,9 @@ facade_default_repr(S) ->
 
 -spec facade_default_type(#tg_struct{}) -> erl_syntax:syntaxTree().
 facade_default_type(S) ->
-    case native_mode(S) of
+    case thrift_generator_ir:native_mode(S) of
         true -> thrift_generator_emitter_syntax:term_type();
-        false -> thrift_generator_emitter_syntax:user_type(type_alias(S#tg_struct.name))
+        false -> thrift_generator_emitter_syntax:user_type(thrift_generator_ir:type_alias(S#tg_struct.name))
     end.
 
 %% A literal atom type node (`inner') for the overloaded facade specs.
@@ -934,12 +898,9 @@ facade_descriptor_forms(Structs, Ctx) ->
                     )
                 ]
         ).
--spec list_type(thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
-list_type(T, Ctx) ->
-    {type, erl_anno:new(0), list, [erlang_type(T, Ctx)]}.
 -spec struct_ref(#tg_struct{}, #ectx{}) -> desc().
 struct_ref(S, Ctx) ->
-    {struct, {ref, types_module_atom(Ctx#ectx.current), S#tg_struct.name}}.
+    {struct, {ref, thrift_generator_names:types_module_atom(Ctx#ectx.current), S#tg_struct.name}}.
 
 %% The input side of encode: the definition's exported alias (record,
 %% map and sum modes); native records are runtime-minted, so their input
@@ -948,8 +909,8 @@ struct_ref(S, Ctx) ->
 
 -spec value_type(#tg_struct{}) -> erl_syntax:syntaxTree().
 value_type(S) ->
-    Alias = thrift_generator_emitter_syntax:user_type(type_alias(S#tg_struct.name)),
-    case mode(S) of
+    Alias = thrift_generator_emitter_syntax:user_type(thrift_generator_ir:type_alias(S#tg_struct.name)),
+    case thrift_generator_ir:mode(S) of
         record ->
             {type, erl_anno:new(0), union, [Alias, thrift_generator_emitter_syntax:raw_type(map)]};
         native ->
@@ -972,17 +933,23 @@ enum_helper_entries(Mod) ->
             {binary_to_atom(<<Prefix/binary, "_from_int">>, utf8), 1}
         ]
      || E <- Mod#tg_module.enums,
-        Prefix <- [typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(E#tg_enum.name))]
+        Prefix <- [
+            thrift_generator_names:typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(E#tg_enum.name))
+        ]
     ]).
 
 -spec enum_helper_forms(#tg_module{}) -> erl_syntax:forms().
 enum_helper_forms(Mod) ->
     lists:append([
-        [thrift_generator_emitter_syntax:section_form(section_label(E))] ++
+        [thrift_generator_emitter_syntax:section_form(thrift_generator_ir:section_label(E))] ++
             [
-                {attribute, erl_anno:new(0), type, {type_alias(E#tg_enum.name), enum_type_node(E), []}}
+                {attribute, erl_anno:new(0), type,
+                    {thrift_generator_ir:type_alias(E#tg_enum.name), enum_type_node(E), []}}
             ] ++
-            enum_helper_one(E, typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(E#tg_enum.name)))
+            enum_helper_one(
+                E,
+                thrift_generator_names:typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(E#tg_enum.name))
+            )
      || E <- Mod#tg_module.enums
     ]).
 
@@ -992,7 +959,7 @@ enum_helper_one(E, Prefix) ->
     FromInt = binary_to_atom(<<Prefix/binary, "_from_int">>, utf8),
     %% The literal descriptor — the same list enum_info/1 returns — so
     %% the helpers do not even call themselves.
-    DescExpr = thrift_generator_emitter_syntax:abstract(enum_desc(E)),
+    DescExpr = thrift_generator_emitter_syntax:abstract(thrift_generator_ir:enum_desc(E)),
     Anno = erl_anno:new(0),
     V = erl_syntax:variable("Value"),
     Int = erl_syntax:variable("Int"),
@@ -1078,7 +1045,15 @@ enum_helper_one(E, Prefix) ->
 -spec const_entries(#tg_module{}) -> [{atom(), arity()}].
 const_entries(Mod) ->
     [
-        {binary_to_atom(typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(C#tg_const.name)), utf8), 0}
+        {
+            binary_to_atom(
+                thrift_generator_names:typed_prefix(
+                    Mod#tg_module.prefix, thrift_generator_names:snake(C#tg_const.name)
+                ),
+                utf8
+            ),
+            0
+        }
      || C <- Mod#tg_module.consts
     ].
 
@@ -1093,19 +1068,24 @@ const_forms(Mod) ->
                     ]}}
             ] ++
             thrift_generator_emitter_syntax:fn_form(const_name(Mod, C), [
-                thrift_generator_emitter_syntax:fn_clause([], const_literal(C#tg_const.value))
+                thrift_generator_emitter_syntax:fn_clause(
+                    [], thrift_generator_emitter_record:const_literal(C#tg_const.value)
+                )
             ])
      || C <- Mod#tg_module.consts
     ]).
 
 -spec const_name(#tg_module{}, #tg_const{}) -> atom().
 const_name(Mod, C) ->
-    binary_to_atom(typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(C#tg_const.name)), utf8).
+    binary_to_atom(
+        thrift_generator_names:typed_prefix(Mod#tg_module.prefix, thrift_generator_names:snake(C#tg_const.name)),
+        utf8
+    ).
 
 %% Constant spec types without a resolution context: refs (enum
 %% members) surface as term, containers mirror erlang_type/2.
 
--spec const_spec_type(thrift_type()) -> erl_syntax:syntaxTree().
+-spec const_spec_type(resolved_thrift_type()) -> erl_syntax:syntaxTree().
 const_spec_type({base, B, _}) ->
     thrift_generator_emitter_syntax:base_erlang_type(B);
 const_spec_type({list, T, _}) ->
@@ -1117,148 +1097,12 @@ const_spec_type({map, K, V, _}) ->
     {type, Anno, map, [
         {type, Anno, map_field_assoc, [const_spec_type(K), const_spec_type(V)]}
     ]};
-const_spec_type({ref, _, _}) ->
+const_spec_type({resolved_ref, _, _, _}) ->
     thrift_generator_emitter_syntax:raw_type(term).
 
-%% Constants carry resolved values: enum references as member name
-%% binaries, containers as tagged lists/maps. Enum members surface as
-%% atoms; maps as maps with literal keys.
-
--spec const_literal(const_value()) -> erl_syntax:syntaxTree().
-const_literal({ref, Name}) ->
-    thrift_generator_emitter_syntax:abstract(binary_to_atom(Name, utf8));
-const_literal({list, Values}) ->
-    erl_syntax:list([const_literal(V) || V <- Values]);
-const_literal({map, KVs}) ->
-    erl_syntax:map_expr([
-        erl_syntax:map_field_assoc(const_literal(K), const_literal(V))
-     || {K, V} <- KVs
-    ]);
-const_literal(Value) ->
-    thrift_generator_emitter_syntax:abstract(Value).
-
-%% The divider label naming the IDL construct the following forms
-%% implement (the declared name, not the derived tag).
-
--doc "The section divider label naming an IDL definition (the declared name, not the derived tag).".
--spec section_label(#tg_struct{} | #tg_enum{} | #tg_typedef{}) -> string().
-section_label(#tg_struct{kind = union, name = Name}) ->
-    "Union " ++ unicode:characters_to_list(Name);
-section_label(#tg_struct{kind = exception, name = Name}) ->
-    "Exception " ++ unicode:characters_to_list(Name);
-section_label(#tg_struct{name = Name}) ->
-    "Struct " ++ unicode:characters_to_list(Name);
-section_label(#tg_enum{name = Name}) ->
-    "Enum " ++ unicode:characters_to_list(Name);
-section_label(#tg_typedef{name = Name}) ->
-    "Typedef " ++ unicode:characters_to_list(Name).
-
-%% The typed record declaration: each field carries its type — in the
-%% .erl local references resolve to the module's exported aliases, in
-%% the hrl (qualify) every reference is remote. Non-required fields add
-%% `| undefined' — the value an absent wire field leaves behind;
-%% `required' fields have none.
-
--doc "The typed record declaration of a record-mode struct (remote type references under `qualify`).".
--spec record_form(#tg_struct{}, binary(), #ectx{}) -> erl_syntax:forms().
-record_form(S, Prefix, Ctx) ->
-    Anno = erl_anno:new(0),
-    TypedFields = [
-        {typed_record_field,
-            case F#tg_field.default of
-                undefined ->
-                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}};
-                Default ->
-                    Expr = set_default_expr(F#tg_field.type, const_literal(Default)),
-                    {record_field, Anno, {atom, Anno, field_atom(F#tg_field.name)}, erl_syntax:revert(Expr)}
-            end,
-            field_type_node(F, Ctx)}
-     || F <- S#tg_struct.fields
-    ],
-    [{attribute, Anno, record, {record_tag_of(S, Prefix), TypedFields}}].
-
--spec field_type_node(#tg_field{}, #ectx{}) -> erl_syntax:syntaxTree().
-field_type_node(F, Ctx) ->
-    Type = erlang_type(F#tg_field.type, Ctx),
-    case F#tg_field.required of
-        required ->
-            Type;
-        _ ->
-            thrift_generator_emitter_syntax:undefined_union(Type)
-    end.
-
-%% A set field's default literal is wire-shaped (a list); under a
-%% sets/ordset impl the record default builds the declared collection
-%% instead, so a constructed record matches the field's emitted type.
-
--spec set_default_expr(thrift_type(), erl_syntax:syntaxTree()) -> erl_syntax:syntaxTree().
-set_default_expr({set, _, Ann}, Default) ->
-    case set_impl(Ann) of
-        list ->
-            Default;
-        sets ->
-            thrift_generator_emitter_syntax:application(sets, from_list, [Default]);
-        ordset ->
-            thrift_generator_emitter_syntax:application(ordsets, from_list, [Default])
-    end;
-set_default_expr(_Type, Default) ->
-    Default.
-
-%% Representations of a generated struct-family definition:
-%%
-%% - `record_mode' — the tuple record (structs and unions by default);
-%% - `sum_mode' — unions only, the `erl.union_type = "sum"' form: the
-%%   value is a `{FieldAtom, Value}' tagged tuple, no record exists;
-%% - `native_mode' — `erl.struct_type = "native"': values are EEP-79
-%%   native records the runtime mints, no record is declared;
-%% - `erl.struct_type = "map"' is the atom-keyed map.
-
--spec record_mode(#tg_struct{}) -> boolean().
-record_mode(S) ->
-    struct_type(S) =:= record.
-
-%% A declared record exists only for record-mode non-sum definitions:
-%% a sum union's alias IS its type, and its values are tagged tuples.
-
--doc "Whether the definition declares a record (record mode, not a sum union).".
--spec has_record(#tg_struct{}) -> boolean().
-has_record(S) ->
-    record_mode(S) andalso not sum_mode(S).
-
--doc "Whether the union is generated as a tagged-tuple sum type.".
--spec sum_mode(#tg_struct{}) -> boolean().
-sum_mode(S) ->
-    S#tg_struct.kind =:= union andalso
-        maps:get(union_type, S#tg_struct.erl, <<"record">>) =:= <<"sum">>.
-
--doc "Whether the struct is generated as runtime-minted native records.".
--spec native_mode(#tg_struct{}) -> boolean().
-native_mode(S) ->
-    struct_type(S) =:= native.
-
-%% The representation axis of a definition, from its erl.struct_type;
-%% sum unions keep their tagged-tuple form whatever the struct_type
-%% says, and anything unrecognized falls back to the record.
-
--doc "The struct_type axis of a definition: `map`, `native`, or `record` when absent or unrecognized.".
--spec struct_type(#tg_struct{}) -> record | map | native.
-struct_type(S) ->
-    case maps:get(struct_type, S#tg_struct.erl, undefined) of
-        <<"map">> -> map;
-        <<"native">> -> native;
-        _ -> record
-    end.
-
-%% The one representation axis the mode case sites dispatch on: sum
-%% unions keep their tagged-tuple form whatever struct_type says,
-%% otherwise the axis is the plain struct_type.
-
--spec mode(#tg_struct{}) -> sum | record | native | map.
-mode(S) ->
-    case sum_mode(S) of
-        true -> sum;
-        false -> struct_type(S)
-    end.
+%%--------------------------------------------------------------------
+%% Introspection forms
+%%--------------------------------------------------------------------
 
 -spec struct_info_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
 struct_info_forms(Mod, Ctx) ->
@@ -1273,36 +1117,14 @@ struct_info_forms(Mod, Ctx) ->
 
 -spec struct_desc(#tg_struct{}, #ectx{}) -> desc().
 struct_desc(S, Ctx) ->
-    {S#tg_struct.kind, [field_desc(F, Ctx) || F <- S#tg_struct.fields]}.
-
--spec field_desc(#tg_field{}, #ectx{}) -> desc().
-field_desc(F, Ctx) ->
-    {
-        F#tg_field.id,
-        F#tg_field.required,
-        type_desc(F#tg_field.type, Ctx),
-        F#tg_field.name,
-        default_term(F#tg_field.default)
-    }.
-
-%% Descriptor defaults are plain Erlang terms: the {list, ...}/{map,
-%% ...} wrappers are an AST shape, introspection carries what the
-%% official generator's struct_info would.
-
--spec default_term(const_value() | undefined) -> term().
-default_term({list, Values}) ->
-    [default_term(Value) || Value <- Values];
-default_term({map, KVs}) ->
-    #{default_term(K) => default_term(V) || {K, V} <- KVs};
-default_term(Value) ->
-    Value.
+    {S#tg_struct.kind, [thrift_generator_ir:field_desc(F, Ctx) || F <- S#tg_struct.fields]}.
 
 -spec enum_info_forms(#tg_module{}) -> erl_syntax:forms().
 enum_info_forms(Mod) ->
     Clauses = [
         thrift_generator_emitter_syntax:fn_clause(
             [thrift_generator_emitter_syntax:abstract(E#tg_enum.name)],
-            thrift_generator_emitter_syntax:abstract(enum_desc(E))
+            thrift_generator_emitter_syntax:abstract(thrift_generator_ir:enum_desc(E))
         )
      || E <- Mod#tg_module.enums
     ],
@@ -1332,7 +1154,7 @@ function_info_forms(Mod, Ctx) ->
                         thrift_generator_emitter_syntax:abstract(F#tg_function.name),
                         thrift_generator_emitter_syntax:abstract(params)
                     ],
-                    thrift_generator_emitter_syntax:abstract(params_desc(F, Ctx))
+                    thrift_generator_emitter_syntax:abstract(thrift_generator_ir:params_desc(F, Ctx))
                 ),
                 thrift_generator_emitter_syntax:fn_clause(
                     [
@@ -1346,14 +1168,14 @@ function_info_forms(Mod, Ctx) ->
                         thrift_generator_emitter_syntax:abstract(F#tg_function.name),
                         thrift_generator_emitter_syntax:abstract(reply)
                     ],
-                    thrift_generator_emitter_syntax:abstract(reply_desc(F, Ctx))
+                    thrift_generator_emitter_syntax:abstract(thrift_generator_ir:reply_desc(F, Ctx))
                 ),
                 thrift_generator_emitter_syntax:fn_clause(
                     [
                         thrift_generator_emitter_syntax:abstract(F#tg_function.name),
                         thrift_generator_emitter_syntax:abstract(exceptions)
                     ],
-                    thrift_generator_emitter_syntax:abstract(exceptions_desc(F, Ctx))
+                    thrift_generator_emitter_syntax:abstract(thrift_generator_ir:exceptions_desc(F, Ctx))
                 )
             ]
          || F <- service_functions(Mod)
@@ -1392,58 +1214,38 @@ service_functions(Mod) ->
         ),
     Kept.
 
--doc "The method's params struct as a wire descriptor.".
--spec params_desc(#tg_function{}, #ectx{}) -> desc().
-params_desc(F, Ctx) ->
-    {struct, {struct, [field_desc(P, Ctx) || P <- F#tg_function.params]}}.
-
--doc "The method's reply type as a wire descriptor, `undefined` for `void`.".
--spec reply_desc(#tg_function{}, #ectx{}) -> desc() | undefined.
-reply_desc(F, Ctx) ->
-    case F#tg_function.return_type of
-        void ->
-            undefined;
-        Type ->
-            type_desc(Type, Ctx)
-    end.
-
--doc "The method's declared exceptions as wire descriptors.".
--spec exceptions_desc(#tg_function{}, #ectx{}) -> [desc()].
-exceptions_desc(F, Ctx) ->
-    [field_desc(T, Ctx) || T <- F#tg_function.throws].
-
--spec service_info_forms(#tg_module{}, #ectx{}) -> erl_syntax:forms().
-service_info_forms(Mod, Ctx) ->
-    TypesMod = types_module_atom(Mod#tg_module.name),
+-spec service_info_forms(#tg_module{}, #ectx{}, #tg_codec_plan{}) -> erl_syntax:forms().
+service_info_forms(Mod, Ctx, Plan) ->
+    TypesMod = thrift_generator_names:types_module_atom(Mod#tg_module.name),
     Entries = [
-        {S#tg_service.name, service_entry(S#tg_service.name, S#tg_service.functions, TypesMod, Ctx, #{})}
+        {S#tg_service.name, service_entry(S#tg_service.name, S#tg_service.functions, TypesMod, Ctx, #{}, Plan)}
      || S <- Mod#tg_module.services
     ],
     thrift_generator_emitter_syntax:fn_form(service_info, [
         thrift_generator_emitter_syntax:fn_clause([], thrift_generator_emitter_syntax:abstract(maps:from_list(Entries)))
     ]).
 
--spec service_entry(binary(), [#tg_function{}], module(), #ectx{}, map()) -> map().
-service_entry(_SvcName, [], _TypesMod, _Ctx, Acc) ->
+-spec service_entry(binary(), [#tg_function{}], module(), #ectx{}, map(), #tg_codec_plan{}) -> map().
+service_entry(_SvcName, [], _TypesMod, _Ctx, Acc, _Plan) ->
     Acc;
-service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc) ->
+service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc, Plan) ->
     Info0 = #{
         name => F#tg_function.name,
         oneway => F#tg_function.oneway,
-        params => params_desc(F, Ctx),
-        codecs => rpc_codecs(SvcName, F, TypesMod, Ctx)
+        params => thrift_generator_ir:params_desc(F, Ctx),
+        codecs => rpc_codecs(SvcName, F, TypesMod, Plan)
     },
     Info1 =
-        case reply_desc(F, Ctx) of
+        case thrift_generator_ir:reply_desc(F, Ctx) of
             undefined -> Info0;
             Reply -> Info0#{reply => Reply}
         end,
     Info =
-        case exceptions_desc(F, Ctx) of
+        case thrift_generator_ir:exceptions_desc(F, Ctx) of
             [] -> Info1;
             Exceptions -> Info1#{exceptions => Exceptions}
         end,
-    service_entry(SvcName, Rest, TypesMod, Ctx, Acc#{F#tg_function.name => Info}).
+    service_entry(SvcName, Rest, TypesMod, Ctx, Acc#{F#tg_function.name => Info}, Plan).
 
 %% The specialized RPC codec hooks of one function, keyed by the
 %% runtime protocol module: the runtime picks the entry of its protocol
@@ -1451,18 +1253,18 @@ service_entry(SvcName, [F | Rest], TypesMod, Ctx, Acc) ->
 %% descriptor path when the key or the protocol is absent (hand-written
 %% service modules, custom protocols).
 
--spec rpc_codecs(binary(), #tg_function{}, module(), #ectx{}) -> map().
-rpc_codecs(SvcName, F, TypesMod, Ctx) ->
+-spec rpc_codecs(binary(), #tg_function{}, module(), #tg_codec_plan{}) -> map().
+rpc_codecs(SvcName, F, TypesMod, Plan) ->
     maps:from_list([
-        rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx)
+        rpc_codec_entry(Protocol, SvcName, F, TypesMod, Plan)
      || Protocol <- [wire, compact, json]
     ]).
 
--spec rpc_codec_entry(wire | compact | json, binary(), #tg_function{}, module(), #ectx{}) ->
+-spec rpc_codec_entry(wire | compact | json, binary(), #tg_function{}, module(), #tg_codec_plan{}) ->
     {module(), map()}.
-rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx) ->
-    {EncParams, DecParams} = thrift_generator_codec_common:codec_pair(
-        Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, params), Ctx
+rpc_codec_entry(Protocol, SvcName, F, TypesMod, Plan) ->
+    {EncParams, DecParams} = thrift_generator_codec_plan:codec_pair(
+        Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, params), Plan
     ),
     Entry = #{params => {TypesMod, EncParams, DecParams}},
     Full =
@@ -1470,8 +1272,8 @@ rpc_codec_entry(Protocol, SvcName, F, TypesMod, Ctx) ->
             true ->
                 Entry;
             false ->
-                {EncResult, DecResult} = thrift_generator_codec_common:codec_pair(
-                    Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, result), Ctx
+                {EncResult, DecResult} = thrift_generator_codec_plan:codec_pair(
+                    Protocol, thrift_generator_codec_common:rpc_struct_name(SvcName, F#tg_function.name, result), Plan
                 ),
                 Entry#{result => {TypesMod, EncResult, DecResult}}
         end,
@@ -1513,308 +1315,22 @@ record_fields_forms(Mod) ->
 -spec fields_decl(#tg_struct{}, binary()) ->
     {atom(), [atom()]} | {map, atom | binary} | {native, atom}.
 fields_decl(S, Prefix) ->
-    case mode(S) of
+    case thrift_generator_ir:mode(S) of
         sum ->
-            {sum, [field_atom(F#tg_field.name) || F <- S#tg_struct.fields]};
+            {sum, [thrift_generator_ir:field_atom(F#tg_field.name) || F <- S#tg_struct.fields]};
         record ->
-            {record_tag_of(S, Prefix), [
-                field_atom(F#tg_field.name)
+            {thrift_generator_ir:record_tag_of(S, Prefix), [
+                thrift_generator_ir:field_atom(F#tg_field.name)
              || F <- S#tg_struct.fields
             ]};
         native ->
             %% No record declaration exists: the runtime mints native
             %% records under the snake-cased wire name.
-            {native, record_tag(<<>>, S#tg_struct.name)};
+            {native, binary_to_atom(thrift_generator_names:snake(S#tg_struct.name), utf8)};
         map ->
-            {map, map_key_type(S)}
+            {map, thrift_generator_ir:map_key_type(S)}
     end.
 
--spec map_key_type(#tg_struct{}) -> atom | binary.
-map_key_type(S) ->
-    case maps:get('struct_type.map.key_type', S#tg_struct.erl, <<"atom">>) of
-        <<"binary">> ->
-            binary;
-        _ ->
-            atom
-    end.
-
-%%--------------------------------------------------------------------
-%% Type descriptors
-%%--------------------------------------------------------------------
-
--doc """
-Converts a model type into the wire descriptor vocabulary the runtime
-codecs consume (resolving references, expanding typedefs and inlining
-enum descriptors); shared with the codec emitter.
-""".
--spec type_desc(thrift_type(), #ectx{}) -> desc().
-type_desc({base, B, _}, _Ctx) ->
-    {base, B};
-type_desc({list, T, _}, Ctx) ->
-    {list, type_desc(T, Ctx)};
-type_desc({set, T, Ann}, Ctx) ->
-    {set, type_desc(T, Ctx), set_impl(Ann)};
-type_desc({map, K, V, _}, Ctx) ->
-    {map, type_desc(K, Ctx), type_desc(V, Ctx)};
-type_desc({ref, Name, _}, Ctx) ->
-    case binary:split(Name, <<".">>) of
-        [ModKey, Local] ->
-            qualified_desc(ModKey, Local, Ctx);
-        [Local] ->
-            local_desc(Local, Ctx)
-    end.
-
-%% The in-process set implementation carried in the descriptor. `list`
-%% (the default, and the shape hand-written descriptors keep using)
-%% leaves the wire list as is; `sets`/`ordset` name the stdlib module
-%% whose from_list/to_list the runtime applies. The wire encoding is
-%% identical for all three.
-
--spec set_impl(annotations()) -> list | sets | ordset.
-set_impl(Ann) ->
-    case maps:get(<<"erl.set">>, Ann, <<"list">>) of
-        <<"sets">> ->
-            sets;
-        <<"ordset">> ->
-            ordset;
-        _ ->
-            list
-    end.
-
--spec qualified_desc(module_key(), binary(), #ectx{}) -> desc().
-qualified_desc(ModKey0, Local, Ctx) ->
-    ModKey = module_key_of(ModKey0, Ctx),
-    Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
-    TypesMod = maps:get(ModKey, Ctx#ectx.type_modules, undefined),
-    case find_def(Module, Local) of
-        {struct, _S} ->
-            {struct, {ref, TypesMod, Local}};
-        {enum, E} ->
-            {enum, enum_desc(E)};
-        {typedef, Type} ->
-            %% A typedef from another module (base.Timestamp and
-            %% friends) resolves in its own module's context, so
-            %% refs inside its body stay home.
-            type_desc(Type, Ctx#ectx{current = ModKey});
-        error ->
-            error({unresolved_type, ModKey, Local})
-    end.
-
--spec local_desc(binary(), #ectx{}) -> desc().
-local_desc(Name, Ctx) ->
-    Module = maps:get(Ctx#ectx.current, Ctx#ectx.modules),
-    case find_def(Module, Name) of
-        {struct, _S} ->
-            {struct, {ref, types_module_atom(Ctx#ectx.current), Name}};
-        {enum, E} ->
-            {enum, enum_desc(E)};
-        {typedef, Type} ->
-            type_desc(Type, Ctx);
-        error ->
-            %% Inherited service functions reference the parent module's
-            %% types; resolve across every loaded module.
-            cross_module_desc(Name, Ctx)
-    end.
-
--spec cross_module_desc(binary(), #ectx{}) -> desc().
-cross_module_desc(Name, Ctx) ->
-    Hits = [
-        {ModKey, Kind}
-     || {ModKey, Module} <- maps:to_list(Ctx#ectx.modules),
-        Kind <- [
-            case find_def(Module, Name) of
-                {struct, _} -> struct;
-                {enum, _} -> enum;
-                _ -> none
-            end
-        ],
-        Kind =/= none
-    ],
-    case lists:usort(Hits) of
-        [{ModKey, struct}] ->
-            {struct, {ref, types_module_atom(ModKey), Name}};
-        [{ModKey, enum}] ->
-            Module = maps:get(ModKey, Ctx#ectx.modules),
-            {enum, E} = find_def(Module, Name),
-            {enum, enum_desc(E)};
-        _ ->
-            error({unresolved_type, Name})
-    end.
-
--spec find_def(#tg_module{} | undefined, binary()) ->
-    {struct, #tg_struct{}} | {enum, #tg_enum{}} | {typedef, thrift_type()} | error.
-find_def(undefined, _Name) ->
-    error;
-find_def(Module, Name) ->
-    case [S || S <- Module#tg_module.structs, S#tg_struct.name =:= Name] of
-        [S | _] ->
-            {struct, S};
-        [] ->
-            case [E || E <- Module#tg_module.enums, E#tg_enum.name =:= Name] of
-                [E | _] ->
-                    {enum, E};
-                [] ->
-                    case [T || T <- Module#tg_module.typedefs, T#tg_typedef.name =:= Name] of
-                        [#tg_typedef{type = Type} | _] -> {typedef, Type};
-                        [] -> error
-                    end
-            end
-    end.
-
--spec enum_desc(#tg_enum{}) -> [{integer(), atom()}].
-enum_desc(E) ->
-    [{Value, enum_atom(Name, enum_case(E))} || {Value, Name} <- E#tg_enum.values].
-
-%% The member atom casing an enum's generated atoms use, materialized
-%% by the semantic pass (per-enum annotation, else the namespace
-%% default, else the invocation option).
-
--spec enum_case(#tg_enum{}) -> preserve | lower.
-enum_case(E) ->
-    case maps:get(enum_case, E#tg_enum.erl, undefined) of
-        <<"lower">> -> lower;
-        _ -> preserve
-    end.
-
--spec enum_atom(binary(), preserve | lower) -> atom().
-enum_atom(Name, preserve) ->
-    binary_to_atom(Name, utf8);
-enum_atom(Name, lower) ->
-    binary_to_atom(list_to_binary(string:lowercase(binary_to_list(Name))), utf8).
-
--spec field_atom(binary()) -> atom().
-field_atom(Name) ->
-    binary_to_atom(Name, utf8).
-
--spec record_tag(binary(), binary()) -> atom().
-record_tag(Prefix, Name) ->
-    binary_to_atom(typed_prefix(Prefix, thrift_generator_names:snake(Name)), utf8).
-
-%% The record tag a record-mode struct's values carry: the erl.record_name
-%% annotation verbatim when present (the annotation names the tag in
-%% full — no namespace prefix is applied), the namespace-prefixed snake
-%% case otherwise. Only the record branch consults the annotation: sum
-%% unions carry field atoms and native structs mint runtime records,
-%% and the semantic pass rejects the annotation there.
-
--spec record_tag_of(#tg_struct{}, binary()) -> atom().
-record_tag_of(S, Prefix) ->
-    case S#tg_struct.erl of
-        #{record_name := Name} -> binary_to_atom(Name, utf8);
-        _ -> record_tag(Prefix, S#tg_struct.name)
-    end.
-
-%% The module's namespace-derived identifier prefix: prepended (with a
-%% separating underscore) to every record tag, type alias, derived
-%% function name and constant macro of that module; empty without a
-%% declared erl/wildcard namespace.
-
--spec typed_prefix(binary(), binary()) -> binary().
-typed_prefix(<<>>, Name) ->
-    Name;
-typed_prefix(Prefix, Name) ->
-    <<Prefix/binary, "_", Name/binary>>.
-
--spec current_prefix(#ectx{}) -> binary().
-current_prefix(Ctx) ->
-    (maps:get(Ctx#ectx.current, Ctx#ectx.modules))#tg_module.prefix.
-
--spec types_module_atom(module_key()) -> module().
-types_module_atom(Name) ->
-    binary_to_atom(<<(sanitize(Name))/binary, "_types">>, utf8).
-
--doc "The module key with dots replaced by underscores (an atom-safe module name).".
--spec sanitize(binary()) -> binary().
-sanitize(Name) ->
-    binary:replace(Name, <<".">>, <<"_">>, [global]).
-
-%%--------------------------------------------------------------------
-%% Erlang type mapping (specs and callbacks)
-%%--------------------------------------------------------------------
-
--spec erlang_type(thrift_type(), #ectx{}) -> erl_syntax:syntaxTree().
-erlang_type({base, B, _}, _) ->
-    thrift_generator_emitter_syntax:base_erlang_type(B);
-erlang_type({list, T, _}, Ctx) ->
-    list_type(T, Ctx);
-erlang_type({set, T, Ann}, Ctx) ->
-    %% Sets travel as lists on the wire (element type + count), exactly
-    %% like the official generator emits them; erl.set only picks the
-    %% in-process collection.
-    case set_impl(Ann) of
-        list ->
-            list_type(T, Ctx);
-        Impl ->
-            %% sets:set(Elem) / ordsets:ordset(Elem) — the stdlib type
-            %% names the in-process collection.
-            {Module, TypeName} =
-                case Impl of
-                    sets -> {sets, set};
-                    ordset -> {ordsets, ordset}
-                end,
-            Anno = erl_anno:new(0),
-            {remote_type, Anno, [
-                {atom, Anno, Module},
-                {atom, Anno, TypeName},
-                [erlang_type(T, Ctx)]
-            ]}
-    end;
-erlang_type({map, K, V, _}, Ctx) ->
-    Anno = erl_anno:new(0),
-    {type, Anno, map, [{type, Anno, map_field_assoc, [erlang_type(K, Ctx), erlang_type(V, Ctx)]}]};
-erlang_type({ref, Name, _}, Ctx) ->
-    case binary:split(Name, <<".">>) of
-        [ModKey, Local] ->
-            qualified_ref_type(ModKey, Local, Ctx);
-        [Local] when Ctx#ectx.qualify ->
-            qualified_ref_type(Ctx#ectx.current, Local, Ctx);
-        [Local] ->
-            local_ref_type(Local, Ctx)
-    end.
-
-%% A local reference surfaces as the definition's exported alias; the
-%% module's own aliases need no qualification. Enums and typedefs alias
-%% too; native-mode structs declare no alias, unresolved refs stay
-%% term().
-
--spec local_ref_type(binary(), #ectx{}) -> erl_syntax:syntaxTree().
-local_ref_type(Local, Ctx) ->
-    Module = maps:get(Ctx#ectx.current, Ctx#ectx.modules),
-    case def_alias(Module, Local) of
-        {ok, Alias} ->
-            thrift_generator_emitter_syntax:user_type(Alias);
-        error ->
-            thrift_generator_emitter_syntax:raw_type(term)
-    end.
-
--spec qualified_ref_type(module_key(), binary(), #ectx{}) -> erl_syntax:syntaxTree().
-qualified_ref_type(ModKey0, Local, Ctx) ->
-    ModKey = module_key_of(ModKey0, Ctx),
-    Module = maps:get(ModKey, Ctx#ectx.modules, undefined),
-    case def_alias(Module, Local) of
-        {ok, Alias} ->
-            thrift_generator_emitter_syntax:remote_type(types_module_atom(ModKey), Alias);
-        error ->
-            thrift_generator_emitter_syntax:raw_type(term)
-    end.
-
--spec def_alias(#tg_module{} | undefined, binary()) -> {ok, atom()} | error.
-def_alias(undefined, _Local) ->
-    error;
-def_alias(Module, Local) ->
-    case find_def(Module, Local) of
-        {struct, S} ->
-            case native_mode(S) of
-                true -> error;
-                false -> {ok, type_alias(Local)}
-            end;
-        {enum, _E} ->
-            {ok, type_alias(Local)};
-        {typedef, _Type} ->
-            {ok, type_alias(Local)};
-        error ->
-            error
-    end.
 %%--------------------------------------------------------------------
 %% In-memory compilation
 %%--------------------------------------------------------------------

@@ -24,6 +24,8 @@
     base_type/0,
     type_ref/0,
     thrift_type/0,
+    resolved_ref/0,
+    resolved_thrift_type/0,
     const_value/0,
     enum_value/0,
     requiredness/0,
@@ -78,6 +80,22 @@
     | {list, Element :: thrift_type(), annotations()}
     | {set, Element :: thrift_type(), annotations()}
     | {map, Key :: thrift_type(), Value :: thrift_type(), annotations()}.
+
+%% A reference resolved by the semantic pass: the module the definition
+%% lives in (the erl namespace module key), its name within that module
+%% and the type's annotations. Qualified spellings additionally keep the
+%% original `Qualifier.Name' under the ?TG_REF_SOURCE annotation key so
+%% the emission layer can reproduce their legacy rendering.
+-type resolved_ref() :: {resolved_ref, ModuleKey :: binary(), LocalName :: binary(), annotations()}.
+
+%% The model's type vocabulary: the parsed shapes with every {ref, Name,
+%% Ann} node replaced by a resolved_ref().
+-type resolved_thrift_type() ::
+    {base, base_type(), annotations()}
+    | resolved_ref()
+    | {list, Element :: resolved_thrift_type(), annotations()}
+    | {set, Element :: resolved_thrift_type(), annotations()}
+    | {map, Key :: resolved_thrift_type(), Value :: resolved_thrift_type(), annotations()}.
 
 %% A constant literal or a reference to another constant or enum
 %% member; references are resolved by the semantic pass.

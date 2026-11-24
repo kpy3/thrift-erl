@@ -81,6 +81,12 @@ format(Errors, Source) when is_list(Errors) ->
     lists:join(Joiner, [Text || {_, Text} <- Rendered]);
 format({cycle, Path}, _Source) ->
     io_lib:format("include cycle involving ~ts", [Path]);
+format({unknown_option, Key}, _Source) ->
+    io_lib:format("unknown option ~ts", [option_name(Key)]);
+format({bad_option, {Key, Value, Allowed}}, _Source) ->
+    io_lib:format("invalid value for ~ts: ~0p (allowed: ~ts)", [
+        option_name(Key), Value, string:join([option_name(A) || A <- Allowed], ", ")
+    ]);
 format({duplicate_module, Name, First, Second}, _Source) ->
     io_lib:format("module ~ts declared twice: ~ts and ~ts", [Name, First, Second]);
 format({write_error, Path, Reason}, _Source) ->
@@ -92,6 +98,16 @@ format({stale, Paths}, _Source) ->
     );
 format(Reason, _Source) ->
     io_lib:format("~0p", [Reason]).
+
+%% Option names are atoms by contract; a hand-built options map can still
+%% carry anything, and the catch-all this clause pair replaced rendered
+%% every term.
+
+-spec option_name(term()) -> unicode:chardata().
+option_name(Key) when is_atom(Key) ->
+    atom_to_list(Key);
+option_name(Key) ->
+    io_lib:format("~0p", [Key]).
 
 %% One located problem: the excerpt block when the file reads back and
 %% carries the line, the compact line otherwise.

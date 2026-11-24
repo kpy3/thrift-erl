@@ -24,7 +24,8 @@
     wide_interval_is_inconclusive_test/0,
     median_handles_even_sample_count_test/0,
     schema_rows_use_current_head_module_facade_test/0,
-    schema_cases_run_end_to_end_with_default_repr_test/0
+    schema_cases_run_end_to_end_with_default_repr_test/0,
+    rewrite_resolved_refs_rewrites_keys_and_values_test/0
 ]).
 
 paired_ratio_uses_throughput_direction_test() ->
@@ -175,3 +176,23 @@ with_schema_env(Protocol, Fun) ->
 
 restore_env(Name, false) -> os:unsetenv(Name);
 restore_env(Name, Value) -> os:putenv(Name, Value).
+
+%% The rename walk must stay shape-agnostic: a resolved reference can
+%% sit in a map key as well as in a value, and both sides are retargeted.
+
+rewrite_resolved_refs_rewrites_keys_and_values_test() ->
+    RefMap = #{<<"old">> => <<"new">>},
+    Model = #{
+        {resolved_ref, <<"old">>, <<"T">>, #{}} =>
+            {resolved_ref, <<"old">>, <<"T">>, #{}},
+        <<"plain">> => {list, {resolved_ref, <<"old">>, <<"T">>, #{}}, #{}}
+    },
+    ?assertEqual(
+        #{
+            {resolved_ref, <<"new">>, <<"T">>, #{}} =>
+                {resolved_ref, <<"new">>, <<"T">>, #{}},
+            <<"plain">> => {list, {resolved_ref, <<"new">>, <<"T">>, #{}}, #{}}
+        },
+        thrift_bench_regression:rewrite_resolved_refs(Model, RefMap)
+    ),
+    ok.

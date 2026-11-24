@@ -32,8 +32,6 @@ runtime are their only callers.
 -export([
     enum_registry/1,
     type_name/2,
-    typed_prefix/2,
-    current_prefix/1,
     codec_pair/3,
     ref_codec_pair/4,
     service_structs/1,
@@ -42,8 +40,8 @@ runtime are their only callers.
     containers/1,
     elem_type/1,
     used_helpers/2,
-    export_entries/3,
-    codec_index_forms/3
+    export_entries/2,
+    codec_index_forms/2
 ]).
 
 -export_type([wire_type/0, enum_desc/0, registry/0]).
@@ -122,24 +120,14 @@ type_name({struct, {ref, TypesMod, Local}}, _Enums) ->
 module_tag(TypesMod) ->
     binary:replace(atom_to_binary(TypesMod, utf8), <<"_types">>, <<>>).
 
--doc "Joins a namespace prefix and a snake-case definition name.".
--spec typed_prefix(binary(), binary()) -> binary().
-typed_prefix(<<>>, Name) ->
-    Name;
-typed_prefix(Prefix, Name) ->
-    <<Prefix/binary, "_", Name/binary>>.
-
--doc "Returns the namespace prefix of the module being generated.".
--spec current_prefix(#ectx{}) -> binary().
-current_prefix(Ctx) ->
-    (maps:get(Ctx#ectx.current, Ctx#ectx.modules))#tg_module.prefix.
-
 -doc "Returns the generated encode/decode function names for a struct and protocol.".
 -spec codec_pair(wire | compact | json, binary() | #tg_struct{}, #ectx{}) -> {atom(), atom()}.
 codec_pair(Protocol, #tg_struct{name = Name}, Ctx) ->
     codec_pair(Protocol, Name, Ctx);
 codec_pair(Protocol, Name, Ctx) when is_binary(Name) ->
-    Prefix = typed_prefix(current_prefix(Ctx), thrift_generator_names:snake(Name)),
+    Prefix = thrift_generator_names:typed_prefix(
+        thrift_generator_names:current_prefix(Ctx), thrift_generator_names:snake(Name)
+    ),
     Suffix = protocol_suffix(Protocol),
     {
         binary_to_atom(<<"encode_", Prefix/binary, Suffix/binary>>, utf8),
@@ -262,8 +250,9 @@ decode_body_name(Decode) ->
     atom_concat(Decode, <<"_body">>).
 
 -doc "Returns the export entries of one protocol's specialized codecs, including the RPC params/result pairs.".
--spec export_entries(wire | compact | json, #tg_module{}, #ectx{}) -> [{atom(), arity()}].
-export_entries(Protocol, Mod, Ctx) ->
+-spec export_entries(wire | compact | json, #tg_codec_plan{}) -> [{atom(), arity()}].
+export_entries(Protocol, Plan) ->
+    Names = maps:get(Protocol, Plan#tg_codec_plan.codec_names),
     [{protocol_index(Protocol), 1}] ++
         lists:append([
             [{Encode, 1}, {Decode, 1}] ++
@@ -271,18 +260,17 @@ export_entries(Protocol, Mod, Ctx) ->
                     json -> [{decode_body_name(Decode), 1}];
                     _ -> []
                 end
-         || {Encode, Decode} <- [
-                codec_pair(Protocol, S, Ctx)
-             || S <- Mod#tg_module.structs ++ service_structs(Mod)
-            ]
+         || CS <- Plan#tg_codec_plan.declared ++ Plan#tg_codec_plan.rpc,
+            {Encode, Decode} <- [maps:get(CS#tg_codec_struct.struct#tg_struct.name, Names)]
         ]).
 
 -doc "Builds the public codec index of one protocol.".
--spec codec_index_forms(wire | compact | json, #tg_module{}, #ectx{}) -> erl_syntax:forms().
-codec_index_forms(Protocol, Mod, Ctx) ->
+-spec codec_index_forms(wire | compact | json, #tg_codec_plan{}) -> erl_syntax:forms().
+codec_index_forms(Protocol, Plan) ->
+    Names = maps:get(Protocol, Plan#tg_codec_plan.codec_names),
     Clauses =
         [
-            clause([name_lit(S#tg_struct.name)], none, [
+            clause([name_lit(CS#tg_codec_struct.struct#tg_struct.name)], none, [
                 tuple_t([
                     at(ok),
                     tuple_t([
@@ -291,7 +279,8 @@ codec_index_forms(Protocol, Mod, Ctx) ->
                     ])
                 ])
             ])
-         || {S, {Encode, Decode}} <- [{S, codec_pair(Protocol, S, Ctx)} || S <- Mod#tg_module.structs]
+         || CS <- Plan#tg_codec_plan.declared,
+            {Encode, Decode} <- [maps:get(CS#tg_codec_struct.struct#tg_struct.name, Names)]
         ] ++ [clause([v(index_unknown_name(Protocol))], none, [at(error)])],
     Index = protocol_index(Protocol),
     thrift_generator_emitter_syntax:doc_false_form() ++
