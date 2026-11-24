@@ -104,7 +104,7 @@
 
 -spec generate() -> [thrift_generator_emitter:compiled()].
 generate() ->
-    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Results = thrift_generator_emitter:compile_sources(Model),
@@ -131,7 +131,7 @@ compile_all_modules_test() ->
 %% namespace keys.
 
 ir_local_struct_descriptor_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Ctx = model_ctx(Model),
@@ -219,7 +219,7 @@ record_fields_and_defaults_test() ->
     ok.
 
 map_representation_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "struct M { 1: i32 x } (erl.struct_type = \"map\")\n"
     ),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
@@ -244,7 +244,7 @@ handler_callbacks_test() ->
 %% unlinked start rather than the linked one.
 
 client_start_unlinked_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Sources = thrift_generator_emitter:sources(Model),
@@ -261,7 +261,7 @@ client_start_unlinked_test() ->
     ok.
 
 source_is_readable_text_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Sources = thrift_generator_emitter:sources(Model),
@@ -284,7 +284,7 @@ source_is_readable_text_test() ->
     ok.
 
 types_hrl_content_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Sources = thrift_generator_emitter:sources(Model),
@@ -409,7 +409,7 @@ schema_codec_api_test() ->
 %% through a literal `Options#{repr => Default}' update.
 
 facade_decode_no_merge_source_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Sources = thrift_generator_emitter:sources(Model),
@@ -448,7 +448,7 @@ facade_decode_options_paths_test() ->
 %% runtime-minted native record (or the unsupported_repr error on OTP 28).
 
 schema_default_repr_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "namespace erl t (erl.union_type = \"sum\")\n"
         "union Value { 1: i64 int_val, 2: string str_val }\n"
         "struct M { 1: i32 x } (erl.struct_type = \"map\")\n"
@@ -502,7 +502,7 @@ enum_and_const_helpers_test() ->
 %% collection, decode/encode convert both ways.
 
 set_annotation_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "typedef set<i32> (erl.set = \"ordset\") OrdInts\n"
         "struct Bag {\n"
         "  1: set<i32> plain,\n"
@@ -588,7 +588,7 @@ set_annotation_test() ->
 %% standard single-field struct.
 
 sum_union_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?SUM_SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?SUM_SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     lists:foreach(
@@ -639,7 +639,7 @@ sum_union_test() ->
 %% payload against the SELECTED union's field.
 
 schema_convert_is_typed_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "namespace erl t (erl.union_type = \"sum\")\n"
         "struct Inner { 1: string name }\n"
         "union First { 1: i64 n, 2: Inner s }\n"
@@ -724,7 +724,7 @@ schema_onepass_and_fallback_test() ->
 %% service's descriptor (wrong field types on the wire).
 
 service_method_name_clash_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "namespace erl t\n"
         "service First { list<i64> Get(1: string filter) }\n"
         "service Second { list<string> Get(1: i64 limit) }\n"
@@ -765,7 +765,7 @@ service_method_name_clash_test() ->
 %% own axis.
 
 native_representation_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "struct P { 1: i32 x = 5, 2: string label }\n"
         "exception Oops { 1: string why }\n"
         "union V { 1: i32 n }\n"
@@ -821,7 +821,7 @@ repr_option_test() ->
         "union U { 1: i32 n }\n"
         "exception E { 1: string m }\n",
     Loaded = fun() ->
-        {ok, Doc} = thrift_generator:parse_string(Snippet),
+        {ok, Doc} = thrift_generator_idl:parse_string(Snippet),
         [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}]
     end,
     Annotations = fun(Model) ->
@@ -860,7 +860,7 @@ repr_option_test() ->
 %% implementation and a -nominal typedef.
 
 option_axes_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "union Value { 1: i64 n, 2: string s }\n"
         "struct Bag { 1: optional set<string> tags }\n"
         "typedef i64 Stamp\n"
@@ -897,7 +897,7 @@ option_axes_test() ->
     ok.
 
 namespace_set_default_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "namespace erl t (erl.set = \"sets\")\n"
         "struct Bag {\n"
         "  1: set<i32> plain,\n"
@@ -969,7 +969,7 @@ namespace_set_default_test() ->
 %% declared. Services keep their own name-derived module atoms.
 
 namespace_prefix_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?NS_SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?NS_SNIPPET),
     Loaded = [
         #tg_loaded{
             name = <<"demo.widgets">>,
@@ -1051,7 +1051,7 @@ namespace_prefix_test() ->
 %% record-and-macro only.
 
 type_definitions_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         "struct Point { 1: required i32 x, 2: optional i32 y }\n"
         "struct PointMap { 1: required i32 x, 2: optional i32 y }"
         " (erl.struct_type = \"map\")\n"
@@ -1093,7 +1093,7 @@ type_definitions_test() ->
 %% -doc explaining its contract.
 
 doc_pipeline_test() ->
-    {ok, Doc} = thrift_generator:parse_string(?DOC_SNIPPET),
+    {ok, Doc} = thrift_generator_idl:parse_string(?DOC_SNIPPET),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Results = thrift_generator_emitter:compile_sources(Model),
@@ -1260,6 +1260,6 @@ analyze_model(Snippet) ->
 
 -spec analyze_model_opts(string() | binary(), map()) -> {ok, #tg_model{}} | {error, term()}.
 analyze_model_opts(Snippet, Opts) ->
-    {ok, Doc} = thrift_generator:parse_string(Snippet),
+    {ok, Doc} = thrift_generator_idl:parse_string(Snippet),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     thrift_generator_semantic:analyze(Loaded, Opts).

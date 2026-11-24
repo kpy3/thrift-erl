@@ -339,9 +339,9 @@ generate_matches_fixture_test() ->
     end.
 
 %% The final public surface: generate/1,2, check/1,2 and clean/1 are the
-%% only generation operations; the transitional /3 forms are gone. The
-%% parser-level entries stay exported (the loader and the suites call
-%% them) but are internal — see the module doc.
+%% only generation operations; the transitional /3 forms and the
+%% parser-level entries are gone from the facade — the internal
+%% thrift_generator_idl owns the parser pipeline — see the module doc.
 
 public_api_shape_test() ->
     ?assert(erlang:function_exported(thrift_generator, generate, 1)),
@@ -351,10 +351,14 @@ public_api_shape_test() ->
     ?assert(erlang:function_exported(thrift_generator, check, 2)),
     ?assertNot(erlang:function_exported(thrift_generator, check, 3)),
     ?assert(erlang:function_exported(thrift_generator, clean, 1)),
-    ?assert(erlang:function_exported(thrift_generator, tokens, 1)),
-    ?assert(erlang:function_exported(thrift_generator, ast, 1)),
-    ?assert(erlang:function_exported(thrift_generator, parse_file, 1)),
-    ?assert(erlang:function_exported(thrift_generator, parse_string, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, tokens, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, ast, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, parse_file, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, parse_string, 1)),
+    ?assert(erlang:function_exported(thrift_generator_idl, tokens, 1)),
+    ?assert(erlang:function_exported(thrift_generator_idl, ast, 1)),
+    ?assert(erlang:function_exported(thrift_generator_idl, parse_file, 1)),
+    ?assert(erlang:function_exported(thrift_generator_idl, parse_string, 1)),
     ok.
 
 %% An unchanged artifact is skipped, not rewritten: with the generated

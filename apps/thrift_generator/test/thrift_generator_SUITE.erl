@@ -244,11 +244,11 @@ parse_erlang_thrift_test_idl(Config) ->
 
 reject_reserved_keyword(Config) ->
     BadFile = write_snippet(Config, "reserved.thrift", <<"struct catch {}">>),
-    ?assertMatch({error, _}, thrift_generator:parse_file(BadFile)).
+    ?assertMatch({error, _}, thrift_generator_idl:parse_file(BadFile)).
 
 reject_syntax_error(Config) ->
     BadFile = write_snippet(Config, "broken.thrift", <<"struct">>),
-    ?assertMatch({error, _}, thrift_generator:parse_file(BadFile)).
+    ?assertMatch({error, _}, thrift_generator_idl:parse_file(BadFile)).
 
 %% The full pipeline over a real include graph: loading, module naming
 %% from `namespace erl`, cross-module references (types, constants, enum
@@ -1747,7 +1747,7 @@ utf8_doc_and_const(Config) ->
 
 utf8_invalid_file_rejected(Config) ->
     Bad = write_snippet(Config, "bad_utf8.thrift", <<255, 254, 47, 42>>),
-    ?assertMatch({error, {invalid_utf8, Bad}}, thrift_generator:parse_file(Bad)),
+    ?assertMatch({error, {invalid_utf8, Bad}}, thrift_generator_idl:parse_file(Bad)),
     ok.
 
 loader_namespace_error(Config) ->
@@ -2616,7 +2616,7 @@ native_supported() ->
 
 parse_data_file(Config, Name) ->
     File = filename:join(proplists:get_value(data_dir, Config), Name),
-    {ok, Doc} = thrift_generator:parse_file(File),
+    {ok, Doc} = thrift_generator_idl:parse_file(File),
     Doc.
 
 data_file(Config, Relative) ->

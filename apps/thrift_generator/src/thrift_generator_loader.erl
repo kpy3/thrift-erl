@@ -78,7 +78,7 @@ visit(Path, Marks, Acc) ->
 
 -spec parse(binary()) -> ast_node().
 parse(Path) ->
-    case thrift_generator:parse_file(Path) of
+    case thrift_generator_idl:parse_file(Path) of
         {ok, Doc} ->
             Doc;
         {error, Reason} ->

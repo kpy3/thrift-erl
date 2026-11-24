@@ -29,9 +29,10 @@ options argument answers `{error, {bad_option, {options, Value,
 
 `generate/1` and `check/1` are the same operations with every default
 (`out_dir => "src"`); `clean/1` is unchanged. The parser-level helpers
-`tokens/1`, `ast/1`, `parse_file/1` and `parse_string/1` stay exported
-— the loader pipeline and the test suites call them — but they are
-internal, not a stable public contract.
+`tokens/1`, `ast/1`, `parse_file/1` and `parse_string/1` are removed
+from the public facade: they exist only as unstable internal entries of
+`thrift_generator_idl`, which the loader pipeline and the test suites
+call — not a stable public contract.
 
 ### CLI
 
