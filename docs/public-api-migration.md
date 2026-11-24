@@ -165,6 +165,58 @@ reconnecting client) are typed `thrift_runtime:protocol()`: `binary`,
 `compact`, `json` or a custom module implementing the
 `thrift_runtime_protocol` behaviour.
 
+## Endpoint option validation
+
+Every runtime endpoint validates its options map at creation time,
+before anything is registered, bound or connected; nothing starts on
+the error path. Each endpoint accepts exactly its documented keys (see
+the README): plain and reconnecting clients, `thrift_runtime_server`
+(the server keys plus `name`, default `thrift_runtime_server`), the
+direct `thrift_runtime_acceptor` (the same set minus `name` — a `name`
+key there answers `{error, {unknown_option, name}}`) and `stop/2` (at
+most `drain`). The error vocabulary is shared:
+
+| Condition | Error |
+|---|---|
+| non-map options argument | `{error, {bad_option, {options, Value, [map]}}}` |
+| key outside the endpoint's set | `{error, {unknown_option, Key}}` |
+| required key absent | `{error, {missing_option, Key}}` |
+| value outside its family | `{error, {bad_option, {Key, Value, Allowed}}}` |
+| unknown protocol value | `{error, {bad_protocol, Value}}` — the axis' own term, unwrapped |
+
+Behavior changes to note:
+
+- Server starts used to bind and listen with unknown or invalid keys
+  silently ignored (or fail deep inside `init`); now the error answers
+  from `start_link/1` itself, before the supervisor registers or the
+  port binds, and no listener is left behind.
+- `stop/2` used to treat any map without `drain` as a plain stop,
+  ignoring unknown keys; now an invalid options argument answers the
+  strict error and the server keeps running. `#{drain := Timeout}` is
+  unchanged, including the never-failing deadline.
+- A server takes exactly one service mode: `service` + `handler`, or a
+  `services` map. Passing both answers `{error, {bad_option, {services,
+  Value, [single_service_or_multiplex]}}}`; a malformed `services`
+  entry answers `{error, {bad_option, {services, Value,
+  [service_map]}}}`.
+- `max_queue_depth` must be a positive integer or `infinity`: `0` (the
+  old "reject every call" trick) answers `{error, {bad_option,
+  {max_queue_depth, 0, [pos_integer, infinity]}}}` — a finite depth
+  already answers `{error, queue_full}` on overflow.
+- Generated typed servers and clients inject their `service` (and
+  `record_api`/`types`) before validation, so the accepted keys are
+  exactly the runtime's; a generated server passed `services` skips the
+  single-service injection — multiplexed hosting passes validation
+  as-is.
+- `thrift_runtime_options` no longer exports the typed getters
+  (`handshake_timeout/1`, `idle_timeout/1`, `transport/1`,
+  `protocol_module/1`, `max_frame_size/1`, `active_n/1`,
+  `max_connections/1`, `on_event/1`). Endpoints consume the normalized
+  map the normalizers produce and process initialization reads it with
+  plain `maps:get/2`; a direct `thrift_runtime_connection:start/1`
+  must supply the same normalized shape (validated options plus the
+  accepted `socket`).
+
 ## RPC results and generated client starts
 
 The RPC result contract is the same shape on both ends of the wire:

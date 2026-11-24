@@ -156,7 +156,7 @@ more_capped(_Buffer, _MaxFrameSize) ->
 
 -doc """
 Listens with the standard socket options (binary, passive, raw) plus
-`backlog` from `Opts`.
+`backlog` from the normalized `Opts`.
 
 With `ssl_opts` in `Opts` (a list of `ssl:tls_server_option()`) the
 listener is TLS. The listen socket stays passive; accepted connections
@@ -164,7 +164,7 @@ switch themselves to `{active, N}` delivery after taking ownership.
 """.
 -spec listen(map()) -> {ok, socket()} | {error, term()}.
 listen(#{port := Port} = Opts) ->
-    Backlog = maps:get(backlog, Opts, 1024),
+    Backlog = maps:get(backlog, Opts),
     Base = [
         binary,
         {packet, raw},

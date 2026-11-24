@@ -484,7 +484,8 @@ artifact_bytes(Artifacts) ->
 
 %% The fixture artifacts parsed to normalized abstract format, keyed by
 %% file name, for the pin in generate_matches_fixture_test/0. The client
-%% fixture carries the Series-3 `start/1` addition; the rest is
+%% fixture carries the Series-3 `start/1` addition and the server fixture
+%% the Series-3 multiplex-aware `service` injection; the rest is
 %% Series-1 output, unchanged since.
 
 -spec fixture_forms() -> #{string() => term()}.

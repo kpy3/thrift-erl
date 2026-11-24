@@ -357,11 +357,26 @@ so `ok` is the existing empty result struct.
 - client: `host`, `port`, `timeout` (connect and TLS handshake;
   per-call timeouts ride the call itself; `connect_timeout` overrides
   the umbrella), `max_frame_size`, `active_n`, `max_queue_depth` (how
-  many calls may wait while another is on the wire; overflow answers
-  `{error, queue_full}`; the default `infinity` keeps the classic
-  unbounded queue);
+  many calls may wait while another is on the wire; a positive integer
+  or `infinity` — the default `infinity` keeps the classic unbounded
+  queue; `0` is rejected: it used to mean "reject every call", which is
+  a configuration error now, overflow already answers
+  `{error, queue_full}` at any finite depth);
 - both: `on_event` — the observability callback (see
   [Observability](#observability)).
+
+Every endpoint validates its options map at start, before anything is
+registered, bound or connected: an unknown key answers `{error,
+{unknown_option, Key}}`, a missing required key `{error,
+{missing_option, Key}}`, a bad value `{error, {bad_option, {Key, Value,
+Allowed}}}`, a non-map argument `{error, {bad_option, {options, Value,
+[map]}}}` — the `protocol` axis keeps its own `{bad_protocol, Value}`.
+Nothing starts on the error path: an invalid server option leaves no
+listener behind. A server takes exactly one service mode — `service` +
+`handler`, or a `services` map; passing both is `{error, {bad_option,
+{services, Value, [single_service_or_multiplex]}}}`. Generated typed
+servers and clients inject their `service` (and `record_api`/`types`)
+before validation, so their accepted keys are exactly the runtime's.
 
 A plain `stop/1` takes the server down at once. `stop/2` with
 `#{drain => Timeout}` shuts down gracefully first: the listen socket
@@ -371,7 +386,8 @@ last connection is gone — or at the deadline (`infinity` allowed; the
 deadline never fails the call, whatever it leaves over is then
 swept by the normal supervised stop, which lets a still-running
 exchange finish and fails the calls only of connections that cannot
-finish):
+finish). Invalid stop options answer the same strict error terms and
+change nothing — the server keeps running:
 
 ```erlang
 ok = ping_api_ping_server:stop(Server, #{drain => 10_000}).

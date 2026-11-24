@@ -68,6 +68,7 @@
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
     generated_client_invalid_options/1,
+    generated_server_invalid_options/1,
     standalone_generate_check_clean/1,
     getting_started_example/1,
     generated_client_start_unlinked/1,
@@ -122,6 +123,7 @@ all() ->
         generated_loopback_buffered,
         generated_loopback_framed,
         generated_client_invalid_options,
+        generated_server_invalid_options,
         standalone_generate_check_clean,
         getting_started_example,
         generated_client_start_unlinked,
@@ -1836,6 +1838,33 @@ generated_client_invalid_options(Config) ->
         {error, {bad_protocol, <<"binary">>}},
         main_main_service_client:start_link(Base#{protocol => <<"binary">>})
     ),
+    ok.
+
+%% The generated typed server injects its `service', `record_api' and
+%% `types' into the caller's options and delegates to
+%% `thrift_runtime_server': an unknown caller option answers `{error,
+%% {unknown_option, Key}}' from the start itself — before anything binds,
+%% the freed port is still free to probe — while the injected keys pass
+%% validation: a start against that port binds it.
+
+generated_server_invalid_options(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {ok, Listen} = gen_tcp:listen(0, []),
+    {ok, Port} = inet:port(Listen),
+    gen_tcp:close(Listen),
+    Base = #{port => Port, handler => thrift_generator_test_handler},
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        main_main_service_server:start_link(Base#{bogus => true})
+    ),
+    {ok, Probe} = gen_tcp:listen(Port, []),
+    ok = gen_tcp:close(Probe),
+    {ok, Server} = main_main_service_server:start_link(Base),
+    try
+        ?assertEqual({ok, Port}, main_main_service_server:port(Server))
+    after
+        ok = main_main_service_server:stop(Server)
+    end,
     ok.
 
 -spec generated_loopback(ct:config(), buffered | framed) -> ok.

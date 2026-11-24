@@ -80,11 +80,21 @@ mechanism.
 -doc """
 Starts the listener.
 
-`init` fails (stopping the server) if the port cannot be bound.
+The options are validated and normalized first: an invalid map answers
+`{error, Reason}' — the strict option vocabulary of
+`thrift_runtime_options:acceptor_options/1' — without binding a port.
+The direct acceptor rejects `name' (only `thrift_runtime_server'
+accepts it). `init` fails (stopping the server) if the port cannot be
+bound.
 """.
 -spec start_link(options()) -> gen_server:start_ret().
 start_link(Opts) ->
-    gen_server:start_link(?MODULE, Opts, []).
+    case thrift_runtime_options:acceptor_options(Opts) of
+        {ok, Normalized} ->
+            gen_server:start_link(?MODULE, Normalized, []);
+        {error, _} = Error ->
+            Error
+    end.
 
 -doc "Stops the listener; live connections are not affected.".
 -spec stop(pid()) -> ok.
@@ -118,13 +128,16 @@ drain(Pid, Timeout) when is_integer(Timeout), Timeout >= 0 ->
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    %% The supervisor shuts children down with exit(shutdown); trapping
-    %% turns that into sys-driven terminate, which is what stops the
-    %% live connections — without it they would survive the stop as
+    %% The init argument is the normalized map `start_link/1' produced:
+    %% every value validated, the protocol resolved to its module, every
+    %% default applied — nothing here re-reads or re-defaults caller
+    %% options. The supervisor shuts children down with exit(shutdown);
+    %% trapping turns that into sys-driven terminate, which is what stops
+    %% the live connections — without it they would survive the stop as
     %% orphans.
     process_flag(trap_exit, true),
-    case {thrift_runtime_socket:listen(Opts), thrift_runtime_options:on_event(Opts)} of
-        {{ok, ListenSocket}, {ok, _Handler}} ->
+    case thrift_runtime_socket:listen(Opts) of
+        {ok, ListenSocket} ->
             ConnectionOpts = maps:with(
                 [
                     handler,
@@ -147,14 +160,11 @@ init(Opts) ->
                 #state{
                     listen_socket = ListenSocket,
                     connection_opts = ConnectionOpts,
-                    max_connections = thrift_runtime_options:max_connections(Opts)
+                    max_connections = maps:get(max_connections, Opts)
                 },
             self() ! accept,
             {ok, State#state{accepting = true}};
-        {{ok, ListenSocket}, {error, Reason}} ->
-            thrift_runtime_socket:close(ListenSocket),
-            {stop, Reason};
-        {{error, Reason}, _} ->
+        {error, Reason} ->
             {stop, Reason}
     end.
 
@@ -211,7 +221,7 @@ handle_info(accept, #state{} = State) ->
     %% between waits; a plain infinity accept would swallow them.
     %% On TLS the handshake then blocks up to the handshake timeout —
     %% accepted but silent peers cannot pin the acceptor forever.
-    HandshakeTimeout = thrift_runtime_options:handshake_timeout(State#state.connection_opts),
+    HandshakeTimeout = maps:get(handshake_timeout, State#state.connection_opts),
     case thrift_runtime_socket:accept(State#state.listen_socket, 250, HandshakeTimeout) of
         {ok, Socket} ->
             State1 = start_connection(Socket, State0),

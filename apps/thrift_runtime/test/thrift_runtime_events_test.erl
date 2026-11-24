@@ -93,19 +93,21 @@ explode() ->
 %% Option validation
 
 on_event_option_validation_test() ->
-    ?assertEqual({ok, undefined}, thrift_runtime_options:on_event(#{})),
-    ?assertEqual({ok, undefined}, thrift_runtime_options:on_event(#{on_event => undefined})),
+    Base = #{port => 0, handler => some_handler, service => some_service},
+    ?assertMatch({ok, _}, thrift_runtime_options:server_options(Base)),
+    ?assertMatch({ok, _}, thrift_runtime_options:server_options(Base#{on_event => undefined})),
     Fun = fun(_) -> ok end,
-    ?assertEqual({ok, Fun}, thrift_runtime_options:on_event(#{on_event => Fun})),
-    ?assertEqual(
-        {ok, {?MODULE, collect, [self()]}},
-        thrift_runtime_options:on_event(#{on_event => {?MODULE, collect, [self()]}})
+    ?assertMatch({ok, _}, thrift_runtime_options:server_options(Base#{on_event => Fun})),
+    ?assertMatch(
+        {ok, _},
+        thrift_runtime_options:server_options(Base#{on_event => {?MODULE, collect, [self()]}})
     ),
     Bad = [1, <<"x">>, fun erlang:phash2/2, {?MODULE, collect}, {?MODULE, collect, self()}],
     lists:foreach(
         fun(Value) ->
             ?assertEqual(
-                {error, {on_event, Value}}, thrift_runtime_options:on_event(#{on_event => Value})
+                {error, {bad_option, {on_event, Value, [undefined, 'fun', mfa]}}},
+                thrift_runtime_options:server_options(Base#{on_event => Value})
             )
         end,
         Bad
@@ -126,11 +128,17 @@ bad_option_fails_the_start_test() ->
         {error, {bad_option, {on_event, 42, [undefined, 'fun', mfa]}}},
         thrift_runtime_reconnecting_client:start_link(opts(Port, #{on_event => 42}))
     ),
-    %% the acceptor validates before it starts accepting; the ephemeral
-    %% listen socket it opened for the attempt is closed again
+    %% the server validates before it registers or binds; nothing is
+    %% started and no listen socket is opened for the attempt
     ?assertEqual(
-        {error, {shutdown, {failed_to_start_child, acceptor, {on_event, 42}}}},
-        thrift_runtime_server:start_link(#{name => thrift_runtime_events_bad_server, port => 0, on_event => 42})
+        {error, {bad_option, {on_event, 42, [undefined, 'fun', mfa]}}},
+        thrift_runtime_server:start_link(#{
+            name => thrift_runtime_events_bad_server,
+            port => 0,
+            handler => some_handler,
+            service => some_service,
+            on_event => 42
+        })
     ).
 
 %%--------------------------------------------------------------------

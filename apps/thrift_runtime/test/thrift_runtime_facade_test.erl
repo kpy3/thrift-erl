@@ -42,7 +42,6 @@
     encode_strict_test/0,
     decode_bad_repr_test/0,
     decode_record_of_map_mode_test/0,
-    options_defaults_test/0,
     extract_message_framed_test/0,
     extract_message_buffered_test/0,
     client_queue_serializes_test/0,
@@ -604,25 +603,6 @@ decode_record_of_map_mode_test() ->
     ?assertEqual({error, {no_record, loose}}, thrift_runtime:decode(Loose, Bin, #{repr => record})),
     %% the map representation keeps working
     ?assertEqual({ok, #{s => <<"x">>}}, thrift_runtime:decode(Loose, Bin, #{repr => map})),
-    ok.
-
-%% The shared option defaults and the timeout umbrella.
-
-options_defaults_test() ->
-    ?assertEqual(5000, thrift_runtime_options:idle_timeout(#{})),
-    ?assertEqual(1000, thrift_runtime_options:idle_timeout(#{timeout => 1000})),
-    ?assertEqual(300, thrift_runtime_options:idle_timeout(#{timeout => 1000, idle_timeout => 300})),
-    %% the umbrella fills both meanings until a specific key splits them
-    ?assertEqual(1000, thrift_runtime_options:handshake_timeout(#{timeout => 1000})),
-    ?assertEqual(250, thrift_runtime_options:handshake_timeout(#{timeout => 1000, handshake_timeout => 250})),
-    ?assertEqual(framed, thrift_runtime_options:transport(#{})),
-    ?assertEqual(65536, thrift_runtime_options:max_frame_size(#{max_frame_size => 65536})),
-    ?assertEqual(7, thrift_runtime_options:active_n(#{active_n => 7})),
-    ?assertEqual({ok, thrift_runtime_compact}, thrift_runtime_options:protocol_module(#{protocol => compact})),
-    ?assertMatch(
-        {error, {bad_protocol, nope, _}},
-        thrift_runtime_options:protocol_module(#{protocol => nope})
-    ),
     ok.
 
 %%--------------------------------------------------------------------

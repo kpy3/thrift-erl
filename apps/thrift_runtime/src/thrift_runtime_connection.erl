@@ -31,7 +31,11 @@ with `TApplicationException` (INTERNAL_ERROR); anything that breaks
 the stream (bad frame, socket error, timeout) closes the connection.
 
 Configuration comes in at creation time as a map — never from the
-application environment:
+application environment. The acceptor passes its normalized options
+(`thrift_runtime_options:server_options/1`, whitelisted to the
+connection keys and fully defaulted); a direct `start/1` must supply
+the same normalized shape — every key below, the protocol already
+resolved to its module:
 
 - `socket` (required) — the accepted, already handshaken socket;
 - `transport` — `framed` (default), `buffered`, or `http`: a Thrift
@@ -136,11 +140,14 @@ stop(Pid) ->
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    Timeout = thrift_runtime_options:idle_timeout(Opts),
-    case {thrift_runtime_options:protocol_module(Opts), services(Opts), thrift_runtime_options:on_event(Opts)} of
-        {{ok, Protocol}, {ok, Services}, {ok, Handler}} ->
-            Socket = maps:get(socket, Opts),
-            ActiveN = thrift_runtime_options:active_n(Opts),
+    %% The init argument is the normalized map the acceptor's
+    %% `start_link/1' produced: every value validated, the protocol
+    %% already resolved to its module, every default applied — nothing
+    %% here re-reads or re-defaults caller options.
+    Socket = maps:get(socket, Opts),
+    Handler = maps:get(on_event, Opts),
+    case services(Opts) of
+        {ok, Services} ->
             %% The socket arrives owned by the acceptor and still
             %% passive; it takes over ownership (the acceptor calls
             %% controlling_process) and only then arms active delivery
@@ -149,13 +156,13 @@ init(Opts) ->
                 #state{
                     socket = Socket,
                     services = Services,
-                    protocol = Protocol,
-                    transport = thrift_runtime_options:transport(Opts),
-                    max_frame_size = thrift_runtime_options:max_frame_size(Opts),
-                    timeout = Timeout,
-                    active_n = ActiveN,
+                    protocol = maps:get(protocol, Opts),
+                    transport = maps:get(transport, Opts),
+                    max_frame_size = maps:get(max_frame_size, Opts),
+                    timeout = maps:get(idle_timeout, Opts),
+                    active_n = maps:get(active_n, Opts),
                     record_api =
-                        case maps:get(record_api, Opts, false) of
+                        case maps:get(record_api, Opts) of
                             true -> maps:get(types, Opts);
                             false -> undefined
                         end,
@@ -163,11 +170,7 @@ init(Opts) ->
                 },
             thrift_runtime_events:emit(Handler, connection_open, #{peer => peer(Socket)}),
             {ok, State0};
-        {{error, Reason}, _, _} ->
-            {stop, {protocol, Reason}};
-        {_, {error, Reason}, _} ->
-            {stop, Reason};
-        {_, _, {error, Reason}} ->
+        {error, Reason} ->
             {stop, Reason}
     end.
 
