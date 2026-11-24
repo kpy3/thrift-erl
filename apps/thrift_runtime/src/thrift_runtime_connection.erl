@@ -77,7 +77,7 @@ Exactly one service mode is required:
 -type options() :: #{
     socket := thrift_runtime_socket:socket(),
     transport => thrift_runtime_socket:transport(),
-    protocol => binary | compact | module(),
+    protocol => thrift_runtime:protocol(),
     max_frame_size => pos_integer(),
     %% the umbrella; `idle_timeout` names it specifically
     timeout => pos_integer() | infinity,
@@ -538,7 +538,7 @@ encode_result(Info, Protocol, Value) ->
             Protocol:encode(result_desc(Info), Value)
     end.
 
--spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_binary:type_desc().
+-spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_protocol:type_desc().
 result_desc(#{reply := ReplyType} = Info) when ReplyType =/= undefined ->
     {struct, {struct, [{0, default, ReplyType, <<"success">>, undefined} | maps:get(exceptions, Info, [])]}};
 result_desc(Info) ->
@@ -637,7 +637,7 @@ encode_reply(Name, SeqId, _Reply, #{} = Info, #state{} = State) ->
     binary(),
     non_neg_integer(),
     binary(),
-    thrift_runtime_binary:struct_value(),
+    thrift_runtime_protocol:struct_value(),
     thrift_runtime_service:function_info(),
     #state{}
 ) -> #state{}.
@@ -694,7 +694,7 @@ reply_application_exception(Name, SeqId, Message, Code, #state{} = State) ->
     end.
 
 -spec send_message(
-    thrift_runtime_binary:message_type(), binary(), non_neg_integer(), iodata(), #state{}
+    thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), iodata(), #state{}
 ) -> #state{}.
 send_message(Type, Name, SeqId, Payload, #state{} = State) ->
     Message = (State#state.protocol):encode_message(Type, Name, SeqId, Payload),

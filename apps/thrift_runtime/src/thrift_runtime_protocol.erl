@@ -23,7 +23,8 @@ type descriptors the generated introspection functions return
 a binary and returns the remaining bytes, so callers can stream;
 `more` marks a truncated but otherwise valid input.
 
-`thrift_runtime_binary` and `thrift_runtime_compact` implement this behaviour.
+`thrift_runtime_binary`, `thrift_runtime_compact` and
+`thrift_runtime_json` implement this behaviour.
 Any other module passed as a `thrift_runtime:protocol()` — to the facade,
 the client or the server — must export every callback with these exact
 shapes.
@@ -32,8 +33,7 @@ The module also hosts what the implementations share:
 
 - the descriptor **type vocabulary** (`type_desc()`, `field_desc()`,
   `message_type()`, ...): the behaviour owns the contract, so the
-  callbacks are typed through it; `thrift_runtime_binary` re-exports the
-  names for the existing call sites;
+  callbacks and every implementation are typed through it;
 - the `TMessageType` ids of the message envelope and the
   `TApplicationException` descriptor with its code-to-name table, plus
   the shared encode/decode of that exception payload;
@@ -156,11 +156,10 @@ application_exception_name(_) -> <<"UNKNOWN">>.
 %% Descriptor vocabulary
 %%--------------------------------------------------------------------
 %%
-%% The contract the behaviour and every generated introspection surface
-%% speak. `thrift_runtime_binary` re-exports these names for the existing
-%% call sites; the compiled descriptors (`c_type()`, `k_type()`,
-%% `j_type()`) stay inside their implementations — no other module may
-%% depend on them.
+%% The contract the behaviour, the implementations and every generated
+%% introspection surface speak; all reference it qualified. The compiled
+%% descriptors (`c_type()`, `k_type()`, `j_type()`) stay inside their
+%% implementations — no other module may depend on them.
 
 -type base_type() :: bool | i8 | i16 | i32 | i64 | double | string | binary | uuid.
 

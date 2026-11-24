@@ -140,6 +140,31 @@ Notes:
 - `encode/2` (binary protocol) and the `protocol_module/1` /
   `repr_supported/1` helpers are unchanged.
 
+## Source-level type references
+
+The descriptor types are owned by the protocol behaviour module:
+`thrift_runtime_protocol` exports the whole vocabulary (`type_desc()`,
+`field_desc()`, `struct_desc()`, `enum_desc()`, `struct_value()`,
+`base_type()`, `message_type()`, `application_exception()` and the
+parameterized `decode_result(Value)`). Spell them through that module
+where source used to reference the binary or record aliases:
+
+| Old | New |
+|---|---|
+| `thrift_runtime_binary:type_desc()` (and the other descriptor types) | `thrift_runtime_protocol:type_desc()` |
+| `thrift_runtime_binary:decode_result(Value)` | `thrift_runtime_protocol:decode_result(Value)` |
+| `thrift_runtime_record:type_desc()` / `field_desc()` / `struct_desc()` | `thrift_runtime_protocol:type_desc()` / `field_desc()` / `struct_desc()` |
+
+The protocol implementations keep only their private compiled
+descriptor types (`c_type()` in `thrift_runtime_binary`, `k_type()` in
+`thrift_runtime_compact`, `j_type()`/`j_struct()` in
+`thrift_runtime_json`); no other module may reference them.
+
+Endpoint `protocol` options (client, server/acceptor, connection and
+reconnecting client) are typed `thrift_runtime:protocol()`: `binary`,
+`compact`, `json` or a custom module implementing the
+`thrift_runtime_protocol` behaviour.
+
 ## RPC results and generated client starts
 
 The RPC result contract is the same shape on both ends of the wire:

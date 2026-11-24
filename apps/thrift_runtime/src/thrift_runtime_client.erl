@@ -90,7 +90,7 @@ both:
     port := inet:port_number(),
     service := module(),
     transport => thrift_runtime_socket:transport(),
-    protocol => binary | compact | module(),
+    protocol => thrift_runtime:protocol(),
     timeout => pos_integer(),
     max_frame_size => pos_integer(),
     http_path => binary(),
@@ -113,8 +113,8 @@ both:
     %% `thrift_runtime_record:call_result_from_wire/3' the value alone
     %% remains — its representation identifies the exception.
     | {ok, term()}
-    | {error, {exception, binary(), thrift_runtime_binary:struct_value()}}
-    | {error, {exception, thrift_runtime_binary:struct_value()}}
+    | {error, {exception, binary(), thrift_runtime_protocol:struct_value()}}
+    | {error, {exception, thrift_runtime_protocol:struct_value()}}
     | {error, {application_exception, binary(), non_neg_integer(), binary()}}
     | {error, term()}.
 
@@ -702,7 +702,7 @@ result_value(Info, Values) ->
 %% carries one for the active protocol; the descriptor engine otherwise,
 %% and also when a stale hook disappeared in a reload.
 
--spec encode_params(map(), module(), thrift_runtime_binary:type_desc(), map()) ->
+-spec encode_params(map(), module(), thrift_runtime_protocol:type_desc(), map()) ->
     {ok, iodata()} | {error, term()}.
 encode_params(Info, Protocol, ParamsDesc, Values) ->
     case rpc_hook(Info, Protocol, params) of
@@ -756,18 +756,18 @@ rpc_hook(Info, Protocol, Kind) ->
 %% (the generic struct representation). Fallback-only: the hook path
 %% never builds it.
 
--spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_binary:type_desc().
+-spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_protocol:type_desc().
 result_desc(#{reply := ReplyType} = Info) when ReplyType =/= undefined ->
     {struct, {struct, [{0, default, ReplyType, <<"success">>, undefined} | exception_fields(Info)]}};
 result_desc(#{} = Info) ->
     {struct, {struct, exception_fields(Info)}}.
 
--spec exception_fields(thrift_runtime_service:function_info()) -> [thrift_runtime_binary:field_desc()].
+-spec exception_fields(thrift_runtime_service:function_info()) -> [thrift_runtime_protocol:field_desc()].
 exception_fields(Info) ->
     maps:get(exceptions, Info, []).
 
--spec exception_field(map(), [thrift_runtime_binary:field_desc()]) ->
-    {ok, binary(), thrift_runtime_binary:struct_value()} | none.
+-spec exception_field(map(), [thrift_runtime_protocol:field_desc()]) ->
+    {ok, binary(), thrift_runtime_protocol:struct_value()} | none.
 exception_field(Values, Exceptions) ->
     Found = [
         {exception_name(FieldDesc), Value}
@@ -780,7 +780,7 @@ exception_field(Values, Exceptions) ->
         [] -> none
     end.
 
--spec exception_name(thrift_runtime_binary:field_desc()) -> binary().
+-spec exception_name(thrift_runtime_protocol:field_desc()) -> binary().
 exception_name({_, _, {struct, {ref, _, StructName}}, _, _}) -> StructName;
 exception_name({_, _, _, FieldName, _}) -> FieldName.
 

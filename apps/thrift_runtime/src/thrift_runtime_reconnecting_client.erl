@@ -77,7 +77,7 @@ connection axis adds this wrapper's own events — `connected`,
     service := module(),
     %% everything below passes through to `thrift_runtime_client` unchanged
     transport => thrift_runtime_socket:transport(),
-    protocol => binary | compact | module(),
+    protocol => thrift_runtime:protocol(),
     timeout => pos_integer(),
     max_frame_size => pos_integer(),
     http_path => binary(),

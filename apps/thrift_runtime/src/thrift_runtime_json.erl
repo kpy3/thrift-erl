@@ -69,23 +69,16 @@ tag, required fields must be present, trailing bytes answer
     skip_by_tag/2
 ]).
 
--export_type([j_type/0, j_struct/0, decode_result/1]).
+-export_type([j_type/0, j_struct/0]).
 
 -define(DOUBLE_PRECISION, 16).
-
--type base_type() :: thrift_runtime_binary:base_type().
--type enum_desc() :: thrift_runtime_binary:enum_desc().
--type type_desc() :: thrift_runtime_binary:type_desc().
--type struct_value() :: thrift_runtime_binary:struct_value().
--type message_type() :: thrift_runtime_binary:message_type().
--type decode_result(Value) :: thrift_runtime_binary:decode_result(Value).
 
 %% Compiled type descriptors: shapes only, the JSON type tags are
 %% derived on the fly by tag/1 (one small clause match on the hot path,
 %% unlike compact where the nibble had to ride in the descriptor).
 -type j_type() ::
-    {j_base, base_type()}
-    | {j_enum, enum_desc()}
+    {j_base, thrift_runtime_protocol:base_type()}
+    | {j_enum, thrift_runtime_protocol:enum_desc()}
     | {j_list, j_type()}
     | {j_set, j_type()}
     | {j_map, j_type(), j_type()}
@@ -93,7 +86,7 @@ tag, required fields must be present, trailing bytes answer
     | {j_ref, module(), binary()}
     %% A map whose key type no JSON object key can carry, or the uuid
     %% base: the original descriptor is kept for the error message.
-    | {j_unsupported, type_desc()}.
+    | {j_unsupported, thrift_runtime_protocol:type_desc()}.
 
 -type j_struct() :: #{
     kind := struct | union | exception,
@@ -104,7 +97,7 @@ tag, required fields must be present, trailing bytes answer
 }.
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
--spec encode(thrift_runtime_binary:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
+-spec encode(thrift_runtime_protocol:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
 encode({struct, {ref, Module, Name}}, Value) ->
     encode_resolved(Module, Name, Value);
 encode({struct, {Kind, Fields}}, Value) when is_atom(Kind), is_list(Fields) ->
@@ -124,7 +117,7 @@ back, `more` marks a valid but truncated input.
 On a struct the optional closing `]` of a message envelope is consumed
 after the struct proper (see the moduledoc).
 """.
--spec decode(thrift_runtime_binary:type_desc(), binary()) -> decode_result(term()).
+-spec decode(thrift_runtime_protocol:type_desc(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode({struct, {ref, Module, Name}}, Bin) ->
     decode_ref_top(Module, Name, Bin);
 decode({struct, {Kind, Fields}}, Bin) when is_atom(Kind), is_list(Fields) ->
@@ -148,7 +141,7 @@ decode(_TypeDesc, _Bin) ->
 %% module (measured ~25% per call for the extra hop), so the shared
 %% probe/cache machinery is only the cold path. After it warms the
 %% cache the ref entry re-enters and takes the hot branch.
--spec decode_ref_top(module(), binary(), binary()) -> decode_result(term()).
+-spec decode_ref_top(module(), binary(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_ref_top(Module, Name, Bin) ->
     case codec_cached(Module, Name) of
         {_EncodeName, DecodeName} ->
@@ -183,7 +176,7 @@ generic nested decode.
 The envelope's closing `]` is NOT consumed — only the top-level
 `decode/2` entry points fold it (see the moduledoc).
 """.
--spec decode_nested(thrift_runtime_binary:type_desc(), binary()) -> decode_result(term()).
+-spec decode_nested(thrift_runtime_protocol:type_desc(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_nested({struct, {ref, Module, Name}}, Bin) ->
     case codec_cached(Module, Name) of
         {_EncodeName, DecodeName} ->
@@ -223,7 +216,7 @@ codec_cached(Module, Name) ->
         _ -> cold
     end.
 
--spec decode_top_generic(module(), binary(), binary()) -> decode_result(term()).
+-spec decode_top_generic(module(), binary(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_top_generic(Module, Name, Bin) ->
     case resolve_compiled(Module, Name) of
         {ok, Compiled} ->
@@ -232,7 +225,7 @@ decode_top_generic(Module, Name, Bin) ->
             Error
     end.
 
--spec decode_nested_generic(module(), binary(), binary()) -> decode_result(term()).
+-spec decode_nested_generic(module(), binary(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_nested_generic(Module, Name, Bin) ->
     case resolve_compiled(Module, Name) of
         {ok, Compiled} ->
@@ -247,7 +240,7 @@ struct): the JSON array `[1,"name",type,seqid,payload]`. The closing
 bracket is written here and consumed by the payload's top-level
 struct decode on the way back.
 """.
--spec encode_message(thrift_runtime_binary:message_type(), binary(), non_neg_integer(), iodata()) ->
+-spec encode_message(thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), iodata()) ->
     iodata().
 encode_message(Type, Name, SeqId, Payload) ->
     [
@@ -271,7 +264,7 @@ strict struct decode consumes — then `more` for a truncated envelope
 or a tagged error otherwise.
 """.
 -spec decode_message(binary()) ->
-    {ok, thrift_runtime_binary:message_type(), binary(), non_neg_integer(), binary()}
+    {ok, thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()}
     | more
     | {error, term()}.
 decode_message(Bin) ->
@@ -311,7 +304,8 @@ encode_application_exception(Message, Code) ->
     thrift_runtime_protocol:encode_application_exception(?MODULE, Message, Code).
 
 -doc "Decodes `TApplicationException` from an EXCEPTION message payload.".
--spec decode_application_exception(binary()) -> decode_result(thrift_runtime_binary:application_exception()).
+-spec decode_application_exception(binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:application_exception()).
 decode_application_exception(Bin) ->
     thrift_runtime_protocol:decode_application_exception(?MODULE, Bin).
 
@@ -369,7 +363,7 @@ encode_j(_Compiled, Value) ->
 
 %% The range-checked integer literal, shared by value and map-key
 %% encoding.
--spec encode_int(base_type(), term()) -> {ok, iodata()} | {error, term()}.
+-spec encode_int(thrift_runtime_protocol:base_type(), term()) -> {ok, iodata()} | {error, term()}.
 encode_int(B, V) when B =:= i8; B =:= i16; B =:= i32; B =:= i64 ->
     case in_range(B, V) of
         true -> {ok, integer_to_binary(V)};
@@ -478,7 +472,7 @@ format_double(V) ->
 %% Structs
 %%--------------------------------------------------------------------
 
--spec encode_struct_j(j_struct(), struct_value()) -> {ok, iodata()} | {error, term()}.
+-spec encode_struct_j(j_struct(), thrift_runtime_protocol:struct_value()) -> {ok, iodata()} | {error, term()}.
 encode_struct_j(#{kind := Kind, fields := Fields, required_names := ReqNames}, Map) ->
     case check_present_fields(Kind, ReqNames, Fields, Map) of
         ok ->
@@ -494,7 +488,7 @@ encode_struct_j(#{kind := Kind, fields := Fields, required_names := ReqNames}, M
 
 %% Present declared fields in declaration order; every field is the
 %% `"id":{"tag":value}` object.
--spec present_field_chunks([{integer(), j_type(), binary()}], struct_value(), [iodata()]) ->
+-spec present_field_chunks([{integer(), j_type(), binary()}], thrift_runtime_protocol:struct_value(), [iodata()]) ->
     {ok, [iodata()]} | {error, term()}.
 present_field_chunks([], _Map, Acc) ->
     {ok, lists:reverse(Acc)};
@@ -520,7 +514,7 @@ present_field_chunks([{Id, CJType, Name} | Rest], Map, Acc) ->
     end.
 
 -spec check_present_fields(
-    struct | union | exception, [binary()], [{integer(), j_type(), binary()}], struct_value()
+    struct | union | exception, [binary()], [{integer(), j_type(), binary()}], thrift_runtime_protocol:struct_value()
 ) ->
     ok | {error, term()}.
 check_present_fields(Kind, ReqNames, Fields, Map) ->
@@ -530,17 +524,20 @@ check_present_fields(Kind, ReqNames, Fields, Map) ->
 
 %% The top-level struct decode folds the envelope's closing bracket
 %% (see the moduledoc); nested struct decodes never see one.
--spec decode_struct_top(j_struct(), binary()) -> decode_result(struct_value()).
+-spec decode_struct_top(j_struct(), binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_struct_top(Compiled, Bin) ->
     fold_bracket(decode_struct_j(Compiled, Bin)).
 
--spec fold_bracket(decode_result(struct_value())) -> decode_result(struct_value()).
+-spec fold_bracket(thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value())) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 fold_bracket({ok, Map, <<"]", Rest/binary>>}) ->
     {ok, Map, Rest};
 fold_bracket(Other) ->
     Other.
 
--spec decode_struct_j(j_struct(), binary()) -> decode_result(struct_value()).
+-spec decode_struct_j(j_struct(), binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_struct_j(#{by_id := ById, required := Required}, Bin) ->
     case expect_char(Bin, ${) of
         {ok, Rest} ->
@@ -550,9 +547,9 @@ decode_struct_j(#{by_id := ById, required := Required}, Bin) ->
     end.
 
 -spec decode_struct_fields_j(
-    #{integer() => {j_type(), binary()}}, #{integer() => binary()}, binary(), struct_value()
+    #{integer() => {j_type(), binary()}}, #{integer() => binary()}, binary(), thrift_runtime_protocol:struct_value()
 ) ->
-    decode_result(struct_value()).
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_struct_fields_j(ById, Required, Bin, Acc) ->
     case skip_ws(Bin) of
         <<"}", Rest/binary>> ->
@@ -569,9 +566,9 @@ decode_struct_fields_j(ById, Required, Bin, Acc) ->
     end.
 
 -spec after_struct_field_j(
-    #{integer() => {j_type(), binary()}}, #{integer() => binary()}, binary(), struct_value()
+    #{integer() => {j_type(), binary()}}, #{integer() => binary()}, binary(), thrift_runtime_protocol:struct_value()
 ) ->
-    decode_result(struct_value()).
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 after_struct_field_j(ById, Required, Bin, Acc) ->
     case skip_ws(Bin) of
         <<",", Rest/binary>> ->
@@ -586,8 +583,8 @@ after_struct_field_j(ById, Required, Bin, Acc) ->
 
 %% The struct object closed: every still-registered required field is
 %% missing.
--spec struct_fields_done(#{integer() => binary()}, struct_value(), binary()) ->
-    {ok, struct_value(), binary()} | {error, term()}.
+-spec struct_fields_done(#{integer() => binary()}, thrift_runtime_protocol:struct_value(), binary()) ->
+    {ok, thrift_runtime_protocol:struct_value(), binary()} | {error, term()}.
 struct_fields_done(Required, Acc, Rest) ->
     case maps:values(Required) of
         [] -> {ok, Acc, Rest};
@@ -597,9 +594,9 @@ struct_fields_done(Required, Acc, Rest) ->
 %% One `"id":{"tag":value}` entry: declared fields check the tag
 %% against the descriptor, unknown ids skip by the wire tag.
 -spec decode_struct_field_j(
-    #{integer() => {j_type(), binary()}}, #{integer() => binary()}, binary(), struct_value()
+    #{integer() => {j_type(), binary()}}, #{integer() => binary()}, binary(), thrift_runtime_protocol:struct_value()
 ) ->
-    {ok, struct_value(), #{integer() => binary()}, binary()} | more | {error, term()}.
+    {ok, thrift_runtime_protocol:struct_value(), #{integer() => binary()}, binary()} | more | {error, term()}.
 decode_struct_field_j(ById, Required, Bin, Acc) ->
     maybe
         {ok, IdText, Rest0} ?= scan_string(Bin),
@@ -656,7 +653,8 @@ field_id(Text) ->
         _:_ -> {error, {decode, bad_field_id}}
     end.
 
--spec maybe_put(binary() | undefined, term(), struct_value()) -> struct_value().
+-spec maybe_put(binary() | undefined, term(), thrift_runtime_protocol:struct_value()) ->
+    thrift_runtime_protocol:struct_value().
 maybe_put(undefined, _Value, Acc) ->
     Acc;
 maybe_put(Name, Value, Acc) ->
@@ -666,7 +664,7 @@ maybe_put(Name, Value, Acc) ->
 %% Containers
 %%--------------------------------------------------------------------
 
--spec decode_j(j_type(), binary()) -> decode_result(term()).
+-spec decode_j(j_type(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_j({j_base, bool}, Bin) ->
     case skip_ws(Bin) of
         <<"true", Rest/binary>> -> {ok, true, Rest};
@@ -718,7 +716,7 @@ decode_j({j_unsupported, Desc}, _Bin) ->
 decode_j(_Compiled, _Bin) ->
     {error, {decode, bad_value}}.
 
--spec decode_sequence_j(j_type(), binary()) -> decode_result([term()]).
+-spec decode_sequence_j(j_type(), binary()) -> thrift_runtime_protocol:decode_result([term()]).
 decode_sequence_j(CElem, Bin) ->
     maybe
         {ok, Rest0} ?= expect_char(Bin, $[),
@@ -746,7 +744,7 @@ comma_unless_empty(_N, Bin) ->
     expect_char(Bin, $,).
 
 -spec decode_elements_j(j_type(), non_neg_integer(), binary(), [term()]) ->
-    decode_result([term()]).
+    thrift_runtime_protocol:decode_result([term()]).
 %% The last element consumes the closing bracket itself.
 decode_elements_j(_CElem, 0, Bin, Acc) ->
     case expect_char(Bin, $]) of
@@ -774,7 +772,7 @@ decode_elements_j(CElem, N, Bin, Acc) when N > 1 ->
             Other
     end.
 
--spec decode_map_j(j_type(), j_type(), binary()) -> decode_result(map()).
+-spec decode_map_j(j_type(), j_type(), binary()) -> thrift_runtime_protocol:decode_result(map()).
 decode_map_j(CKey, CVal, Bin) ->
     maybe
         {ok, Rest0} ?= expect_char(Bin, $[),
@@ -799,7 +797,7 @@ decode_map_j(CKey, CVal, Bin) ->
     end.
 
 -spec decode_pairs_j(j_type(), j_type(), non_neg_integer(), binary(), map()) ->
-    decode_result(map()).
+    thrift_runtime_protocol:decode_result(map()).
 %% Object keys arrive as JSON strings; their text is the encoded form
 %% of the key value. The last pair (or the empty object's brace)
 %% consumes the closing bracket.
@@ -937,7 +935,7 @@ check_seqid({int, SeqId}) when is_integer(SeqId), SeqId >= 0 ->
 check_seqid(_) ->
     {error, {decode, bad_seqid}}.
 
--spec message_type({int, term()} | {float, term()}) -> {ok, message_type()} | {error, term()}.
+-spec message_type({int, term()} | {float, term()}) -> {ok, thrift_runtime_protocol:message_type()} | {error, term()}.
 message_type({int, 1}) ->
     {ok, call};
 message_type({int, 2}) ->
@@ -1301,7 +1299,7 @@ escape_byte(B) -> <<B>>.
 %% Descriptor compilation
 %%--------------------------------------------------------------------
 
--spec compile_type(type_desc()) -> j_type() | error.
+-spec compile_type(thrift_runtime_protocol:type_desc()) -> j_type() | error.
 compile_type({base, uuid}) ->
     {j_unsupported, {base, uuid}};
 compile_type({base, B}) ->
@@ -1337,7 +1335,7 @@ compile_type(_) ->
     error.
 
 %% Only scalars and enums can live in a JSON object key.
--spec compile_map_key(type_desc()) -> ok | error.
+-spec compile_map_key(thrift_runtime_protocol:type_desc()) -> ok | error.
 compile_map_key({base, B}) when B =/= uuid ->
     ok;
 compile_map_key({enum, _Desc}) ->
@@ -1345,7 +1343,7 @@ compile_map_key({enum, _Desc}) ->
 compile_map_key(_) ->
     error.
 
--spec compile_struct(struct | union | exception, [thrift_runtime_binary:field_desc()]) -> j_struct().
+-spec compile_struct(struct | union | exception, [thrift_runtime_protocol:field_desc()]) -> j_struct().
 compile_struct(Kind, Fields) ->
     Compiled = [{Id, compile_type(T), Name} || {Id, _R, T, Name, _D} <- Fields],
     #{
@@ -1425,7 +1423,7 @@ json_codec(Module, Name) ->
 %% Inline `{Kind, Fields}` descriptors (params structs of
 %% `function_info/2`) are literals, so the per-process memo hits on
 %% pointer equality and a miss compiles into a capped list.
--spec memo_compiled(struct | union | exception, [thrift_runtime_binary:field_desc()]) -> j_struct().
+-spec memo_compiled(struct | union | exception, [thrift_runtime_protocol:field_desc()]) -> j_struct().
 memo_compiled(Kind, Fields) ->
     thrift_runtime_protocol:memo_compiled(?MODULE, {Kind, Fields}, Kind, Fields, fun compile_struct/2).
 
@@ -1465,7 +1463,7 @@ tag({j_ref, _Module, _Name}) ->
 tag({j_unsupported, _Desc}) ->
     <<>>.
 
--spec in_range(base_type(), term()) -> boolean().
+-spec in_range(thrift_runtime_protocol:base_type(), term()) -> boolean().
 in_range(i8, V) when is_integer(V) ->
     V >= -128 andalso V =< 127;
 in_range(i16, V) when is_integer(V) ->

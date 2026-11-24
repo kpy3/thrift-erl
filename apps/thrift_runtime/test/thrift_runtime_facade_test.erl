@@ -858,7 +858,7 @@ client_call_timeout_test() ->
 %%--------------------------------------------------------------------
 %% Helpers
 
--spec point_desc() -> thrift_runtime_binary:type_desc().
+-spec point_desc() -> thrift_runtime_protocol:type_desc().
 point_desc() ->
     {struct, {ref, ?FIXTURE, <<"Point">>}}.
 

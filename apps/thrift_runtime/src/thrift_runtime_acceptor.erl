@@ -39,7 +39,7 @@ mechanism.
     service => module(),
     services => #{binary() => #{handler := module(), service := module()}},
     transport => thrift_runtime_socket:transport(),
-    protocol => binary | compact | module(),
+    protocol => thrift_runtime:protocol(),
     max_frame_size => pos_integer(),
     max_connections => pos_integer(),
     %% the umbrella; `handshake_timeout` and `idle_timeout` name the
