@@ -17,6 +17,11 @@
 -moduledoc """
 Shared intermediate representation of the semantic model.
 
+Model types arrive with their references already resolved by
+`thrift_generator_semantic` — `{resolved_ref, Module, Name, Ann}`
+naming the defining module directly — so the lowering here never
+re-resolves names.
+
 The layer every emitter consumes: model types lowered to the wire
 descriptor vocabulary the runtime codecs consume (`type_desc/2`,
 `params_desc/2`, `reply_desc/2`, `exceptions_desc/2`, `field_desc/2`),
