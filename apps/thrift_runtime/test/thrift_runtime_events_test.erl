@@ -213,8 +213,9 @@ client_queue_full_event_test() ->
         Self = self(),
         spawn(fun() -> Self ! {head, thrift_runtime_client:call(Client, <<"slow">>, [], 5000)} end),
         wait_gate_entered(),
-        spawn(fun() -> Self ! {queued, thrift_runtime_client:call(Client, <<"add">>, [2, 3], 5000)} end),
-        timer:sleep(200),
+        %% The queued request and the overflow call come from this same
+        %% process, so their order to the client is deterministic.
+        Queued = gen_server:send_request(Client, {call, <<"add">>, [2, 3], 5000}),
         ?assertEqual({error, queue_full}, thrift_runtime_client:call(Client, <<"add">>, [4, 5], 5000)),
         ?assertMatch(
             [#{type := call_error, function := <<"add">>, reason := queue_full}], take_events(1)
@@ -224,7 +225,7 @@ client_queue_full_event_test() ->
         %% same connection, and their events drain before the test ends
         ets:insert(thrift_runtime_drain_gate, {go, true}),
         ?assertEqual({ok, <<"done">>}, recv(head)),
-        ?assertEqual({ok, 5}, recv(queued)),
+        ?assertEqual({reply, {ok, 5}}, gen_server:wait_response(Queued, 5000)),
         ?assertMatch(
             [
                 #{type := call_ok, function := <<"slow">>},

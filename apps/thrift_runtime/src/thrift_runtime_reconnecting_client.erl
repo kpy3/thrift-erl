@@ -195,7 +195,7 @@ get_and_reset_stats(Pid) ->
 %% a configuration error answered `{error, Reason}' before the start.
 
 -doc false.
--spec init(options()) -> {ok, #state{}} | {stop, term()}.
+-spec init(options()) -> {ok, #state{}}.
 init(Opts) ->
     State =
         #state{

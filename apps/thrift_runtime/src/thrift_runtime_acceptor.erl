@@ -138,24 +138,7 @@ init(Opts) ->
     process_flag(trap_exit, true),
     case thrift_runtime_socket:listen(Opts) of
         {ok, ListenSocket} ->
-            ConnectionOpts = maps:with(
-                [
-                    handler,
-                    service,
-                    services,
-                    transport,
-                    protocol,
-                    max_frame_size,
-                    timeout,
-                    handshake_timeout,
-                    idle_timeout,
-                    active_n,
-                    on_event,
-                    record_api,
-                    types
-                ],
-                Opts
-            ),
+            ConnectionOpts = thrift_runtime_options:connection_options(Opts),
             State =
                 #state{
                     listen_socket = ListenSocket,

@@ -14,6 +14,8 @@
 
 -module(thrift_runtime_options).
 
+-include("thrift_runtime_otp.hrl").
+
 -moduledoc """
 The runtime's option surface in one place: the defaults and the strict
 creation-time validators.
@@ -46,7 +48,8 @@ The endpoint option normalizers (`client_options/1`,
 allowed-key set per endpoint, deterministic unknown/missing/bad errors,
 and a fully normalized map — resolved protocol module, applied umbrella
 timeouts, every default — that process initialization consumes instead
-of re-reading raw caller maps.
+of re-reading raw caller maps. `connection_options/1` projects that map
+for both connection initialization and the acceptor's timeout read-back.
 """.
 
 -export([
@@ -55,7 +58,8 @@ of re-reading raw caller maps.
     reconnecting_options/1,
     server_options/1,
     acceptor_options/1,
-    stop_options/1
+    stop_options/1,
+    connection_options/1
 ]).
 
 -define(DEFAULT_TIMEOUT, 5000).
@@ -242,6 +246,28 @@ Normalizes the direct acceptor options: the server contract without
 acceptor_options(Options) ->
     endpoint_normalize(Options, fun server_prelude/1, acceptor_order(), server_validators(), acceptor).
 
+-doc false.
+-spec connection_options(map()) -> map().
+connection_options(Options) ->
+    maps:with(
+        [
+            handler,
+            service,
+            services,
+            transport,
+            protocol,
+            max_frame_size,
+            timeout,
+            handshake_timeout,
+            idle_timeout,
+            active_n,
+            on_event,
+            record_api,
+            types
+        ],
+        Options
+    ).
+
 -doc """
 Normalizes the graceful-stop options: a map containing at most `drain`,
 a non-negative integer or `infinity`. `#{}` normalizes to plain stop.
@@ -322,11 +348,11 @@ validated(Options, Order, Validators) ->
 
 -spec validated(map(), [atom()], validators(), map()) -> {ok, map()} | {error, term()}.
 validated(Options, [Key | Rest], Validators, Resolved) ->
-    case maps:find(Key, Options) of
-        error ->
-            validated(Options, Rest, Validators, Resolved);
-        {ok, Value} ->
-            endpoint_value(maps:find(Key, Validators), Key, Value, Options, Rest, Validators, Resolved)
+    case Options of
+        #{Key := Value} ->
+            endpoint_value(maps:find(Key, Validators), Key, Value, Options, Rest, Validators, Resolved);
+        _ ->
+            validated(Options, Rest, Validators, Resolved)
     end;
 validated(_Options, [], _Validators, Resolved) ->
     {ok, Resolved}.
@@ -427,7 +453,7 @@ is_transport(Value) ->
 
 -spec is_port_number(term()) -> boolean().
 is_port_number(Value) ->
-    is_integer(Value) andalso Value >= 0 andalso Value =< 65535.
+    ?IS_INTEGER_IN_RANGE(Value, 0, 65535).
 
 -spec is_pos_integer(term()) -> boolean().
 is_pos_integer(Value) ->

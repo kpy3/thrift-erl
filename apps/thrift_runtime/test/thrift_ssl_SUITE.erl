@@ -185,23 +185,7 @@ tls_peer_close_stops_connection(Config) ->
         thrift_runtime_options:server_options(#{
             port => 0, handler => ?HANDLER, service => ?SERVICE, timeout => 30000
         }),
-    ConnectionOpts = maps:with(
-        [
-            handler,
-            service,
-            transport,
-            protocol,
-            max_frame_size,
-            timeout,
-            handshake_timeout,
-            idle_timeout,
-            active_n,
-            on_event,
-            record_api,
-            types
-        ],
-        ServerOpts
-    ),
+    ConnectionOpts = thrift_runtime_options:connection_options(ServerOpts),
     {ok, Conn} = thrift_runtime_connection:start(ConnectionOpts#{socket => {ssl, Sock}}),
     ok = thrift_runtime_socket:controlling_process({ssl, Sock}, Conn),
     Conn ! go,

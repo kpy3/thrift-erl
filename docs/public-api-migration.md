@@ -170,8 +170,8 @@ reconnecting client) are typed `thrift_runtime:protocol()`: `binary`,
 
 Every runtime endpoint validates its options map at creation time,
 before anything is registered, bound or connected; nothing starts on
-the error path. Each endpoint accepts exactly its documented keys (see
-[docs/rpc.md](rpc.md)): plain and reconnecting clients,
+the error path. Each endpoint accepts exactly its
+[documented keys](rpc.md): plain and reconnecting clients,
 `thrift_runtime_server` (the server keys plus `name`, default
 `thrift_runtime_server`), the direct `thrift_runtime_acceptor` (the
 same set minus `name` — a `name` key there answers `{error,

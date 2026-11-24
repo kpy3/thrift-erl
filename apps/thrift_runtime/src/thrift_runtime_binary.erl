@@ -14,6 +14,8 @@
 
 -module(thrift_runtime_binary).
 
+-include("thrift_runtime_otp.hrl").
+
 -moduledoc """
 Thrift binary protocol: value and message codecs as pure functions.
 
@@ -417,14 +419,14 @@ encode_c({c_base, _W, bool}, true) ->
     {ok, <<1>>};
 encode_c({c_base, _W, bool}, false) ->
     {ok, <<0>>};
-encode_c({c_base, _W, i8}, V) when is_integer(V), V >= -128, V =< 127 ->
+encode_c({c_base, _W, i8}, V) when ?IS_INTEGER_IN_RANGE(V, -128, 127) ->
     {ok, <<V:8/big-signed>>};
-encode_c({c_base, _W, i16}, V) when is_integer(V), V >= -32768, V =< 32767 ->
+encode_c({c_base, _W, i16}, V) when ?IS_INTEGER_IN_RANGE(V, -32768, 32767) ->
     {ok, <<V:16/big-signed>>};
-encode_c({c_base, _W, i32}, V) when is_integer(V), V >= -2147483648, V =< 2147483647 ->
+encode_c({c_base, _W, i32}, V) when ?IS_INTEGER_IN_RANGE(V, -2147483648, 2147483647) ->
     {ok, <<V:32/big-signed>>};
 encode_c({c_base, _W, i64}, V) when
-    is_integer(V), V >= -9223372036854775808, V =< 9223372036854775807
+    ?IS_INTEGER_IN_RANGE(V, -9223372036854775808, 9223372036854775807)
 ->
     {ok, <<V:64/big-signed>>};
 encode_c({c_base, _W, double}, V) when is_number(V) ->

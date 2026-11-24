@@ -4,12 +4,12 @@
 #
 # Deliberate deviations, mirroring the elvis configuration in
 # rebar.config:
-# - W0083 avoid_type_defs_in_header: the AST vocabulary and the golden
-#   fixtures define their types in headers by design.
-# - W0054 no_nowarn_suppressions / W0048 no_dialyzer_attribute: the
-#   leex/yecc outputs (generated at build time) and the vendored runtime
-#   suppress compiler warnings / use -dialyzer; generated and upstream
-#   code is not ours to restyle.
+# - W0083 avoid_type_defs_in_header: the generator AST vocabulary defines
+#   its types in headers by design. Excluding only that app keeps the rule
+#   active everywhere else; the vendored runtime is skipped on the CLI.
+# - W0054 no_nowarn_suppressions / W0048 no_dialyzer_attribute: only the
+#   leex/yecc outputs suppress compiler warnings / use -dialyzer; module
+#   exclusions keep both rules active for handwritten and upstream code.
 # - W0023 atoms_exhaustion: the generator mints atoms from IDL names it
 #   controls; thrift_runtime_record's field_atom/record_tag
 #   atomize the very names generated record_fields descriptors carry,
@@ -26,13 +26,13 @@
 #   see that.
 
 [linters.W0083]
-enabled = false
+exclude_apps = ["thrift_generator"]
 
 [linters.W0054]
-enabled = false
+exclude_modules = ["thrift_parser", "thrift_lexer"]
 
 [linters.W0048]
-enabled = false
+exclude_modules = ["thrift_parser", "thrift_lexer"]
 
 [linters.W0023]
 exclude_apps = ["thrift_generator", "thrift_runtime"]

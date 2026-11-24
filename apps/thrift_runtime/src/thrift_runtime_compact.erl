@@ -14,6 +14,8 @@
 
 -module(thrift_runtime_compact).
 
+-include("thrift_runtime_otp.hrl").
+
 -moduledoc """
 Thrift compact protocol: value and message codecs as pure functions,
 wire-compatible with the Apache TCompactProtocol (the vendored 0.25.0
@@ -224,14 +226,14 @@ encode_k({k_base, _N, bool}, true) ->
     {ok, <<?CT_TRUE>>};
 encode_k({k_base, _N, bool}, false) ->
     {ok, <<?CT_FALSE>>};
-encode_k({k_base, _N, i8}, V) when is_integer(V), V >= -128, V =< 127 ->
+encode_k({k_base, _N, i8}, V) when ?IS_INTEGER_IN_RANGE(V, -128, 127) ->
     {ok, <<V:8/big-signed>>};
-encode_k({k_base, _N, i16}, V) when is_integer(V), V >= -32768, V =< 32767 ->
+encode_k({k_base, _N, i16}, V) when ?IS_INTEGER_IN_RANGE(V, -32768, 32767) ->
     {ok, zigzag_varint(V)};
-encode_k({k_base, _N, i32}, V) when is_integer(V), V >= -2147483648, V =< 2147483647 ->
+encode_k({k_base, _N, i32}, V) when ?IS_INTEGER_IN_RANGE(V, -2147483648, 2147483647) ->
     {ok, zigzag_varint(V)};
 encode_k({k_base, _N, i64}, V) when
-    is_integer(V), V >= -9223372036854775808, V =< 9223372036854775807
+    ?IS_INTEGER_IN_RANGE(V, -9223372036854775808, 9223372036854775807)
 ->
     {ok, zigzag_varint(V)};
 encode_k({k_base, _N, double}, V) when is_number(V) ->

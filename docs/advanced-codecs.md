@@ -11,7 +11,7 @@ rest. Old call shapes are mapped in
 ## Descriptor types
 
 The descriptor and protocol vocabulary is owned by one module:
-`thrift_runtime_protocol` exports `type_desc()`, `field_desc()`,
+`thrift_runtime_protocol` exports `protocol()`, `type_desc()`, `field_desc()`,
 `struct_desc()`, `enum_desc()`, `struct_value()`, `base_type()`,
 `message_type()`, `application_exception()` and the parameterized
 `decode_result(Value)`. Spell every descriptor type through that
