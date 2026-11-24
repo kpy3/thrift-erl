@@ -214,6 +214,33 @@ child_dies_during_oneway_test() ->
         Peer ! close
     end.
 
+%% Invalid options fail the start itself: the wrapper answers the strict
+%% option error directly — a bad protocol is `{bad_protocol, _}', not
+%% `{protocol, _}' — and no retrying wrapper starts against the dead
+%% port.
+
+invalid_options_fail_start_test() ->
+    quiet(),
+    Port = free_port(),
+    BadProtocol = opts(Port, #{protocol => <<"binary">>}),
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        thrift_runtime_reconnecting_client:start_link(BadProtocol)
+    ),
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        thrift_runtime_reconnecting_client:start(BadProtocol)
+    ),
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        thrift_runtime_reconnecting_client:start_link(opts(Port, #{bogus => true}))
+    ),
+    ?assertEqual(
+        {error, {bad_option, {reconnect_min, 0, [pos_integer]}}},
+        thrift_runtime_reconnecting_client:start(opts(Port, #{reconnect_min => 0}))
+    ),
+    ok.
+
 stats_reset_test() ->
     quiet(),
     Port = free_port(),

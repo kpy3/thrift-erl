@@ -182,15 +182,31 @@ both:
 -doc """
 Connects to the server and links the client to the caller; fails if
 the connection cannot be made.
+
+The options are validated and normalized before anything starts: an
+invalid map answers `{error, Reason}` — the strict option vocabulary of
+`thrift_runtime_options:client_options/1`, e.g. `{unknown_option, Key}`
+or the protocol axis' own `{bad_protocol, Value}` — without starting a
+process or opening a connection.
 """.
 -spec start_link(options()) -> gen_server:start_ret().
 start_link(Opts) ->
-    %% A failed connect answers {error, Reason} from init and then the
-    %% child exits with the same reason; trapping around the start
-    %% shields the (non-trapping) caller from that exit race, so it
-    %% sees the {error, Reason} answer only.
+    case thrift_runtime_options:client_options(Opts) of
+        {ok, Normalized} ->
+            start_link_normalized(Normalized);
+        {error, _} = Error ->
+            Error
+    end.
+
+%% A failed connect answers {error, Reason} from init and then the
+%% child exits with the same reason; trapping around the start
+%% shields the (non-trapping) caller from that exit race, so it
+%% sees the {error, Reason} answer only.
+
+-spec start_link_normalized(map()) -> gen_server:start_ret().
+start_link_normalized(Normalized) ->
     process_flag(trap_exit, true),
-    Result = gen_server:start_link(?MODULE, Opts, []),
+    Result = gen_server:start_link(?MODULE, Normalized, []),
     process_flag(trap_exit, false),
     case Result of
         {ok, Pid} ->
@@ -214,7 +230,12 @@ instead, such as pool workers started by a pool library.
 """.
 -spec start(options()) -> gen_server:start_ret().
 start(Opts) ->
-    gen_server:start(?MODULE, Opts, []).
+    case thrift_runtime_options:client_options(Opts) of
+        {ok, Normalized} ->
+            gen_server:start(?MODULE, Normalized, []);
+        {error, _} = Error ->
+            Error
+    end.
 
 -doc "Closes the connection; outstanding calls fail with `{error, closed}`.".
 -spec stop(pid()) -> ok.
@@ -257,43 +278,38 @@ get_and_reset_stats(Pid) ->
 
 %% gen_server callbacks
 
+%% The init argument is the normalized map `start/1' produced:
+%% required keys present, defaults applied, the protocol resolved to
+%% its module — nothing here re-reads or re-defaults caller options.
+
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    case thrift_runtime_options:on_event(Opts) of
-        {ok, Handler} -> init(Opts, Handler);
-        {error, Reason} -> {stop, Reason}
-    end.
-
--spec init(options(), thrift_runtime_events:handler()) -> {ok, #state{}} | {stop, term()}.
-init(Opts, Handler) ->
-    Timeout = thrift_runtime_options:connect_timeout(Opts),
+    Timeout = maps:get(connect_timeout, Opts),
     Connect =
         thrift_runtime_socket:connect(
-            maps:get(host, Opts), maps:get(port, Opts), maps:get(ssl_opts, Opts, undefined), Timeout
+            maps:get(host, Opts), maps:get(port, Opts), maps:get(ssl_opts, Opts), Timeout
         ),
-    case {Connect, thrift_runtime_options:protocol_module(Opts)} of
-        {{ok, Socket}, {ok, Protocol}} ->
-            ActiveN = thrift_runtime_options:active_n(Opts),
+    case Connect of
+        {ok, Socket} ->
+            ActiveN = maps:get(active_n, Opts),
             ok = thrift_runtime_socket:set_active(Socket, ActiveN),
             Service = maps:get(service, Opts),
             {ok, #state{
                 socket = Socket,
                 service_info = Service:service_info(),
-                protocol = Protocol,
-                transport = thrift_runtime_options:transport(Opts),
-                multiplex = maps:get(multiplex, Opts, undefined),
-                max_frame_size = thrift_runtime_options:max_frame_size(Opts),
-                http_path = thrift_runtime_options:http_path(Opts),
+                protocol = maps:get(protocol, Opts),
+                transport = maps:get(transport, Opts),
+                multiplex = maps:get(multiplex, Opts),
+                max_frame_size = maps:get(max_frame_size, Opts),
+                http_path = maps:get(http_path, Opts),
                 host_value = host_value(maps:get(host, Opts), maps:get(port, Opts)),
                 active_n = ActiveN,
-                max_queue_depth = maps:get(max_queue_depth, Opts, infinity),
-                handler = Handler
+                max_queue_depth = maps:get(max_queue_depth, Opts),
+                handler = maps:get(on_event, Opts)
             }};
-        {{error, Reason}, _} ->
-            {stop, Reason};
-        {_, {error, Reason}} ->
-            {stop, {protocol, Reason}}
+        {error, Reason} ->
+            {stop, Reason}
     end.
 
 -doc false.

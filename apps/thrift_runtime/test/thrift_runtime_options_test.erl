@@ -27,6 +27,7 @@
     client_defaults_test/0,
     client_timeout_precedence_test/0,
     client_value_families_test/0,
+    client_normalization_is_idempotent_test/0,
     server_mode_test/0,
     server_defaults_test/0,
     server_value_families_test/0,
@@ -219,6 +220,19 @@ client_normalized() ->
         multiplex => undefined,
         on_event => undefined
     }.
+
+%% Normalization is idempotent: feeding a normalized map back through
+%% the normalizer — the shape a validating `start/1' hands to a nested
+%% client start, resolved protocol module included — answers the same
+%% map.
+
+client_normalization_is_idempotent_test() ->
+    Base = #{host => "localhost", port => 9090, service => svc},
+    {ok, Normalized} = thrift_runtime_options:client_options(Base),
+    ?assertEqual({ok, Normalized}, thrift_runtime_options:client_options(Normalized)),
+    {ok, Custom} = thrift_runtime_options:client_options(Base#{protocol => compact, timeout => 1000}),
+    ?assertEqual({ok, Custom}, thrift_runtime_options:client_options(Custom)),
+    ok.
 
 %%--------------------------------------------------------------------
 %% Server and acceptor

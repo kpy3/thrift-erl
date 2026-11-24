@@ -99,12 +99,8 @@ connection axis adds this wrapper's own events — `connected`,
     connect_failures := non_neg_integer()
 }.
 
--define(DEFAULT_RECONNECT_MIN, 500).
--define(DEFAULT_RECONNECT_MAX, 30000).
-
 -record(state, {
     opts :: options(),
-    protocol :: module(),
     child :: undefined | pid(),
     monitor :: undefined | reference(),
     reconnect_delay = 0 :: non_neg_integer(),
@@ -120,19 +116,29 @@ connection axis adds this wrapper's own events — `connected`,
 -doc """
 Starts the reconnecting client and links it to the caller.
 
+The options are validated and normalized first: an invalid map answers
+`{error, Reason}` — the strict option vocabulary of
+`thrift_runtime_options:reconnecting_options/1`, the protocol axis'
+own `{bad_protocol, Value}` included — without starting the wrapper or
+a connection attempt.
+
 The initial connect attempt blocks for at most the `timeout` option,
 but a server that is down does not fail the start — the wrapper keeps
-retrying in the background. A failed init (a bad protocol or
-`on_event` option) answers `{error, Reason}` only: the trapping around
-the start shields the caller from the failed child's exit race, the
-same dance `thrift_runtime_client` does.
+retrying in the background. The trapping around the start shields the
+caller from a failed child's exit race, the same dance
+`thrift_runtime_client` does.
 """.
 -spec start_link(options()) -> gen_server:start_ret().
 start_link(Opts) ->
-    process_flag(trap_exit, true),
-    Result = gen_server:start_link(?MODULE, Opts, []),
-    process_flag(trap_exit, false),
-    Result.
+    case thrift_runtime_options:reconnecting_options(Opts) of
+        {ok, Normalized} ->
+            process_flag(trap_exit, true),
+            Result = gen_server:start_link(?MODULE, Normalized, []),
+            process_flag(trap_exit, false),
+            Result;
+        {error, _} = Error ->
+            Error
+    end.
 
 -doc """
 Starts the reconnecting client without linking — for owners that
@@ -140,7 +146,12 @@ monitor instead, such as pool workers.
 """.
 -spec start(options()) -> gen_server:start_ret().
 start(Opts) ->
-    gen_server:start(?MODULE, Opts, []).
+    case thrift_runtime_options:reconnecting_options(Opts) of
+        {ok, Normalized} ->
+            gen_server:start(?MODULE, Normalized, []);
+        {error, _} = Error ->
+            Error
+    end.
 
 -doc "Stops the wrapper and the client it currently holds.".
 -spec stop(pid()) -> ok.
@@ -178,28 +189,22 @@ get_and_reset_stats(Pid) ->
 
 %% gen_server callbacks
 
+%% The init argument is the normalized map `start/1' produced: the
+%% protocol is already a module, the handler and the retry bounds carry
+%% their defaults, and only a dead server is left to retry against —
+%% a configuration error answered `{error, Reason}' before the start.
+
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    %% A bad protocol is a configuration error: fail the start the same
-    %% way the plain client would. A dead server is not: this wrapper
-    %% exists to outlive it.
-    case {thrift_runtime_options:protocol_module(Opts), thrift_runtime_options:on_event(Opts)} of
-        {{ok, Protocol}, {ok, Handler}} ->
-            State =
-                #state{
-                    opts = Opts,
-                    protocol = Protocol,
-                    reconnect_min = maps:get(reconnect_min, Opts, ?DEFAULT_RECONNECT_MIN),
-                    reconnect_max = maps:get(reconnect_max, Opts, ?DEFAULT_RECONNECT_MAX),
-                    handler = Handler
-                },
-            {ok, connect(State)};
-        {{error, Reason}, _} ->
-            {stop, {protocol, Reason}};
-        {_, {error, Reason}} ->
-            {stop, Reason}
-    end.
+    State =
+        #state{
+            opts = Opts,
+            reconnect_min = maps:get(reconnect_min, Opts),
+            reconnect_max = maps:get(reconnect_max, Opts),
+            handler = maps:get(on_event, Opts)
+        },
+    {ok, connect(State)}.
 
 -doc false.
 -spec handle_call(term(), gen_server:from(), #state{}) -> {reply, term(), #state{}}.
@@ -290,9 +295,12 @@ child_call(Fun) ->
     end.
 
 -spec connect(#state{}) -> #state{}.
-connect(#state{protocol = Protocol, handler = Handler} = State) ->
-    Opts = (State#state.opts)#{protocol => Protocol},
-    case thrift_runtime_client:start(Opts) of
+connect(#state{opts = Opts, handler = Handler} = State) ->
+    %% The retry bounds are this wrapper's own keys: the plain client
+    %% rejects them, so they stay behind while everything validated
+    %% passes through (the child re-normalizes the map idempotently).
+    ChildOpts = maps:without([reconnect_min, reconnect_max], Opts),
+    case thrift_runtime_client:start(ChildOpts) of
         {ok, Child} ->
             thrift_runtime_events:emit(Handler, connected, #{}),
             State#state{

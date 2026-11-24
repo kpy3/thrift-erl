@@ -55,12 +55,10 @@ of re-reading raw caller maps.
     stop_options/1,
     handshake_timeout/1,
     idle_timeout/1,
-    connect_timeout/1,
     transport/1,
     protocol_module/1,
     max_frame_size/1,
     active_n/1,
-    http_path/1,
     max_connections/1,
     on_event/1
 ]).
@@ -715,17 +713,11 @@ handshake_timeout(Opts) ->
 idle_timeout(Opts) ->
     umbrella(Opts, idle_timeout).
 
--doc "The connect and TLS handshake timeout of the client side.".
--spec connect_timeout(map()) -> pos_integer() | infinity.
-connect_timeout(Opts) ->
-    umbrella(Opts, connect_timeout).
-
 %% `timeout` is the umbrella; the specific key, when present, wins.
-%% A caller setting `timeout => infinity` gets a silent server or a
-%% patient client — the specific keys exist to split that back apart.
+%% A caller setting `timeout => infinity` gets a silent server — the
+%% specific keys exist to split that back apart.
 
--spec umbrella(map(), handshake_timeout | idle_timeout | connect_timeout) ->
-    pos_integer() | infinity.
+-spec umbrella(map(), handshake_timeout | idle_timeout) -> pos_integer() | infinity.
 umbrella(Opts, Key) ->
     case Opts of
         #{Key := Specific} ->
@@ -761,11 +753,6 @@ max_frame_size(Opts) ->
 -spec active_n(map()) -> pos_integer().
 active_n(Opts) ->
     maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N).
-
--doc "The client-side HTTP path, default `<<\"/\">>`.".
--spec http_path(map()) -> binary().
-http_path(Opts) ->
-    maps:get(http_path, Opts, ?DEFAULT_HTTP_PATH).
 
 -doc "The live-connection cap, default 1024.".
 -spec max_connections(map()) -> pos_integer().

@@ -67,6 +67,7 @@
     rpc_loopback_fallback/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
+    generated_client_invalid_options/1,
     standalone_generate_check_clean/1,
     getting_started_example/1,
     generated_client_start_unlinked/1,
@@ -120,6 +121,7 @@ all() ->
         rpc_loopback_fallback,
         generated_loopback_buffered,
         generated_loopback_framed,
+        generated_client_invalid_options,
         standalone_generate_check_clean,
         getting_started_example,
         generated_client_start_unlinked,
@@ -1807,6 +1809,34 @@ generated_loopback_buffered(Config) ->
 
 generated_loopback_framed(Config) ->
     generated_loopback(Config, framed).
+
+%% The generated typed client injects its `service' into the caller's
+%% options and delegates to `thrift_runtime_client': an unknown caller
+%% option answers `{error, {unknown_option, Key}}' from the start
+%% itself — the injected `service' passes validation, and against a
+%% port with no listener the error cannot have come from a connect.
+
+generated_client_invalid_options(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {ok, Listen} = gen_tcp:listen(0, []),
+    {ok, Port} = inet:port(Listen),
+    gen_tcp:close(Listen),
+    Base = #{host => "127.0.0.1", port => Port},
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        main_main_service_client:start_link(Base#{bogus => true})
+    ),
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        main_main_service_client:start(Base#{bogus => true})
+    ),
+    %% the injected service passes validation: the axis error surfaces
+    %% directly, not an unknown-key error for the injection
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        main_main_service_client:start_link(Base#{protocol => <<"binary">>})
+    ),
+    ok.
 
 -spec generated_loopback(ct:config(), buffered | framed) -> ok.
 generated_loopback(Config, Transport) ->

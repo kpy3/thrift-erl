@@ -797,7 +797,9 @@ with_server(Overrides, Test) ->
     {ok, Server} = thrift_runtime_server:start_link(ServerOpts),
     try
         {ok, Port} = thrift_runtime_server:port(Server),
-        ClientOpts = maps:merge(Base#{host => "127.0.0.1", port => Port}, Overrides),
+        %% the client map is strict now: the server's `handler' key stays
+        %% server-side
+        ClientOpts = maps:remove(handler, maps:merge(Base#{host => "127.0.0.1", port => Port}, Overrides)),
         {ok, Client} = thrift_runtime_client:start_link(ClientOpts),
         try
             Test(Client)
