@@ -65,9 +65,11 @@ records. The companion `thrift_generator check src/ping.thrift -o src`
 verifies freshness instead of writing, and `thrift_generator clean -o
 src` sweeps the generated files.
 
-See the [repository README](https://github.com/kpy3/thrift-erl) for
-the IDL language coverage, codegen annotations (`erl.*`) and the
-generated-code contract.
+See the [Generator reference](https://github.com/kpy3/thrift-erl/blob/master/docs/generator.md)
+for the complete contract — CLI flags, plugin options, annotation
+precedence, namespaces and naming — and the
+[repository README](https://github.com/kpy3/thrift-erl) for the normal
+path.
 
 ## License
 

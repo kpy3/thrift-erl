@@ -48,8 +48,10 @@ config typo or an invalid value fails the provider with the same
 rendered `unknown option <key>` / `invalid value for <key>: <value>
 (allowed: ...)` diagnostic the standalone CLI prints.
 
-See the [repository README](https://github.com/kpy3/thrift-erl) for
-the full story.
+See the [Generator reference](https://github.com/kpy3/thrift-erl/blob/master/docs/generator.md)
+for the complete plugin and generator contract, and the
+[repository README](https://github.com/kpy3/thrift-erl) for the normal
+path.
 
 ## License
 
