@@ -51,7 +51,7 @@ options and guards have no convenient `erl_syntax` constructors — so
 everywhere else in the emitter.
 """.
 
--export([module_forms/1, repr_encode_export_entries/2]).
+-export([module_forms/1, repr_encode_export_entries/1]).
 -export([repr_index_entries/1]).
 
 -include("thrift_generator.hrl").
@@ -165,27 +165,27 @@ module_forms(Plan) ->
     %% The synthetic RPC codecs go last: the hooks in service_info reach
     %% them directly, and keeping the declared structs' code layout
     %% untouched matters more than grouping (BEAM layout sensitivity).
-    Mod = Plan#tg_codec_plan.module,
     Enums = Plan#tg_codec_plan.enums,
-    ServiceStructs = [CS#tg_codec_struct.struct || CS <- Plan#tg_codec_plan.rpc],
-    struct_blocks(Mod#tg_module.structs, <<"wire codecs">>, Plan, Enums) ++
-        helper_forms(Plan#tg_codec_plan.wire_types, Plan, Enums) ++
+    struct_blocks(Plan#tg_codec_plan.declared, <<"wire codecs">>, Plan, Enums) ++
+        helper_forms(Plan, Enums) ++
         thrift_generator_codec_common:codec_index_forms(wire, Plan) ++
-        struct_blocks(ServiceStructs, <<"wire codecs">>, Plan, Enums) ++
-        repr_encode_forms(Mod#tg_module.structs, Plan, Enums) ++
-        repr_decode_forms(Mod#tg_module.structs, Plan, Enums).
+        struct_blocks(Plan#tg_codec_plan.rpc, <<"wire codecs">>, Plan, Enums) ++
+        repr_encode_forms(Plan#tg_codec_plan.declared, Plan, Enums) ++
+        repr_decode_forms(Plan#tg_codec_plan.declared, Plan, Enums).
 
--spec struct_blocks([#tg_struct{}], binary(), #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec struct_blocks([#tg_codec_struct{}], binary(), #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_blocks(Structs, Label, Plan, Enums) ->
+struct_blocks(Entries, Label, Plan, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s ~ts", [thrift_generator_ir:section_label(S), Label])
+                io_lib:format("~s ~ts", [
+                    thrift_generator_ir:section_label(CS#tg_codec_struct.struct), Label
+                ])
             )
         ] ++
-            struct_forms(S, Plan, Enums)
-     || S <- Structs
+            struct_forms(CS, Plan, Enums)
+     || CS <- Entries
     ]).
 
 %%--------------------------------------------------------------------
@@ -204,13 +204,13 @@ dec_name(T, Enums) ->
 %% Per-struct blocks
 %%--------------------------------------------------------------------
 
--spec struct_forms(#tg_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec struct_forms(#tg_codec_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_forms(S, Plan, Enums) ->
+struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
     {Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
-    FieldTypes = [wtype(F#tg_field.type, Plan#tg_codec_plan.ctx) || F <- S#tg_struct.fields],
-    encode_forms(S, Encode, FieldTypes, Plan, Enums) ++
-        decode_forms(S, Decode, FieldTypes, Plan, Enums).
+    encode_forms(S, Encode, CS#tg_codec_struct.field_types, Plan, Enums) ++
+        decode_forms(S, Decode, CS#tg_codec_struct.field_types, Plan, Enums).
 
 %% Encode side: entry clauses (map guard, required/union check) plus a
 %% chain of per-field functions assembling iodata forward — the same
@@ -650,14 +650,14 @@ decode_base_expr(B, Bin, Suffix) ->
 %% Container helpers
 %%--------------------------------------------------------------------
 
--spec helper_forms([wire_type()], #tg_codec_plan{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
-helper_forms(WireTypes, Plan, Enums) ->
-    Containers = lists:usort(lists:append([thrift_generator_codec_common:containers(T) || T <- WireTypes])),
-    %% dec_string exists only when some field type (at any depth)
-    %% actually decodes a string, so string-free modules stay
+-spec helper_forms(#tg_codec_plan{}, thrift_generator_codec_common:registry()) -> erl_syntax:forms().
+helper_forms(Plan, Enums) ->
+    %% The container inventory is the plan's, computed once for all
+    %% backends; dec_string exists only when some field type (at any
+    %% depth) actually decodes a string, so string-free modules stay
     %% warning-free.
-    DecString = [dec_string_form() || has_string(WireTypes)],
-    DecString ++ lists:append([container_forms(C, Plan, Enums) || C <- Containers]).
+    DecString = [dec_string_form() || has_string(Plan#tg_codec_plan.wire_types)],
+    DecString ++ lists:append([container_forms(C, Plan, Enums) || C <- Plan#tg_codec_plan.containers]).
 
 -spec has_string([wire_type()]) -> boolean().
 has_string(Types) ->
@@ -905,10 +905,6 @@ dec_string_form() ->
 %% Wire vocabulary
 %%--------------------------------------------------------------------
 
--spec wtype(resolved_thrift_type(), #ectx{}) -> wire_type().
-wtype(Type, Ctx) ->
-    thrift_generator_ir:type_desc(Type, Ctx).
-
 -spec wire_byte(wire_type()) -> non_neg_integer().
 wire_byte({base, bool}) -> 2;
 wire_byte({base, i8}) -> 3;
@@ -956,16 +952,23 @@ repr_decode_name(Decode, Flavor) ->
 %% conversion builds the value as-is), so the one-pass STOP must not
 %% either; the exactly-one rule is enforced on encode only.
 
--spec repr_decode_forms([#tg_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec repr_decode_forms([#tg_codec_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-repr_decode_forms(Structs, Plan, Enums) ->
-    Convertible = repr_convertible_structs(Structs),
-    lists:append([repr_decode_struct_forms(S, Plan, Enums) || S <- Convertible]) ++
+repr_decode_forms(Entries, Plan, Enums) ->
+    Convertible = repr_convertible_entries(Entries),
+    lists:append([repr_decode_struct_forms(CS, Plan, Enums) || CS <- Convertible]) ++
         repr_decode_module_containers(Convertible, Plan, Enums) ++
         case Convertible of
             [] -> [];
             _ -> repr_index_forms(Convertible, Plan)
         end.
+
+%% The convertible subset of plan entries: the field types travel with
+%% the struct, so the repr paths never re-derive them.
+
+-spec repr_convertible_entries([#tg_codec_struct{}]) -> [#tg_codec_struct{}].
+repr_convertible_entries(Entries) ->
+    [CS || CS <- Entries, repr_convertible(CS#tg_codec_struct.struct)].
 
 %% The repr codec index: per struct and representation, the
 %% {Encode, Decode} pair of the one-pass functions. Sum unions, empty
@@ -976,7 +979,7 @@ repr_decode_forms(Structs, Plan, Enums) ->
 
 repr_index_forms(Convertible, Plan) ->
     Clauses =
-        lists:append([repr_index_clauses(S, Plan) || S <- Convertible]) ++
+        lists:append([repr_index_clauses(CS, Plan) || CS <- Convertible]) ++
             [clause([v("_"), v("_")], none, [at(error)])],
     thrift_generator_emitter_syntax:doc_false_form() ++
         [
@@ -1004,7 +1007,8 @@ repr_index_forms(Convertible, Plan) ->
             {function, ?ANNO, binary_repr_codec, 2, Clauses}
         ].
 
-repr_index_clauses(S, Plan) ->
+repr_index_clauses(CS, Plan) ->
+    S = CS#tg_codec_struct.struct,
     {Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
     MapPair = tuple_t([
         at(ok),
@@ -1037,10 +1041,11 @@ repr_index_clauses(S, Plan) ->
             clause([bin_lit(S#tg_struct.name), at(struct)], none, [StructPair])
         ].
 
-repr_decode_struct_forms(S, Plan, Enums) ->
+repr_decode_struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
     Ctx = Plan#tg_codec_plan.ctx,
     {_Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
-    FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
+    FieldTypes = CS#tg_codec_struct.field_types,
     Fields = S#tg_struct.fields,
     Bits = required_bits(Fields),
     Tag = thrift_generator_ir:record_tag_of(S, thrift_generator_names:current_prefix(Ctx)),
@@ -1317,10 +1322,7 @@ repr_decode_container_names(T, Enums, Flavor) ->
     }.
 
 repr_decode_module_containers(Convertible, Plan, Enums) ->
-    WireTypes = lists:append([
-        [wtype(F#tg_field.type, Plan#tg_codec_plan.ctx) || F <- S#tg_struct.fields]
-     || S <- Convertible
-    ]),
+    WireTypes = lists:append([CS#tg_codec_struct.field_types || CS <- Convertible]),
     Containers = repr_containers(WireTypes),
     lists:append([repr_decode_container_forms(C, record, Plan, Enums) || C <- Containers]) ++
         lists:append([repr_decode_container_forms(C, map, Plan, Enums) || C <- Containers]) ++
@@ -1519,16 +1521,15 @@ repr_index_entries(Mod) ->
         _ -> [{binary_repr_codec, 2}]
     end.
 
--spec repr_encode_export_entries(#tg_module{}, #ectx{}) -> [{atom(), arity()}].
-repr_encode_export_entries(Mod, Ctx) ->
-    Convertible = repr_convertible_structs(Mod#tg_module.structs),
-    WireTypes = [
-        wtype(F#tg_field.type, Ctx)
-     || S <- Convertible,
-        F <- S#tg_struct.fields
-    ],
-    StructPairs = [repr_codec_export_entries(S, Ctx) || S <- Convertible],
-    Enums = thrift_generator_codec_common:enum_registry(WireTypes),
+-spec repr_encode_export_entries(#tg_codec_plan{}) -> [{atom(), arity()}].
+repr_encode_export_entries(Plan) ->
+    %% The export list must agree with the repr forms exactly, so it
+    %% takes the codec names and the enum registry from the plan instead
+    %% of recomputing its own.
+    Convertible = repr_convertible_entries(Plan#tg_codec_plan.declared),
+    Enums = Plan#tg_codec_plan.enums,
+    StructPairs = [repr_codec_export_entries(CS, Plan) || CS <- Convertible],
+    WireTypes = lists:append([CS#tg_codec_struct.field_types || CS <- Convertible]),
     EncContainerEntries = lists:append([
         repr_enc_container_entries(C, Enums)
      || C <- repr_containers(WireTypes)
@@ -1544,8 +1545,9 @@ repr_encode_export_entries(Mod, Ctx) ->
 %% from_record/from_map encoders (record only when the struct has a
 %% record) and the map/struct decoders (record/native likewise).
 
-repr_codec_export_entries(S, Ctx) ->
-    {Encode, Decode} = thrift_generator_codec_common:codec_pair(wire, S, Ctx),
+repr_codec_export_entries(CS, Plan) ->
+    S = CS#tg_codec_struct.struct,
+    {Encode, Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
     EncEntries = [{repr_encode_name(Encode, map), 1}],
     Enc =
         case thrift_generator_ir:has_record(S) of
@@ -1636,17 +1638,17 @@ repr_container_names(T, Enums, Flavor) ->
 %% get a family (empty unions never reach a chain; their wire entry
 %% errors first, and emitting one would leave it unreachable).
 
--spec repr_encode_forms([#tg_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec repr_encode_forms([#tg_codec_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-repr_encode_forms(Structs, Plan, Enums) ->
+repr_encode_forms(Entries, Plan, Enums) ->
     %% Every struct with fields gets the from_map encoder (its values
     %% are maps in map mode and map-repr inputs in record mode);
     %% from_record exists only for record-mode structs. Sum unions and
     %% empty unions stay on the wire path. Container helpers are
     %% module-level: the same container type used by several structs
     %% must be emitted exactly once.
-    Convertible = repr_convertible_structs(Structs),
-    lists:append([repr_encode_struct_forms(S, Plan, Enums) || S <- Convertible]) ++
+    Convertible = repr_convertible_entries(Entries),
+    lists:append([repr_encode_struct_forms(CS, Plan, Enums) || CS <- Convertible]) ++
         repr_encode_module_containers(Convertible, Plan, Enums).
 
 repr_convertible_structs(Structs) ->
@@ -1666,10 +1668,11 @@ repr_convertible(#tg_struct{kind = union} = S) ->
 repr_convertible(_) ->
     false.
 
-repr_encode_struct_forms(S, Plan, Enums) ->
+repr_encode_struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
     Ctx = Plan#tg_codec_plan.ctx,
     {Encode, _Decode} = thrift_generator_codec_plan:codec_pair(wire, S#tg_struct.name, Plan),
-    FieldTypes = [wtype(F#tg_field.type, Ctx) || F <- S#tg_struct.fields],
+    FieldTypes = CS#tg_codec_struct.field_types,
     MapName = repr_encode_name(Encode, map),
     MapForms =
         repr_encode_entry(S, MapName, undefined, FieldTypes, map) ++
@@ -1686,10 +1689,7 @@ repr_encode_struct_forms(S, Plan, Enums) ->
     end.
 
 repr_encode_module_containers(Convertible, Plan, Enums) ->
-    WireTypes = lists:append([
-        [wtype(F#tg_field.type, Plan#tg_codec_plan.ctx) || F <- S#tg_struct.fields]
-     || S <- Convertible
-    ]),
+    WireTypes = lists:append([CS#tg_codec_struct.field_types || CS <- Convertible]),
     repr_encode_containers(WireTypes, Plan, Enums).
 
 %% Entry functions: the record family matches the whole tuple once and

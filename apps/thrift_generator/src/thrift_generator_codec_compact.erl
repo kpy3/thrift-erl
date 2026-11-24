@@ -176,11 +176,9 @@ module_forms(Plan) ->
     %% The synthetic RPC codecs go last: the hooks in service_info reach
     %% them directly, and keeping the declared structs' code layout
     %% untouched matters more than grouping (BEAM layout sensitivity).
-    Mod = Plan#tg_codec_plan.module,
     Enums = Plan#tg_codec_plan.enums,
-    ServiceStructs = [CS#tg_codec_struct.struct || CS <- Plan#tg_codec_plan.rpc],
-    Blocks = struct_blocks(Mod#tg_module.structs, Plan, Enums),
-    ServiceBlocks = struct_blocks(ServiceStructs, Plan, Enums),
+    Blocks = struct_blocks(Plan#tg_codec_plan.declared, Plan, Enums),
+    ServiceBlocks = struct_blocks(Plan#tg_codec_plan.rpc, Plan, Enums),
     ContainerForms = lists:append([
         container_forms(C, Plan, Enums)
      || C <- Plan#tg_codec_plan.containers
@@ -205,17 +203,19 @@ module_forms(Plan) ->
         Codec ++
         ServiceBlocks.
 
--spec struct_blocks([#tg_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec struct_blocks([#tg_codec_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_blocks(Structs, Plan, Enums) ->
+struct_blocks(Entries, Plan, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s compact wire codecs", [thrift_generator_ir:section_label(S)])
+                io_lib:format("~s compact wire codecs", [
+                    thrift_generator_ir:section_label(CS#tg_codec_struct.struct)
+                ])
             )
         ] ++
-            struct_forms(S, Plan, Enums)
-     || S <- Structs
+            struct_forms(CS, Plan, Enums)
+     || CS <- Entries
     ]).
 
 -spec enc_name(wire_type(), thrift_generator_codec_common:registry()) -> atom().
@@ -230,13 +230,13 @@ dec_name(T, Enums) ->
 %% Per-struct blocks
 %%--------------------------------------------------------------------
 
--spec struct_forms(#tg_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec struct_forms(#tg_codec_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_forms(S, Plan, Enums) ->
+struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
     {Encode, Decode} = thrift_generator_codec_plan:codec_pair(compact, S#tg_struct.name, Plan),
-    FieldTypes = [wtype(F#tg_field.type, Plan#tg_codec_plan.ctx) || F <- S#tg_struct.fields],
-    encode_forms(S, Encode, FieldTypes, Plan, Enums) ++
-        decode_forms(S, Decode, FieldTypes, Plan, Enums).
+    encode_forms(S, Encode, CS#tg_codec_struct.field_types, Plan, Enums) ++
+        decode_forms(S, Decode, CS#tg_codec_struct.field_types, Plan, Enums).
 
 %% Encode side: entry clauses (map guard, required/union check) plus a
 %% chain of per-field functions assembling iodata forward. Each field
@@ -1417,10 +1417,6 @@ helper_forms(dec_string_c) ->
 %%--------------------------------------------------------------------
 %% Wire vocabulary
 %%--------------------------------------------------------------------
-
--spec wtype(resolved_thrift_type(), #ectx{}) -> wire_type().
-wtype(Type, Ectx) ->
-    thrift_generator_ir:type_desc(Type, Ectx).
 
 %% Compact type nibbles (the high bits of a field/collection header);
 %% the boolean entry is the cbool value a boolean ELEMENT rides as.

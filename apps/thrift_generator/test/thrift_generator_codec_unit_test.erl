@@ -41,7 +41,10 @@
     map_decode_pairs_form_test/0,
     base_field_clauses_binary_int_test/0,
     base_field_clauses_binary_bool_test/0,
-    base_field_clauses_compact_int_test/0
+    base_field_clauses_compact_int_test/0,
+    plan_field_types_drive_backend_forms_test/0,
+    plan_containers_drive_binary_helper_forms_test/0,
+    repr_export_entries_follow_plan_test/0
 ]).
 
 colliding_enum_descriptors_test() ->
@@ -623,3 +626,105 @@ base_field_clauses_compact_int_test() ->
         )
     ),
     ok.
+
+%% The plan is authoritative for the metadata it carries: these pins
+%% tamper one plan field at a time and assert the emitted forms or export
+%% entries follow the plan instead of recomputing the metadata from the
+%% module (the pre-fix behavior, which made build/2 pay its cost and then
+%% ignored the result).
+
+plan_field_types_drive_backend_forms_test() ->
+    %% Swapping the declared struct's stored field types for list<i32>
+    %% must surface the container-encode call in every backend, although
+    %% the underlying field is a plain i32.
+    Field = #tg_field{id = 1, required = required, type = {base, i32, #{}}, name = <<"n">>, default = undefined},
+    Mod = #tg_module{
+        name = <<"demo">>,
+        structs = [#tg_struct{kind = struct, name = <<"Box">>, fields = [Field]}]
+    },
+    Plan0 = plan_fixture(Mod),
+    Plan = Plan0#tg_codec_plan{
+        declared = [
+            Entry#tg_codec_struct{field_types = [{list, {base, i32}}]}
+         || Entry <- Plan0#tg_codec_plan.declared
+        ]
+    },
+    ?assertNotEqual(
+        nomatch,
+        binary:match(forms_text(thrift_generator_codec:module_forms(Plan)), <<"enc_list_i32(">>)
+    ),
+    ?assertNotEqual(
+        nomatch,
+        binary:match(forms_text(thrift_generator_codec_compact:module_forms(Plan)), <<"enc_list_i32_c(">>)
+    ),
+    ?assertNotEqual(
+        nomatch,
+        binary:match(forms_text(thrift_generator_codec_json:module_forms(Plan)), <<"enc_list_i32_j(">>)
+    ),
+    ok.
+
+plan_containers_drive_binary_helper_forms_test() ->
+    %% The binary helper set must come from Plan.containers: an injected
+    %% foreign container appears even though no field type references it.
+    Field = #tg_field{
+        id = 1,
+        required = required,
+        type = {list, {base, i32, #{}}, #{}},
+        name = <<"ns">>,
+        default = undefined
+    },
+    Mod = #tg_module{
+        name = <<"demo">>,
+        structs = [#tg_struct{kind = struct, name = <<"Box">>, fields = [Field]}]
+    },
+    Plan = plan_fixture(Mod),
+    Tampered = Plan#tg_codec_plan{containers = [{list, {base, i64}}]},
+    ?assertNotEqual(
+        nomatch,
+        binary:match(forms_text(thrift_generator_codec:module_forms(Tampered)), <<"enc_list_i64(">>)
+    ),
+    ok.
+
+repr_export_entries_follow_plan_test() ->
+    %% The repr-native export list must take codec names from
+    %% Plan.codec_names and enum numbering from Plan.enums (the same
+    %% registry the repr forms themselves are built with).
+    States = #tg_field{
+        id = 1,
+        required = required,
+        type = {list, {resolved_ref, <<"demo">>, <<"Status">>, #{}}, #{}},
+        name = <<"states">>,
+        default = undefined
+    },
+    Box = #tg_struct{kind = struct, name = <<"Box">>, fields = [States]},
+    Status = #tg_enum{name = <<"Status">>, values = [{0, <<"ACTIVE">>}]},
+    Mod = #tg_module{name = <<"demo">>, structs = [Box], enums = [Status]},
+    Plan = plan_fixture(Mod),
+    #{wire := WireNames0} = Plan#tg_codec_plan.codec_names,
+    WireNames = WireNames0#{<<"Box">> => {encode_renamed_wire, decode_renamed_wire}},
+    {list, {enum, Desc}} = find_list_enum(Plan#tg_codec_plan.wire_types),
+    Tampered = Plan#tg_codec_plan{
+        codec_names = (Plan#tg_codec_plan.codec_names)#{wire := WireNames},
+        enums = (Plan#tg_codec_plan.enums)#{Desc => 7}
+    },
+    Entries = thrift_generator_codec:repr_encode_export_entries(Tampered),
+    ?assert(lists:member({encode_renamed_wire_from_map, 1}, Entries)),
+    ?assert(lists:member({enc_list_enum7_from_map, 1}, Entries)),
+    ok.
+
+plan_fixture(Mod) ->
+    Name = Mod#tg_module.name,
+    Ctx = #ectx{
+        modules = #{Name => Mod},
+        type_modules = #{Name => thrift_generator_names:types_module_atom(Name)},
+        current = Name
+    },
+    thrift_generator_codec_plan:build(Mod, Ctx).
+
+forms_text(Forms) ->
+    thrift_generator_emitter_syntax:format(Forms).
+
+find_list_enum([{list, {enum, _}} = Found | _]) ->
+    Found;
+find_list_enum([_ | Rest]) ->
+    find_list_enum(Rest).

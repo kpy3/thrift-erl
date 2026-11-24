@@ -163,11 +163,9 @@ module_forms(Plan) ->
     %% The synthetic RPC codecs go last: the hooks in service_info reach
     %% them directly, and keeping the declared structs' code layout
     %% untouched matters more than grouping (BEAM layout sensitivity).
-    Mod = Plan#tg_codec_plan.module,
     Enums = Plan#tg_codec_plan.enums,
-    ServiceStructs = [CS#tg_codec_struct.struct || CS <- Plan#tg_codec_plan.rpc],
-    Blocks = struct_blocks(Mod#tg_module.structs, Plan, Enums),
-    ServiceBlocks = struct_blocks(ServiceStructs, Plan, Enums),
+    Blocks = struct_blocks(Plan#tg_codec_plan.declared, Plan, Enums),
+    ServiceBlocks = struct_blocks(Plan#tg_codec_plan.rpc, Plan, Enums),
     %% JSON keeps its own container inventory: the unsupported-map
     %% cutoff prunes the children of a map with no JSON-supported key.
     Containers = lists:usort(
@@ -195,17 +193,19 @@ module_forms(Plan) ->
         Codec ++
         ServiceBlocks.
 
--spec struct_blocks([#tg_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec struct_blocks([#tg_codec_struct{}], #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_blocks(Structs, Plan, Enums) ->
+struct_blocks(Entries, Plan, Enums) ->
     lists:append([
         [
             thrift_generator_emitter_syntax:section_form(
-                io_lib:format("~s json wire codecs", [thrift_generator_ir:section_label(S)])
+                io_lib:format("~s json wire codecs", [
+                    thrift_generator_ir:section_label(CS#tg_codec_struct.struct)
+                ])
             )
         ] ++
-            struct_forms(S, Plan, Enums)
-     || S <- Structs
+            struct_forms(CS, Plan, Enums)
+     || CS <- Entries
     ]).
 
 %% The JSON container set of one field type: like
@@ -239,14 +239,13 @@ dec_name(T, Enums) ->
 %% Per-struct blocks
 %%--------------------------------------------------------------------
 
--spec struct_forms(#tg_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
+-spec struct_forms(#tg_codec_struct{}, #tg_codec_plan{}, thrift_generator_codec_common:registry()) ->
     erl_syntax:forms().
-struct_forms(S, Plan, Enums) ->
-    Ectx = Plan#tg_codec_plan.ctx,
+struct_forms(CS, Plan, Enums) ->
+    S = CS#tg_codec_struct.struct,
     {Encode, Decode} = thrift_generator_codec_plan:codec_pair(json, S#tg_struct.name, Plan),
-    FieldTypes = [wtype(F#tg_field.type, Ectx) || F <- S#tg_struct.fields],
-    encode_forms(S, Encode, FieldTypes, Plan, Enums) ++
-        decode_forms(S, Decode, FieldTypes, Plan, Enums).
+    encode_forms(S, Encode, CS#tg_codec_struct.field_types, Plan, Enums) ++
+        decode_forms(S, Decode, CS#tg_codec_struct.field_types, Plan, Enums).
 
 %%--------------------------------------------------------------------
 %% Encode side
@@ -2011,10 +2010,6 @@ uuid_decode_error_clause(Arity) ->
 %%--------------------------------------------------------------------
 %% Type helpers
 %%--------------------------------------------------------------------
-
--spec wtype(resolved_thrift_type(), #ectx{}) -> wire_type().
-wtype(Type, Ectx) ->
-    thrift_generator_ir:type_desc(Type, Ectx).
 
 %% The JSON type tags of the generic engine's tag/1, computed at emit
 %% time — the generated code carries them as literals.

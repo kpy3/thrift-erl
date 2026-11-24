@@ -156,7 +156,7 @@ types_forms(Mod, Ctx) ->
                 thrift_generator_codec_common:export_entries(wire, Plan)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
-                thrift_generator_codec:repr_encode_export_entries(Mod, Ctx) ++
+                thrift_generator_codec:repr_encode_export_entries(Plan) ++
                     thrift_generator_codec:repr_index_entries(Mod)
             ) ++
             thrift_generator_emitter_syntax:exports_forms(
