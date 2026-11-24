@@ -37,9 +37,9 @@ the in-process contract differs, it is deliberate.
   references dispatch straight into it — no descriptor interpretation
   at runtime (the generic engine remains for introspection, inline
   descriptors and as the equivalence reference). Measured several-fold
-  faster than the official 0.25.0 Erlang runtime across all three
-  protocols (see [Performance](docs/performance.md); reproducible
-  with `./scripts/bench`).
+  faster than the official 0.25.0 Erlang runtime on encode across all
+  three protocols, with decode ahead on every row (see
+  [Performance](docs/performance.md); reproducible with `./scripts/bench`).
 - **Errors are values.** Decoding answers `{error, trailing}` /
   `{error, truncated}` instead of throwing; a declared server
   exception comes back to the client typed, as
