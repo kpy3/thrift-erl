@@ -108,7 +108,9 @@ run(Args) ->
 
 %% Generation runs with the checkout's own generator and the current
 %% benchmark module on the code path. Record name/prefix positions and the
-%% model's final modules field are shared by v0.8.0 and HEAD.
+%% model's final modules field are shared by v0.8.0 and HEAD; the renames
+%% below must therefore stay shape-agnostic (element/setelement) and may
+%% only call functions that exist in every benchmarked checkout.
 generate() ->
     Base = required_env_bin("THRIFT_BENCH_BASE"),
     Suffix = required_env_bin("THRIFT_BENCH_SUFFIX"),
@@ -131,14 +133,23 @@ generate() ->
 rename_model(Model0, Base, Suffix) ->
     Modules = element(tuple_size(Model0), Model0),
     Renamed = [rename_module(M, Base, Suffix, length(Modules)) || M <- Modules],
-    setelement(tuple_size(Model0), Model0, Renamed).
+    Model1 = setelement(tuple_size(Model0), Model0, Renamed),
+    %% Resolved references name their defining module, so a renamed module
+    %% invalidates every {resolved_ref, OldKey, _, _} pointing at it; retarget
+    %% them at the new keys (baseline models carry no resolved refs — the
+    %% walk is a no-op there, and matching the self-describing tuple tag
+    %% keeps it independent of the checkout's record layouts).
+    RefMap = maps:from_list(
+        [{element(2, Old), element(2, New)} || {Old, New} <- lists:zip(Modules, Renamed)]
+    ),
+    rewrite_resolved_refs(Model1, RefMap).
 
 rename_module(Module0, Base, Suffix, Count) ->
     Name = element(2, Module0),
     NewName =
         case Count of
             1 -> <<Base/binary, Suffix/binary>>;
-            _ -> <<Base/binary, "_", (thrift_generator_names:sanitize(Name))/binary, Suffix/binary>>
+            _ -> <<Base/binary, "_", (dotless(Name))/binary, Suffix/binary>>
         end,
     NewPrefix =
         case Count of
@@ -146,6 +157,23 @@ rename_module(Module0, Base, Suffix, Count) ->
             _ -> Name
         end,
     setelement(2, setelement(3, Module0, NewPrefix), NewName).
+
+%% The dot-replacement copy of thrift_generator_names:sanitize/1 kept local
+%% on purpose: this module is compiled once from HEAD but runs against every
+%% checkout, and the baseline names module predates sanitize/1.
+dotless(Name) ->
+    binary:replace(Name, <<".">>, <<"_">>, [global]).
+
+rewrite_resolved_refs({resolved_ref, Mod, Name, Ann}, RefMap) ->
+    {resolved_ref, maps:get(Mod, RefMap, Mod), Name, Ann};
+rewrite_resolved_refs(Tuple, RefMap) when is_tuple(Tuple) ->
+    list_to_tuple([rewrite_resolved_refs(E, RefMap) || E <- tuple_to_list(Tuple)]);
+rewrite_resolved_refs(List, RefMap) when is_list(List) ->
+    [rewrite_resolved_refs(E, RefMap) || E <- List];
+rewrite_resolved_refs(Map, RefMap) when is_map(Map) ->
+    maps:map(fun(_Key, Value) -> rewrite_resolved_refs(Value, RefMap) end, Map);
+rewrite_resolved_refs(Other, _RefMap) ->
+    Other.
 
 compare() ->
     BaseBeams = read_generated(required_env("THRIFT_BENCH_BASE_BEAMS")),
