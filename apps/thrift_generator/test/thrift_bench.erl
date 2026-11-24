@@ -78,6 +78,7 @@ two implementations on the same machine are meaningful.
 -include_lib("stdlib/include/assert.hrl").
 
 -export([main/1, run/0]).
+-export([load_our_thrift_test_modules_resolves_references_test_/0]).
 %% hand-run diagnostics
 -export([official_decode_message/2]).
 
@@ -558,14 +559,13 @@ compile_official_generated(GenDir) ->
 -spec load_our_thrift_test_modules(file:filename_all()) -> ok.
 load_our_thrift_test_modules(DataDir) ->
     ThriftFile = filename:join(DataDir, "ThriftTest.thrift"),
-    {ok, Loaded} = thrift_generator_loader:load(ThriftFile),
-    {ok, Model0} = thrift_generator_semantic:analyze(Loaded),
-    Model = Model0#tg_model{
-        modules = [
-            Mod#tg_module{name = <<"goldentest">>, prefix = <<"goldentest">>}
-         || Mod <- Model0#tg_model.modules
-        ]
-    },
+    {ok, Loaded0} = thrift_generator_loader:load(ThriftFile),
+    %% Resolution bakes the final module keys into the model's refs.
+    Loaded = [
+        L#tg_loaded{name = <<"goldentest">>, prefix = <<"goldentest">>}
+     || L <- Loaded0
+    ],
+    {ok, Model} = thrift_generator_semantic:analyze(Loaded),
     Beams = thrift_generator_emitter:compile_sources(Model),
     lists:foreach(
         fun
@@ -577,3 +577,10 @@ load_our_thrift_test_modules(DataDir) ->
         Beams
     ),
     ok.
+
+load_our_thrift_test_modules_resolves_references_test_() ->
+    {timeout, 60, fun() ->
+        DataDir = filename:join(code:lib_dir(thrift_generator), "test/thrift_golden_SUITE_data"),
+        ok = load_our_thrift_test_modules(DataDir),
+        ?assertMatch({struct, _}, goldentest_types:struct_info(<<"Xtruct">>))
+    end}.
