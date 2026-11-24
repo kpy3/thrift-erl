@@ -24,15 +24,15 @@ ping(Client) -> ping(Client, 5000).
 -doc("Calls ping and waits for the reply, failing after `Timeout` ms.").
 -spec ping(pid(), term()) -> thrift_runtime_client:call_result().
 ping(Client, Timeout) ->
-    thrift_runtime_record:call_result_from_wire(undefined,
-                                                [],
-                                                thrift_runtime_client:call(Client,
-                                                                           <<"ping">>,
-                                                                           thrift_runtime_record:args_to_wire({struct,
-                                                                                                               {struct,
-                                                                                                                []}},
-                                                                                                              []),
-                                                                           Timeout)).
+    thrift_runtime_rpc:call_result_from_wire(undefined,
+                                             [],
+                                             thrift_runtime_client:call(Client,
+                                                                        <<"ping">>,
+                                                                        thrift_runtime_rpc:args_to_wire({struct,
+                                                                                                         {struct,
+                                                                                                          []}},
+                                                                                                        []),
+                                                                        Timeout)).
 
 -doc("Connects to the server without linking the client to the caller; the "
      "options map is `thrift_runtime_client`'s, minus `service`.").

@@ -110,7 +110,7 @@ both:
     %% answer is the bare atom
     ok
     %% wire level: the exception carries its name; after
-    %% `thrift_runtime_record:call_result_from_wire/3' the value alone
+    %% `thrift_runtime_rpc:call_result_from_wire/3' the value alone
     %% remains — its representation identifies the exception.
     | {ok, term()}
     | {error, {exception, binary(), thrift_runtime_protocol:struct_value()}}

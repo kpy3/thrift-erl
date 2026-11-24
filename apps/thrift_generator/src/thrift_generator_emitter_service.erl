@@ -388,7 +388,7 @@ client_forms(Svc, Mod, ServerMod, ClientMod, Ctx) ->
 
 %% One wrapper pair per function: `Name/N` applies the default timeout,
 %% `Name/(N+1)` the call itself. Non-oneway replies come back through
-%% `thrift_runtime_record:call_result_from_wire`, so records surface here.
+%% `thrift_runtime_rpc:call_result_from_wire`, so records surface here.
 
 -spec client_fn(#tg_function{}, #ectx{}) ->
     {[erl_syntax:forms()], [erl_syntax:forms()]}.
@@ -406,7 +406,7 @@ client_fn(F, Ctx) ->
     %% client a foreign descriptor.
     WireArgs =
         erl_syntax:application(
-            erl_syntax:atom(thrift_runtime_record),
+            erl_syntax:atom(thrift_runtime_rpc),
             erl_syntax:atom(args_to_wire),
             [
                 thrift_generator_emitter_syntax:abstract(thrift_generator_ir:params_desc(F, Ctx)),
@@ -422,7 +422,7 @@ client_fn(F, Ctx) ->
                 RawCall = client_bridge_call(call, WireName, WireArgs),
                 [
                     erl_syntax:application(
-                        erl_syntax:atom(thrift_runtime_record),
+                        erl_syntax:atom(thrift_runtime_rpc),
                         erl_syntax:atom(call_result_from_wire),
                         [
                             thrift_generator_emitter_syntax:abstract(thrift_generator_ir:reply_desc(F, Ctx)),

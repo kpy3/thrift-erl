@@ -552,13 +552,13 @@ result_desc(Info) ->
 args_for_handler(Args, _Info, #state{record_api = undefined}) ->
     Args;
 args_for_handler(Args, #{params := ParamsDesc}, #state{}) ->
-    thrift_runtime_record:args_from_wire(ParamsDesc, Args).
+    thrift_runtime_rpc:args_from_wire(ParamsDesc, Args).
 
 -spec wire_result(term(), thrift_runtime_service:function_info(), #state{}) -> term().
 wire_result(Result, _Info, #state{record_api = undefined}) ->
     Result;
 wire_result(Result, Info, #state{}) ->
-    thrift_runtime_record:result_to_wire(
+    thrift_runtime_rpc:result_to_wire(
         maps:get(reply, Info, undefined), maps:get(exceptions, Info, []), Result
     ).
 
