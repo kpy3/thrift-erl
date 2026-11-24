@@ -84,7 +84,7 @@ two implementations on the same machine are meaningful.
 -type case_spec() :: #{
     name := binary(),
     official_name := atom(),
-    our_value := thrift_runtime_binary:struct_value(),
+    our_value := thrift_runtime_protocol:struct_value(),
     official_value := tuple(),
     official_check := fun((tuple()) -> ok)
 }.
@@ -298,7 +298,7 @@ run_case(#{name := Name, official_name := OfficialName} = Spec) ->
     ]),
     ok.
 
--spec xtruct_map(binary(), integer(), integer(), integer()) -> thrift_runtime_binary:struct_value().
+-spec xtruct_map(binary(), integer(), integer(), integer()) -> thrift_runtime_protocol:struct_value().
 xtruct_map(StringThing, ByteThing, I32Thing, I64Thing) ->
     #{
         <<"string_thing">> => StringThing,
@@ -316,7 +316,7 @@ official_xtruct(StringThing, ByteThing, I32Thing, I64Thing) ->
         i64_thing = I64Thing
     }.
 
--spec our_insanity() -> thrift_runtime_binary:struct_value().
+-spec our_insanity() -> thrift_runtime_protocol:struct_value().
 our_insanity() ->
     #{
         <<"userMap">> => #{

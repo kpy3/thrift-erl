@@ -27,11 +27,11 @@
 -export([encode/2, decode/2, encode_message/4, decode_message/1]).
 -export([encode_application_exception/2, decode_application_exception/1]).
 
--spec encode(thrift_runtime_binary:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
+-spec encode(thrift_runtime_protocol:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
 encode(Desc, Value) ->
     thrift_runtime_binary:encode(Desc, Value).
 
--spec decode(thrift_runtime_binary:type_desc(), binary()) ->
+-spec decode(thrift_runtime_protocol:type_desc(), binary()) ->
     {ok, term(), binary()} | more | {error, term()}.
 decode(Desc, Binary) ->
     case thrift_runtime_binary:decode(Desc, Binary) of

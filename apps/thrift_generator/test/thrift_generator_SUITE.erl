@@ -67,6 +67,8 @@
     rpc_loopback_fallback/1,
     generated_loopback_buffered/1,
     generated_loopback_framed/1,
+    generated_client_invalid_options/1,
+    generated_server_invalid_options/1,
     standalone_generate_check_clean/1,
     getting_started_example/1,
     generated_client_start_unlinked/1,
@@ -120,6 +122,8 @@ all() ->
         rpc_loopback_fallback,
         generated_loopback_buffered,
         generated_loopback_framed,
+        generated_client_invalid_options,
+        generated_server_invalid_options,
         standalone_generate_check_clean,
         getting_started_example,
         generated_client_start_unlinked,
@@ -240,11 +244,11 @@ parse_erlang_thrift_test_idl(Config) ->
 
 reject_reserved_keyword(Config) ->
     BadFile = write_snippet(Config, "reserved.thrift", <<"struct catch {}">>),
-    ?assertMatch({error, _}, thrift_generator:parse_file(BadFile)).
+    ?assertMatch({error, _}, thrift_generator_idl:parse_file(BadFile)).
 
 reject_syntax_error(Config) ->
     BadFile = write_snippet(Config, "broken.thrift", <<"struct">>),
-    ?assertMatch({error, _}, thrift_generator:parse_file(BadFile)).
+    ?assertMatch({error, _}, thrift_generator_idl:parse_file(BadFile)).
 
 %% The full pipeline over a real include graph: loading, module naming
 %% from `namespace erl`, cross-module references (types, constants, enum
@@ -1743,7 +1747,7 @@ utf8_doc_and_const(Config) ->
 
 utf8_invalid_file_rejected(Config) ->
     Bad = write_snippet(Config, "bad_utf8.thrift", <<255, 254, 47, 42>>),
-    ?assertMatch({error, {invalid_utf8, Bad}}, thrift_generator:parse_file(Bad)),
+    ?assertMatch({error, {invalid_utf8, Bad}}, thrift_generator_idl:parse_file(Bad)),
     ok.
 
 loader_namespace_error(Config) ->
@@ -1807,6 +1811,61 @@ generated_loopback_buffered(Config) ->
 
 generated_loopback_framed(Config) ->
     generated_loopback(Config, framed).
+
+%% The generated typed client injects its `service' into the caller's
+%% options and delegates to `thrift_runtime_client': an unknown caller
+%% option answers `{error, {unknown_option, Key}}' from the start
+%% itself — the injected `service' passes validation, and against a
+%% port with no listener the error cannot have come from a connect.
+
+generated_client_invalid_options(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {ok, Listen} = gen_tcp:listen(0, []),
+    {ok, Port} = inet:port(Listen),
+    gen_tcp:close(Listen),
+    Base = #{host => "127.0.0.1", port => Port},
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        main_main_service_client:start_link(Base#{bogus => true})
+    ),
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        main_main_service_client:start(Base#{bogus => true})
+    ),
+    %% the injected service passes validation: the axis error surfaces
+    %% directly, not an unknown-key error for the injection
+    ?assertEqual(
+        {error, {bad_protocol, <<"binary">>}},
+        main_main_service_client:start_link(Base#{protocol => <<"binary">>})
+    ),
+    ok.
+
+%% The generated typed server injects its `service', `record_api' and
+%% `types' into the caller's options and delegates to
+%% `thrift_runtime_server': an unknown caller option answers `{error,
+%% {unknown_option, Key}}' from the start itself — before anything binds,
+%% the freed port is still free to probe — while the injected keys pass
+%% validation: a start against that port binds it.
+
+generated_server_invalid_options(Config) ->
+    ok = generate_modules(data_file(Config, "semantic/main.thrift")),
+    {ok, Listen} = gen_tcp:listen(0, []),
+    {ok, Port} = inet:port(Listen),
+    gen_tcp:close(Listen),
+    Base = #{port => Port, handler => thrift_generator_test_handler},
+    ?assertEqual(
+        {error, {unknown_option, bogus}},
+        main_main_service_server:start_link(Base#{bogus => true})
+    ),
+    {ok, Probe} = gen_tcp:listen(Port, []),
+    ok = gen_tcp:close(Probe),
+    {ok, Server} = main_main_service_server:start_link(Base),
+    try
+        ?assertEqual({ok, Port}, main_main_service_server:port(Server))
+    after
+        ok = main_main_service_server:stop(Server)
+    end,
+    ok.
 
 -spec generated_loopback(ct:config(), buffered | framed) -> ok.
 generated_loopback(Config, Transport) ->
@@ -2557,7 +2616,7 @@ native_supported() ->
 
 parse_data_file(Config, Name) ->
     File = filename:join(proplists:get_value(data_dir, Config), Name),
-    {ok, Doc} = thrift_generator:parse_file(File),
+    {ok, Doc} = thrift_generator_idl:parse_file(File),
     Doc.
 
 data_file(Config, Relative) ->

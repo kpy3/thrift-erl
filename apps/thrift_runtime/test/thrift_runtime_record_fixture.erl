@@ -21,7 +21,7 @@
 
 -export([struct_info/1, record_fields/1]).
 
--spec struct_info(binary()) -> thrift_runtime_binary:struct_desc() | error.
+-spec struct_info(binary()) -> thrift_runtime_protocol:struct_desc() | error.
 struct_info(<<"Point">>) ->
     {struct, [
         {1, default, {base, i32}, <<"x">>, undefined},

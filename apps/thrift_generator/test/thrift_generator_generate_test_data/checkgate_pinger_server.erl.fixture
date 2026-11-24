@@ -9,8 +9,9 @@
 -compile([nowarn_missing_spec]).
 
 -moduledoc("Server entry points for the Pinger service. `start_link/1` takes "
-           "the same options map as `thrift_runtime_server` (minus "
-           "`service`).").
+           "the same options map as `thrift_runtime_server` (minus `service`; "
+           "multiplexed starts pass `services` instead and the injection is "
+           "skipped).").
 -behaviour(thrift_runtime_service).
 -export([service_info/0, start_link/1, stop/1, port/1]).
 
@@ -18,12 +19,19 @@ service_info() ->
     maps:get(<<"Pinger">>, checkgate_types:service_info()).
 
 -doc("Starts the server supervisor with the given options (the same map as "
-     "`thrift_runtime_server`, minus `service`).").
+     "`thrift_runtime_server`, minus `service`). With a `services' map the "
+     "single-service injection is skipped: multiplexed hosting passes "
+     "validation as-is.").
 start_link(Opts) ->
-    thrift_runtime_server:start_link(Opts#{service =>
-                                               checkgate_pinger_server,
-                                           record_api => true,
-                                           types => checkgate_types}).
+    thrift_runtime_server:start_link(server_opts(Opts)).
+
+server_opts(Opts) ->
+    Injected = Opts#{record_api => true,
+                     types => checkgate_types},
+    case maps:is_key(services, Opts) of
+        true -> Injected;
+        false -> Injected#{service => checkgate_pinger_server}
+    end.
 
 -doc("Stops the server and every connection it accepted.").
 stop(Pid) -> thrift_runtime_server:stop(Pid).

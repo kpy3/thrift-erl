@@ -70,18 +70,6 @@ between incompatible versions.
 %% thrift_runtime_protocol callbacks under the same names.
 -behaviour(thrift_runtime_protocol).
 
--export_type([
-    base_type/0,
-    type_desc/0,
-    field_desc/0,
-    struct_desc/0,
-    enum_desc/0,
-    struct_value/0,
-    message_type/0,
-    application_exception/0,
-    decode_result/1
-]).
-
 %% Wire type ids (TType) and message envelope constants of the binary
 %% protocol.
 
@@ -102,19 +90,7 @@ between incompatible versions.
 -define(VERSION_1, 16#80010000).
 
 %% The descriptor vocabulary lives in `thrift_runtime_protocol` (the
-%% behaviour owns the contract); these aliases keep the existing
-%% `thrift_runtime_binary:` type references compiling unchanged.
-
--type base_type() :: thrift_runtime_protocol:base_type().
--type enum_desc() :: thrift_runtime_protocol:enum_desc().
--type struct_desc() :: thrift_runtime_protocol:struct_desc().
--type field_desc() :: thrift_runtime_protocol:field_desc().
--type type_desc() :: thrift_runtime_protocol:type_desc().
--type struct_value() :: thrift_runtime_protocol:struct_value().
--type message_type() :: thrift_runtime_protocol:message_type().
--type application_exception() :: thrift_runtime_protocol:application_exception().
-
--type decode_result(Value) :: thrift_runtime_protocol:decode_result(Value).
+%% behaviour owns the contract); this module references it qualified.
 
 %% Compiled descriptors: the same schema with wire type bytes
 %% precomputed. Every tag carries its wire byte in position 2; list,
@@ -122,8 +98,8 @@ between incompatible versions.
 %% headers need no type lookup.
 
 -type c_type() ::
-    {c_base, non_neg_integer(), base_type()}
-    | {c_enum, non_neg_integer(), enum_desc()}
+    {c_base, non_neg_integer(), thrift_runtime_protocol:base_type()}
+    | {c_enum, non_neg_integer(), thrift_runtime_protocol:enum_desc()}
     | {c_list, non_neg_integer(), non_neg_integer(), c_type()}
     | {c_set, non_neg_integer(), non_neg_integer(), c_type()}
     | {c_map, non_neg_integer(), non_neg_integer(), non_neg_integer(), c_type(), c_type()}
@@ -210,7 +186,7 @@ repr_stale(Module, Name, Repr) ->
 %% and sum unions) so the facade falls back to decode-to-wire plus
 %% conversion with identical results.
 
--spec decode_repr(thrift_runtime_binary:type_desc(), binary(), thrift_runtime:repr()) ->
+-spec decode_repr(thrift_runtime_protocol:type_desc(), binary(), thrift_runtime:repr()) ->
     {ok, term(), binary()} | more | {error, term()} | miss.
 decode_repr({struct, {ref, Module, Name}}, Binary, Repr) ->
     case repr_codec_cached(Module, Name, Repr) of
@@ -264,7 +240,7 @@ repr_apply(Module, Fun, Arg) ->
 %% (a record holding a wire-map nested value) that the one-pass shape
 %% cannot represent.
 
--spec encode_repr(thrift_runtime_binary:type_desc(), term()) -> {ok, iodata()} | {error, term()} | miss.
+-spec encode_repr(thrift_runtime_protocol:type_desc(), term()) -> {ok, iodata()} | {error, term()} | miss.
 encode_repr({struct, {ref, Module, Name}}, Value) ->
     case repr_flavor(Module, Name, Value) of
         {ok, Flavor, Arg} ->
@@ -339,7 +315,7 @@ repr_encode_apply(Module, Name, Flavor, Encode, Arg) ->
     end.
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
--spec encode(type_desc(), term()) -> {ok, iodata()} | {error, term()}.
+-spec encode(thrift_runtime_protocol:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
 encode({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
     encode_resolved(Module, Name, Value);
 encode({struct, {Kind, Fields}} = Desc, Value) when is_atom(Kind), is_list(Fields), is_map(Value) ->
@@ -360,7 +336,7 @@ Decodes a value of `Type` from the front of `Binary`.
 Returns `{ok, Value, Rest}`, `more` when `Binary` is a truncated valid
 encoding, or a tagged error.
 """.
--spec decode(type_desc(), binary()) -> decode_result(term()).
+-spec decode(thrift_runtime_protocol:type_desc(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode({struct, {ref, Module, Name}}, Bin) when is_binary(Bin) ->
     decode_ref_struct(Module, Name, Bin);
 decode({struct, {Kind, Fields}} = Desc, Bin) when is_atom(Kind), is_list(Fields), is_binary(Bin) ->
@@ -477,7 +453,7 @@ encode_c({c_ref, _W, Module, Name}, Value) when is_map(Value) ->
 encode_c(_Type, Value) ->
     {error, {encode, {value_does_not_match_type, Value}}}.
 
--spec decode_c(c_type(), binary()) -> decode_result(term()).
+-spec decode_c(c_type(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_c({c_base, _W, bool}, <<1, Rest/binary>>) ->
     {ok, true, Rest};
 decode_c({c_base, _W, bool}, <<0, Rest/binary>>) ->
@@ -537,7 +513,7 @@ struct).
 Always writes the strict format (version 1); `decode_message/1` also
 reads the legacy headerless format.
 """.
--spec encode_message(message_type(), binary(), non_neg_integer(), iodata()) -> iodata().
+-spec encode_message(thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), iodata()) -> iodata().
 encode_message(Type, Name, SeqId, Payload) ->
     [
         <<(?VERSION_1 bor thrift_runtime_protocol:message_type_id(Type)):32/big-unsigned>>,
@@ -557,7 +533,7 @@ envelope, so the struct payload must be decoded from `Tail` and any
 trailing bytes ignored.
 """.
 -spec decode_message(binary()) ->
-    {ok, message_type(), binary(), non_neg_integer(), binary()}
+    {ok, thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()}
     | more
     | {error, term()}.
 decode_message(<<16#80, 1, 0, TypeByte, Rest/binary>>) ->
@@ -614,7 +590,8 @@ Decodes `TApplicationException` from an EXCEPTION message payload.
 
 Unknown fields are skipped per the usual struct rules.
 """.
--spec decode_application_exception(binary()) -> decode_result(application_exception()).
+-spec decode_application_exception(binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:application_exception()).
 decode_application_exception(Bin) ->
     thrift_runtime_protocol:decode_application_exception(?MODULE, Bin).
 
@@ -622,7 +599,7 @@ decode_application_exception(Bin) ->
 %% Descriptor compilation
 %%--------------------------------------------------------------------
 
--spec compile_type(type_desc()) -> c_type() | error.
+-spec compile_type(thrift_runtime_protocol:type_desc()) -> c_type() | error.
 compile_type({base, B}) ->
     case base_wire(B) of
         error -> error;
@@ -668,7 +645,7 @@ c_wire({c_map, W, _KW, _VW, _K, _V}) -> W;
 c_wire({c_struct, W, _C}) -> W;
 c_wire({c_ref, W, _M, _N}) -> W.
 
--spec compile_struct(struct | union | exception, [field_desc()]) -> c_struct().
+-spec compile_struct(struct | union | exception, [thrift_runtime_protocol:field_desc()]) -> c_struct().
 compile_struct(Kind, Fields) ->
     Compiled = [{Id, compile_type(T), Name} || {Id, _R, T, Name, _D} <- Fields],
     #{
@@ -690,7 +667,8 @@ compile_struct(Kind, Fields) ->
 resolve_struct(Module, Name) ->
     thrift_runtime_protocol:resolve_struct(?MODULE, Module, Name, fun compile_struct/2).
 
--spec decode_ref_struct(module(), binary(), binary()) -> decode_result(struct_value()).
+-spec decode_ref_struct(module(), binary(), binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
     case codec_cached(Module, Name) of
         {_EncodeName, DecodeName} ->
@@ -717,7 +695,8 @@ decode_ref_struct(Module, Name, Bin) ->
             end
     end.
 
--spec decode_ref_generic(module(), binary(), binary()) -> decode_result(struct_value()).
+-spec decode_ref_generic(module(), binary(), binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_ref_generic(Module, Name, Bin) ->
     case resolve_struct(Module, Name) of
         {ok, Compiled} ->
@@ -736,7 +715,9 @@ binary_codec(Module, Name) ->
 %% call — so the exact-equality scan short-circuits on pointer equality
 %% and a hit costs nanoseconds; a miss compiles and inserts at the head
 %% of a capped list, so pathological callers cannot grow the memo.
--spec memo_compiled(type_desc(), struct | union | exception, [field_desc()]) -> c_struct().
+-spec memo_compiled(thrift_runtime_protocol:type_desc(), struct | union | exception, [
+    thrift_runtime_protocol:field_desc()
+]) -> c_struct().
 memo_compiled(Desc, Kind, Fields) ->
     thrift_runtime_protocol:memo_compiled(?MODULE, Desc, Kind, Fields, fun compile_struct/2).
 
@@ -744,7 +725,7 @@ memo_compiled(Desc, Kind, Fields) ->
 %% Structs
 %%--------------------------------------------------------------------
 
--spec encode_struct_c(c_struct(), struct_value()) -> {ok, iodata()} | {error, term()}.
+-spec encode_struct_c(c_struct(), thrift_runtime_protocol:struct_value()) -> {ok, iodata()} | {error, term()}.
 encode_struct_c(#{kind := Kind, fields := Fields, required_names := ReqNames}, Map) ->
     case check_present_fields(Kind, ReqNames, Fields, Map) of
         ok ->
@@ -757,7 +738,7 @@ encode_struct_c(#{kind := Kind, fields := Fields, required_names := ReqNames}, M
 %% the tail iodata and each field conses its `[header, value]` chunk in
 %% front of it.
 -spec encode_fields_c(
-    [{integer(), non_neg_integer(), binary(), c_type()}], struct_value()
+    [{integer(), non_neg_integer(), binary(), c_type()}], thrift_runtime_protocol:struct_value()
 ) -> {ok, iodata()} | {error, term()}.
 encode_fields_c([], _Map) ->
     {ok, [?STOP]};
@@ -779,21 +760,25 @@ encode_fields_c([{Id, W, Name, CType} | Rest], Map) ->
             encode_fields_c(Rest, Map)
     end.
 
--spec check_present_fields(struct | union | exception, [binary()], [tuple()], struct_value()) ->
+-spec check_present_fields(struct | union | exception, [binary()], [tuple()], thrift_runtime_protocol:struct_value()) ->
     ok | {error, term()}.
 check_present_fields(Kind, ReqNames, Fields, Map) ->
     thrift_runtime_protocol:check_present_fields(
         Kind, ReqNames, Fields, Map, fun({_Id, _Wire, Name, _CType}) -> Name end
     ).
 
--spec decode_struct_c(c_struct(), binary()) -> decode_result(struct_value()).
+-spec decode_struct_c(c_struct(), binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_struct_c(#{by_id := ById, required := Required}, Bin) ->
     decode_struct_fields_c(ById, Required, Bin, #{}).
 
 -spec decode_struct_fields_c(
-    #{integer() => {non_neg_integer(), c_type(), binary()}}, #{integer() => binary()}, binary(), struct_value()
+    #{integer() => {non_neg_integer(), c_type(), binary()}},
+    #{integer() => binary()},
+    binary(),
+    thrift_runtime_protocol:struct_value()
 ) ->
-    decode_result(struct_value()).
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_struct_fields_c(_ById, Required, <<?STOP, Rest/binary>>, Acc) ->
     case maps:values(Required) of
         [] -> {ok, Acc, Rest};
@@ -883,7 +868,7 @@ encoded_pairs_c(CKey, CVal, [{K, V} | Rest]) ->
             {error, Reason}
     end.
 
--spec decode_sequence_c(non_neg_integer(), c_type(), binary()) -> decode_result([term()]).
+-spec decode_sequence_c(non_neg_integer(), c_type(), binary()) -> thrift_runtime_protocol:decode_result([term()]).
 decode_sequence_c(_ElemW, _CElem, <<_, Size:32/big-signed, _/binary>>) when Size < 0 ->
     {error, {decode, bad_sequence_size}};
 decode_sequence_c(ElemW, CElem, <<ElemW:8/big-unsigned, Size:32/big-signed, Rest/binary>>) when Size >= 0 ->
@@ -894,7 +879,7 @@ decode_sequence_c(_ElemW, _CElem, Bin) when byte_size(Bin) < 5 ->
     more.
 
 -spec decode_elements_c(c_type(), non_neg_integer(), binary(), [term()]) ->
-    decode_result([term()]).
+    thrift_runtime_protocol:decode_result([term()]).
 decode_elements_c(_CElem, 0, Rest, Acc) ->
     {ok, lists:reverse(Acc), Rest};
 decode_elements_c(CElem, N, Bin, Acc) ->
@@ -904,7 +889,7 @@ decode_elements_c(CElem, N, Bin, Acc) ->
     end.
 
 -spec decode_map_c(non_neg_integer(), non_neg_integer(), c_type(), c_type(), binary()) ->
-    decode_result(map()).
+    thrift_runtime_protocol:decode_result(map()).
 decode_map_c(
     _KeyW, _ValW, _CKey, _CVal, <<_, _, Size:32/big-signed, _/binary>>
 ) when Size < 0 ->
@@ -919,7 +904,7 @@ decode_map_c(_KeyW, _ValW, _CKey, _CVal, Bin) when byte_size(Bin) < 6 ->
     more.
 
 -spec decode_pairs_c(c_type(), c_type(), non_neg_integer(), binary(), map()) ->
-    decode_result(map()).
+    thrift_runtime_protocol:decode_result(map()).
 decode_pairs_c(_CKey, _CVal, 0, Rest, Acc) ->
     {ok, Acc, Rest};
 decode_pairs_c(CKey, CVal, N, Bin, Acc) ->
@@ -1021,7 +1006,7 @@ skip_elements(Elem, N, Bin) ->
 %% Internals
 %%--------------------------------------------------------------------
 
--spec decode_string(binary()) -> decode_result(binary()).
+-spec decode_string(binary()) -> thrift_runtime_protocol:decode_result(binary()).
 decode_string(<<Length:32/big-signed, _/binary>> = Bin) when Length >= 0, byte_size(Bin) >= 4 + Length ->
     <<_:4/binary, V:Length/binary, Rest/binary>> = Bin,
     {ok, V, Rest};
@@ -1032,7 +1017,7 @@ decode_string(Bin) when byte_size(Bin) < 4 ->
 decode_string(_) ->
     {error, {decode, bad_string_length}}.
 
--spec decode_i32(binary()) -> decode_result(integer()).
+-spec decode_i32(binary()) -> thrift_runtime_protocol:decode_result(integer()).
 decode_i32(<<V:32/big-signed, Rest/binary>>) ->
     {ok, V, Rest};
 decode_i32(Bin) when byte_size(Bin) < 4 ->
@@ -1048,7 +1033,7 @@ ensure(_Bin, _N) ->
 int32(N) ->
     <<N:32/big-signed>>.
 
--spec base_size(base_type()) -> non_neg_integer().
+-spec base_size(thrift_runtime_protocol:base_type()) -> non_neg_integer().
 base_size(bool) -> 1;
 base_size(i8) -> 1;
 base_size(i16) -> 2;
@@ -1061,7 +1046,7 @@ base_size(binary) -> 0.
 
 %% Total for compilation: an unknown base name yields `error` so the
 %% codec reports it as a value/type mismatch instead of crashing.
--spec base_wire(base_type() | term()) -> non_neg_integer() | error.
+-spec base_wire(thrift_runtime_protocol:base_type() | term()) -> non_neg_integer() | error.
 base_wire(bool) -> ?BOOL;
 base_wire(i8) -> ?I8;
 base_wire(i16) -> ?I16;
@@ -1078,11 +1063,11 @@ Returns the field descriptors of a struct type descriptor
 (`{struct, {Kind, Fields}}`), resolving `{struct, {ref, M, N}}`
 through `M:struct_info/1`.
 """.
--spec struct_fields(type_desc()) -> [field_desc()].
+-spec struct_fields(thrift_runtime_protocol:type_desc()) -> [thrift_runtime_protocol:field_desc()].
 struct_fields(Desc) ->
     thrift_runtime_protocol:struct_fields(Desc).
 
--spec message_type_or(non_neg_integer()) -> {ok, message_type()} | {error, term()}.
+-spec message_type_or(non_neg_integer()) -> {ok, thrift_runtime_protocol:message_type()} | {error, term()}.
 message_type_or(TypeByte) ->
     case thrift_runtime_protocol:message_type(TypeByte) of
         {ok, Type} -> {ok, Type};

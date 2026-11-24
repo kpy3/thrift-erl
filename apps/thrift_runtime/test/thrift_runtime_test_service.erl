@@ -129,7 +129,7 @@ service_info() ->
         }
     }.
 
--spec struct_info(binary()) -> thrift_runtime_binary:struct_desc() | error.
+-spec struct_info(binary()) -> thrift_runtime_protocol:struct_desc() | error.
 struct_info(<<"point">>) ->
     point_desc();
 struct_info(<<"boom">>) ->
@@ -137,14 +137,14 @@ struct_info(<<"boom">>) ->
 struct_info(_) ->
     error.
 
--spec point_desc() -> thrift_runtime_binary:struct_desc().
+-spec point_desc() -> thrift_runtime_protocol:struct_desc().
 point_desc() ->
     {struct, [
         {1, default, {base, i32}, <<"x">>, undefined},
         {2, default, {base, i32}, <<"y">>, undefined}
     ]}.
 
--spec boom_desc() -> thrift_runtime_binary:struct_desc().
+-spec boom_desc() -> thrift_runtime_protocol:struct_desc().
 boom_desc() ->
     {exception, [
         {1, default, {base, string}, <<"message">>, undefined}

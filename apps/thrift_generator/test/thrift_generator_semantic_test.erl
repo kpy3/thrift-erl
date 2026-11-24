@@ -68,7 +68,7 @@
 
 -spec analyze(string() | binary()) -> {ok, #tg_model{}} | {error, term()}.
 analyze(Snippet) ->
-    {ok, Doc} = thrift_generator:parse_string(Snippet),
+    {ok, Doc} = thrift_generator_idl:parse_string(Snippet),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     thrift_generator_semantic:analyze(Loaded).
 
@@ -741,7 +741,7 @@ option_axes_test() ->
 -spec analyze_opts(string() | binary(), thrift_generator_semantic:generate_semantic_opts()) ->
     {ok, #tg_model{}} | {error, term()}.
 analyze_opts(Snippet, Opts) ->
-    {ok, Doc} = thrift_generator:parse_string(Snippet),
+    {ok, Doc} = thrift_generator_idl:parse_string(Snippet),
     Loaded = [#tg_loaded{name = <<"t">>, path = <<"t.thrift">>, includes = [], doc = Doc}],
     thrift_generator_semantic:analyze(Loaded, Opts).
 
@@ -755,7 +755,7 @@ analyze_opts(Snippet, Opts) ->
 analyze_root_include(RootSnippet, IncludeSnippet) ->
     Loaded = [
         begin
-            {ok, Doc} = thrift_generator:parse_string(Snippet),
+            {ok, Doc} = thrift_generator_idl:parse_string(Snippet),
             #tg_loaded{
                 name = Name, path = <<Name/binary, ".thrift">>, includes = [], doc = Doc
             }

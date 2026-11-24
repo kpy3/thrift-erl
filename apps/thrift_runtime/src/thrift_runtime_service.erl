@@ -47,11 +47,11 @@ arguments in declaration order. They answer:
     name := binary(),
     oneway := boolean(),
     %% params as a full struct type descriptor (ids are the argument ids)
-    params := thrift_runtime_binary:type_desc(),
+    params := thrift_runtime_protocol:type_desc(),
     %% reply type descriptor, `void` maps to `undefined`
-    reply => thrift_runtime_binary:type_desc() | undefined,
+    reply => thrift_runtime_protocol:type_desc() | undefined,
     %% declared exceptions as throw-field descriptors
-    exceptions => [thrift_runtime_binary:field_desc()],
+    exceptions => [thrift_runtime_protocol:field_desc()],
     %% generated services only: specialized codec hooks per protocol
     %% module (thrift_runtime_binary/compact/json). `params' is always
     %% present, `result' absent for oneway functions; each value is the
@@ -67,8 +67,8 @@ arguments in declaration order. They answer:
 -type handler_result() ::
     ok
     | {ok, term()}
-    | {error, {exception, thrift_runtime_binary:struct_value()}}
-    | {error, {exception, Name :: binary(), thrift_runtime_binary:struct_value()}}.
+    | {error, {exception, thrift_runtime_protocol:struct_value()}}
+    | {error, {exception, Name :: binary(), thrift_runtime_protocol:struct_value()}}.
 
 -doc """
 The single callback of the behaviour: returns the service descriptor.

@@ -411,22 +411,22 @@ varint_primitives_test() ->
 %%--------------------------------------------------------------------
 %% Helpers
 
--spec roundtrip_message(thrift_runtime_binary:message_type()) ->
-    {ok, thrift_runtime_binary:message_type(), binary(), non_neg_integer(), binary()}.
+-spec roundtrip_message(thrift_runtime_protocol:message_type()) ->
+    {ok, thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()}.
 roundtrip_message(Type) ->
     roundtrip_message(Type, <<"f">>, 0).
 
--spec roundtrip_message(thrift_runtime_binary:message_type(), binary(), non_neg_integer()) ->
-    {ok, thrift_runtime_binary:message_type(), binary(), non_neg_integer(), binary()}.
+-spec roundtrip_message(thrift_runtime_protocol:message_type(), binary(), non_neg_integer()) ->
+    {ok, thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()}.
 roundtrip_message(Type, Name, SeqId) ->
     Message = iolist_to_binary(thrift_runtime_compact:encode_message(Type, Name, SeqId, <<>>)),
     thrift_runtime_compact:decode_message(Message).
 
--spec encb(thrift_runtime_binary:type_desc(), term()) -> binary().
+-spec encb(thrift_runtime_protocol:type_desc(), term()) -> binary().
 encb(Type, Value) ->
     {ok, Io} = thrift_runtime_compact:encode(Type, Value),
     iolist_to_binary(Io).
 
--spec dec(thrift_runtime_binary:type_desc(), iodata()) -> thrift_runtime_binary:decode_result(term()).
+-spec dec(thrift_runtime_protocol:type_desc(), iodata()) -> thrift_runtime_protocol:decode_result(term()).
 dec(Type, Bin) ->
     thrift_runtime_compact:decode(Type, iolist_to_binary(Bin)).

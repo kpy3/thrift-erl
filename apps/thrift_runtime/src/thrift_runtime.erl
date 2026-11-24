@@ -92,7 +92,7 @@ and `thrift_runtime_server`.
 ]).
 
 -doc "Encodes a value in any representation with the binary protocol.".
--spec encode(thrift_runtime_binary:type_desc(), term()) -> {ok, binary()} | {error, term()}.
+-spec encode(thrift_runtime_protocol:type_desc(), term()) -> {ok, binary()} | {error, term()}.
 encode(Desc, Value) ->
     encode(Desc, Value, #{}).
 
@@ -113,7 +113,7 @@ shape the codecs reject on their own with `{error,
 A non-map options argument is not a positional protocol: it answers
 `{error, {bad_option, {options, Options, [map]}}}`.
 """.
--spec encode(thrift_runtime_binary:type_desc(), term(), map()) ->
+-spec encode(thrift_runtime_protocol:type_desc(), term(), map()) ->
     {ok, binary()} | {error, term()}.
 encode(Desc, Value, Options) when is_map(Options) ->
     case thrift_runtime_options:codec_options(Options, encode) of
@@ -132,7 +132,7 @@ encode(_Desc, _Value, Options) ->
 %% both answer the identical error for genuinely bad values and the fast
 %% path can keep declining shapes it cannot represent (mixed nesting).
 
--spec encode_opts(thrift_runtime_binary:type_desc(), term(), module(), map()) ->
+-spec encode_opts(thrift_runtime_protocol:type_desc(), term(), module(), map()) ->
     {ok, binary()} | {error, term()}.
 encode_opts(Desc, Value, Mod, Opts) ->
     case strict_check(Desc, Value, Opts) of
@@ -145,7 +145,7 @@ encode_opts(Desc, Value, Mod, Opts) ->
             Error
     end.
 
--spec strict_check(thrift_runtime_binary:type_desc(), term(), map()) -> ok | {error, term()}.
+-spec strict_check(thrift_runtime_protocol:type_desc(), term(), map()) -> ok | {error, term()}.
 strict_check(Desc, Value, Opts) ->
     case maps:get(strict, Opts, false) of
         true ->
@@ -162,7 +162,7 @@ strict_check(Desc, Value, Opts) ->
 %% that matches no representation; the facade turns it into the same
 %% tagged error the codecs answer with.
 
--spec encode_wire(thrift_runtime_binary:type_desc(), term(), module()) ->
+-spec encode_wire(thrift_runtime_protocol:type_desc(), term(), module()) ->
     {ok, iodata()} | {error, term()}.
 encode_wire(Desc, Value, Mod) ->
     case Mod of
@@ -209,7 +209,7 @@ struct has no record to produce: `record` fails with
 A non-map options argument is not a positional repr: it answers
 `{error, {bad_option, {options, Options, [map]}}}`.
 """.
--spec decode(thrift_runtime_binary:type_desc(), binary(), map()) ->
+-spec decode(thrift_runtime_protocol:type_desc(), binary(), map()) ->
     {ok, term()} | {error, term()}.
 decode(Desc, Binary, Options) when is_map(Options) ->
     case thrift_runtime_options:codec_options(Options, decode) of
@@ -266,7 +266,7 @@ decode_two_pass(Mod, Desc, Binary, Repr) ->
 %% `record'; a malformed union on the wire (zero or several fields) is a
 %% data error, not a crash.
 
--spec decode_repr(thrift_runtime_binary:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
+-spec decode_repr(thrift_runtime_protocol:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
 decode_repr(Desc, Value, record) ->
     case thrift_runtime_record:repr_mode(Desc) of
         {map, _} ->
@@ -279,7 +279,7 @@ decode_repr(Desc, Value, record) ->
 decode_repr(Desc, Value, Repr) ->
     from_wire_repr(Desc, Value, Repr).
 
--spec from_wire_repr(thrift_runtime_binary:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
+-spec from_wire_repr(thrift_runtime_protocol:type_desc(), term(), repr()) -> {ok, term()} | {error, term()}.
 from_wire_repr(Desc, Value, Repr) ->
     try
         {ok, thrift_runtime_record:from_wire(Desc, Value, Repr)}

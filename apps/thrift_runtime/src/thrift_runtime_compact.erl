@@ -67,10 +67,6 @@ to the interpreter here when the export is missing.
 
 -behaviour(thrift_runtime_protocol).
 
--export_type([decode_result/1]).
-
--type decode_result(Value) :: thrift_runtime_binary:decode_result(Value).
-
 %% A compiled type descriptor: the compact nibble precomputed next to
 %% every kind. `k_unsupported` marks a type with no compact encoding
 %% (the `uuid` base type); it fails on use with a dedicated error.
@@ -78,14 +74,14 @@ to the interpreter here when the export is missing.
 -type nibble() :: 0..16#0F.
 
 -type k_type() ::
-    {k_base, nibble(), thrift_runtime_binary:base_type()}
-    | {k_enum, nibble(), thrift_runtime_binary:enum_desc()}
+    {k_base, nibble(), thrift_runtime_protocol:base_type()}
+    | {k_enum, nibble(), thrift_runtime_protocol:enum_desc()}
     | {k_list, nibble(), k_type()}
     | {k_set, nibble(), k_type()}
     | {k_map, nibble(), nibble(), nibble(), k_type(), k_type()}
     | {k_struct, nibble(), k_struct()}
     | {k_ref, nibble(), module(), binary()}
-    | {k_unsupported, thrift_runtime_binary:type_desc(), compact}.
+    | {k_unsupported, thrift_runtime_protocol:type_desc(), compact}.
 
 %% A compiled struct: fields in declaration order for encoding, an id
 %% index for decoding, and the required subset for both checks.
@@ -126,7 +122,7 @@ to the interpreter here when the export is missing.
 %%--------------------------------------------------------------------
 
 -doc "Encodes `Value` as `Type`, or fails with a tagged error.".
--spec encode(thrift_runtime_binary:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
+-spec encode(thrift_runtime_protocol:type_desc(), term()) -> {ok, iodata()} | {error, term()}.
 encode({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
     encode_resolved(Module, Name, Value);
 encode({struct, {Kind, Fields}} = Desc, Value) when is_atom(Kind), is_list(Fields), is_map(Value) ->
@@ -147,7 +143,7 @@ Decodes a value of `Type` from the front of `Binary`.
 Returns `{ok, Value, Rest}`, `more` when `Binary` is a truncated valid
 encoding, or a tagged error.
 """.
--spec decode(thrift_runtime_binary:type_desc(), binary()) -> decode_result(term()).
+-spec decode(thrift_runtime_protocol:type_desc(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode({struct, {ref, Module, Name}}, Bin) when is_binary(Bin) ->
     decode_ref_struct(Module, Name, Bin);
 decode({struct, {Kind, Fields}} = Desc, Bin) when is_atom(Kind), is_list(Fields), is_binary(Bin) ->
@@ -268,7 +264,7 @@ encode_binary_k(V) when is_binary(V) ->
 encode_binary_k(V) ->
     {error, {encode, {value_does_not_match_type, V}}}.
 
--spec decode_k(k_type(), binary()) -> decode_result(term()).
+-spec decode_k(k_type(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_k({k_base, _N, bool}, Bin) ->
     %% Standalone boolean: a collection element or a skipped-in-value
     %% position; struct fields carry the value in the header nibble.
@@ -328,7 +324,7 @@ decode_k({k_base, _N, B}, Bin) when is_binary(Bin) ->
 decode_k(_Type, Bin) when is_binary(Bin) ->
     {error, {decode, bad_value}}.
 
--spec decode_binary_k(binary()) -> decode_result(binary()).
+-spec decode_binary_k(binary()) -> thrift_runtime_protocol:decode_result(binary()).
 decode_binary_k(Bin) ->
     case decode_varint(Bin) of
         {ok, Length, Rest} when byte_size(Rest) >= Length ->
@@ -344,7 +340,7 @@ decode_binary_k(Bin) ->
 %% Structs
 %%--------------------------------------------------------------------
 
--spec encode_struct_k(k_struct(), thrift_runtime_binary:struct_value()) -> {ok, iodata()} | {error, term()}.
+-spec encode_struct_k(k_struct(), thrift_runtime_protocol:struct_value()) -> {ok, iodata()} | {error, term()}.
 encode_struct_k(#{kind := Kind, fields := Fields, required_names := ReqNames}, Map) ->
     case check_present_fields(Kind, ReqNames, Fields, Map) of
         ok ->
@@ -358,7 +354,7 @@ encode_struct_k(#{kind := Kind, fields := Fields, required_names := ReqNames}, M
 %% WRITTEN field id (absent fields do not move it — deltas are against
 %% what is actually on the wire, like the Apache writer).
 
--spec encode_fields_k([{integer(), k_type(), binary()}], thrift_runtime_binary:struct_value(), integer()) ->
+-spec encode_fields_k([{integer(), k_type(), binary()}], thrift_runtime_protocol:struct_value(), integer()) ->
     {ok, iodata()} | {error, term()}.
 encode_fields_k([], _Map, _LastId) ->
     {ok, [?STOP]};
@@ -420,7 +416,8 @@ field_header(Id, LastId, Nibble) ->
             [<<Nibble>>, zigzag_varint(Id)]
     end.
 
--spec decode_struct_k(k_struct(), binary()) -> decode_result(thrift_runtime_binary:struct_value()).
+-spec decode_struct_k(k_struct(), binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_struct_k(#{by_id := ById, required := Required}, Bin) ->
     decode_struct_fields_k(ById, Required, Bin, 0, #{}).
 
@@ -429,9 +426,9 @@ decode_struct_k(#{by_id := ById, required := Required}, Bin) ->
     #{integer() => binary()},
     binary(),
     integer(),
-    thrift_runtime_binary:struct_value()
+    thrift_runtime_protocol:struct_value()
 ) ->
-    decode_result(thrift_runtime_binary:struct_value()).
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_struct_fields_k(_ById, Required, <<?STOP, Rest/binary>>, _LastId, Acc) ->
     case maps:values(Required) of
         [] -> {ok, Acc, Rest};
@@ -462,9 +459,9 @@ decode_struct_fields_k(_ById, _Required, Bin, _LastId, _Acc) when byte_size(Bin)
     non_neg_integer(),
     binary(),
     integer(),
-    thrift_runtime_binary:struct_value()
+    thrift_runtime_protocol:struct_value()
 ) ->
-    decode_result(thrift_runtime_binary:struct_value()).
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_field_k(ById, Required, Id, Nibble, Bin, LastId, Acc) ->
     case ById of
         #{Id := {KType, Name}} ->
@@ -496,7 +493,7 @@ decode_field_k(ById, Required, Id, Nibble, Bin, LastId, Acc) ->
 %% A boolean field's payload rides in the header nibble; every other
 %% type decodes from the bytes after the header.
 
--spec decode_field_value_k(k_type(), non_neg_integer(), binary()) -> decode_result(term()).
+-spec decode_field_value_k(k_type(), non_neg_integer(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode_field_value_k({k_base, _, bool}, Nibble, Bin) when Nibble =:= ?CT_TRUE; Nibble =:= ?CT_FALSE ->
     {ok, Nibble =:= ?CT_TRUE, Bin};
 decode_field_value_k(KType, _Nibble, Bin) ->
@@ -540,7 +537,7 @@ k_wire({k_ref, N, _, _}) -> N;
 k_wire({k_unsupported, _, _}) -> 0.
 
 -spec check_present_fields(
-    struct | union | exception, [binary()], [{integer(), k_type(), binary()}], thrift_runtime_binary:struct_value()
+    struct | union | exception, [binary()], [{integer(), k_type(), binary()}], thrift_runtime_protocol:struct_value()
 ) ->
     ok | {error, term()}.
 check_present_fields(Kind, ReqNames, Fields, Map) ->
@@ -603,7 +600,7 @@ decode_collection_header(<<>>) ->
     more.
 
 -spec decode_elements_k(k_type(), non_neg_integer(), binary(), [term()]) ->
-    decode_result([term()]).
+    thrift_runtime_protocol:decode_result([term()]).
 decode_elements_k(_KElem, 0, Rest, Acc) ->
     {ok, lists:reverse(Acc), Rest};
 decode_elements_k(KElem, N, Bin, Acc) ->
@@ -648,7 +645,7 @@ encoded_pairs_k(CKey, CVal, [{K, V} | Rest]) ->
     end.
 
 -spec decode_map_k(non_neg_integer(), non_neg_integer(), k_type(), k_type(), binary()) ->
-    decode_result(map()).
+    thrift_runtime_protocol:decode_result(map()).
 decode_map_k(KKey, KVal, CKey, CVal, Bin) ->
     case decode_varint(Bin) of
         {ok, 0, Rest} ->
@@ -667,7 +664,7 @@ decode_map_k(KKey, KVal, CKey, CVal, Bin) ->
     end.
 
 -spec decode_pairs_k(k_type(), k_type(), non_neg_integer(), binary(), map()) ->
-    decode_result(map()).
+    thrift_runtime_protocol:decode_result(map()).
 decode_pairs_k(_CKey, _CVal, 0, Rest, Acc) ->
     {ok, Acc, Rest};
 decode_pairs_k(CKey, CVal, N, Bin, Acc) ->
@@ -803,7 +800,7 @@ skip_pairs(Key, Val, N, Bin) ->
 Encodes a message envelope around `Payload` (already encoded as a
 struct): protocol id, version-and-type byte, varint seqid, name string.
 """.
--spec encode_message(thrift_runtime_binary:message_type(), binary(), non_neg_integer(), iodata()) ->
+-spec encode_message(thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), iodata()) ->
     iodata().
 encode_message(Type, Name, SeqId, Payload) ->
     TypeB = thrift_runtime_protocol:message_type_id(Type),
@@ -824,7 +821,7 @@ after the name (the struct payload plus anything that follows it),
 accepted — the format has no legacy variant.
 """.
 -spec decode_message(binary()) ->
-    {ok, thrift_runtime_binary:message_type(), binary(), non_neg_integer(), binary()}
+    {ok, thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()}
     | more
     | {error, term()}.
 decode_message(<<?PROTOCOL_ID, VersionAndType, Rest/binary>>) ->
@@ -845,8 +842,8 @@ decode_message(Bin) when byte_size(Bin) < 2 ->
 decode_message(_) ->
     {error, {decode, bad_envelope}}.
 
--spec decode_message_name(thrift_runtime_binary:message_type(), binary()) ->
-    {ok, thrift_runtime_binary:message_type(), binary(), non_neg_integer(), binary()}
+-spec decode_message_name(thrift_runtime_protocol:message_type(), binary()) ->
+    {ok, thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()}
     | more
     | {error, term()}.
 decode_message_name(Type, Bin) ->
@@ -878,7 +875,7 @@ Decodes `TApplicationException` from an EXCEPTION message payload.
 Unknown fields are skipped per the usual struct rules.
 """.
 -spec decode_application_exception(binary()) ->
-    decode_result(thrift_runtime_binary:application_exception()).
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:application_exception()).
 decode_application_exception(Bin) ->
     thrift_runtime_protocol:decode_application_exception(?MODULE, Bin).
 
@@ -886,7 +883,7 @@ decode_application_exception(Bin) ->
 %% Descriptor compilation
 %%--------------------------------------------------------------------
 
--spec compile_type(thrift_runtime_binary:type_desc()) -> k_type() | error.
+-spec compile_type(thrift_runtime_protocol:type_desc()) -> k_type() | error.
 compile_type({base, uuid}) ->
     {k_unsupported, {base, uuid}, compact};
 compile_type({base, B}) ->
@@ -921,7 +918,7 @@ compile_type({struct, {Kind, Fields}}) when is_atom(Kind), is_list(Fields) ->
 compile_type(_) ->
     error.
 
--spec base_nibble(thrift_runtime_binary:base_type() | term()) -> non_neg_integer() | error.
+-spec base_nibble(thrift_runtime_protocol:base_type() | term()) -> non_neg_integer() | error.
 base_nibble(bool) -> ?CT_TRUE;
 base_nibble(i8) -> ?CT_BYTE;
 base_nibble(i16) -> ?CT_I16;
@@ -932,7 +929,7 @@ base_nibble(string) -> ?CT_BINARY;
 base_nibble(binary) -> ?CT_BINARY;
 base_nibble(_) -> error.
 
--spec compile_struct(struct | union | exception, [thrift_runtime_binary:field_desc()]) -> k_struct().
+-spec compile_struct(struct | union | exception, [thrift_runtime_protocol:field_desc()]) -> k_struct().
 compile_struct(Kind, Fields) ->
     Compiled = [{Id, compile_type(T), Name} || {Id, _R, T, Name, _D} <- Fields],
     %% A field whose type failed to compile carries `error` — it errors
@@ -949,7 +946,8 @@ compile_struct(Kind, Fields) ->
 resolve_struct(Module, Name) ->
     thrift_runtime_protocol:resolve_struct(?MODULE, Module, Name, fun compile_struct/2).
 
--spec decode_ref_struct(module(), binary(), binary()) -> decode_result(thrift_runtime_binary:struct_value()).
+-spec decode_ref_struct(module(), binary(), binary()) ->
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_ref_struct(Module, Name, Bin) ->
     case codec_cached(Module, Name) of
         {_EncodeName, DecodeName} ->
@@ -977,7 +975,7 @@ decode_ref_struct(Module, Name, Bin) ->
     end.
 
 -spec decode_ref_generic(module(), binary(), binary()) ->
-    decode_result(thrift_runtime_binary:struct_value()).
+    thrift_runtime_protocol:decode_result(thrift_runtime_protocol:struct_value()).
 decode_ref_generic(Module, Name, Bin) ->
     case resolve_struct(Module, Name) of
         {ok, Compiled} ->
@@ -990,8 +988,8 @@ decode_ref_generic(Module, Name, Bin) ->
 compact_codec(Module, Name) ->
     thrift_runtime_protocol:codec(?MODULE, Module, Name, compact_codec).
 
--spec memo_compiled(thrift_runtime_binary:type_desc(), struct | union | exception, [
-    thrift_runtime_binary:field_desc()
+-spec memo_compiled(thrift_runtime_protocol:type_desc(), struct | union | exception, [
+    thrift_runtime_protocol:field_desc()
 ]) ->
     k_struct().
 memo_compiled(Desc, Kind, Fields) ->
@@ -1009,12 +1007,12 @@ varint(V) ->
     [<<((V band 16#7F) bor 16#80)>> | varint(V bsr 7)].
 
 -doc "Decodes a ULEB128 varint: `{ok, Value, Rest}`, `more`, or `{error, {decode, bad_varint}}`.".
--spec decode_varint(binary()) -> decode_result(non_neg_integer()).
+-spec decode_varint(binary()) -> thrift_runtime_protocol:decode_result(non_neg_integer()).
 decode_varint(Bin) ->
     decode_varint(Bin, 0, 0).
 
 -spec decode_varint(binary(), non_neg_integer(), non_neg_integer()) ->
-    decode_result(non_neg_integer()).
+    thrift_runtime_protocol:decode_result(non_neg_integer()).
 %% A ULEB128 varint of a 64-bit value is at most 10 bytes: the 10th
 %% byte (shift 63) must be terminal.
 decode_varint(<<B, Rest/binary>>, Shift, Acc) when B >= 16#80, Shift < 63 ->
@@ -1040,7 +1038,7 @@ zigzag_varint(V) ->
     varint(to_zigzag(V)).
 
 -doc "Decodes a zigzag varint back to the signed integer.".
--spec decode_zigzag(binary()) -> decode_result(integer()).
+-spec decode_zigzag(binary()) -> thrift_runtime_protocol:decode_result(integer()).
 decode_zigzag(Bin) ->
     case decode_varint(Bin) of
         {ok, V, Rest} -> {ok, from_zigzag(V), Rest};
@@ -1051,7 +1049,7 @@ decode_zigzag(Bin) ->
 %% Internals
 %%--------------------------------------------------------------------
 
--spec base_size(thrift_runtime_binary:base_type()) -> non_neg_integer().
+-spec base_size(thrift_runtime_protocol:base_type()) -> non_neg_integer().
 base_size(bool) -> 1;
 base_size(i8) -> 1;
 base_size(i16) -> 2;

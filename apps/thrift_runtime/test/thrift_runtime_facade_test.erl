@@ -42,7 +42,6 @@
     encode_strict_test/0,
     decode_bad_repr_test/0,
     decode_record_of_map_mode_test/0,
-    options_defaults_test/0,
     extract_message_framed_test/0,
     extract_message_buffered_test/0,
     client_queue_serializes_test/0,
@@ -51,7 +50,8 @@
     client_queued_call_deadline_test/0,
     client_max_queue_depth_test/0,
     client_peer_close_fails_pending_test/0,
-    client_call_timeout_test/0
+    client_call_timeout_test/0,
+    client_invalid_options_precede_connect_test/0
 ]).
 
 -define(SERVICE, thrift_runtime_test_service).
@@ -605,27 +605,6 @@ decode_record_of_map_mode_test() ->
     ?assertEqual({ok, #{s => <<"x">>}}, thrift_runtime:decode(Loose, Bin, #{repr => map})),
     ok.
 
-%% The shared option defaults and the timeout umbrella.
-
-options_defaults_test() ->
-    ?assertEqual(5000, thrift_runtime_options:idle_timeout(#{})),
-    ?assertEqual(1000, thrift_runtime_options:idle_timeout(#{timeout => 1000})),
-    ?assertEqual(300, thrift_runtime_options:idle_timeout(#{timeout => 1000, idle_timeout => 300})),
-    %% the umbrella fills both meanings until a specific key splits them
-    ?assertEqual(1000, thrift_runtime_options:handshake_timeout(#{timeout => 1000})),
-    ?assertEqual(250, thrift_runtime_options:handshake_timeout(#{timeout => 1000, handshake_timeout => 250})),
-    ?assertEqual(700, thrift_runtime_options:connect_timeout(#{timeout => 1000, connect_timeout => 700})),
-    ?assertEqual(framed, thrift_runtime_options:transport(#{})),
-    ?assertEqual(65536, thrift_runtime_options:max_frame_size(#{max_frame_size => 65536})),
-    ?assertEqual(7, thrift_runtime_options:active_n(#{active_n => 7})),
-    ?assertEqual(<<"/thrift">>, thrift_runtime_options:http_path(#{http_path => <<"/thrift">>})),
-    ?assertEqual({ok, thrift_runtime_compact}, thrift_runtime_options:protocol_module(#{protocol => compact})),
-    ?assertMatch(
-        {error, {bad_protocol, nope, _}},
-        thrift_runtime_options:protocol_module(#{protocol => nope})
-    ),
-    ok.
-
 %%--------------------------------------------------------------------
 %% Frame splitting
 
@@ -855,10 +834,27 @@ client_call_timeout_test() ->
     Peer ! close,
     ok.
 
+%% Invalid options answer from `start/1' and `start_link/1' before any
+%% connect attempt: a bad protocol reports the axis error even against
+%% a port with no listener, and unknown/missing keys answer their
+%% strict errors instead of a connect failure.
+
+client_invalid_options_precede_connect_test() ->
+    Port = free_port(),
+    Base = #{host => "127.0.0.1", port => Port, service => ?SERVICE},
+    BadProtocol = Base#{protocol => <<"binary">>},
+    ?assertEqual({error, {bad_protocol, <<"binary">>}}, thrift_runtime_client:start_link(BadProtocol)),
+    ?assertEqual({error, {bad_protocol, <<"binary">>}}, thrift_runtime_client:start(BadProtocol)),
+    ?assertEqual({error, {unknown_option, bogus}}, thrift_runtime_client:start_link(Base#{bogus => true})),
+    ?assertEqual({error, {unknown_option, bogus}}, thrift_runtime_client:start(Base#{bogus => true})),
+    ?assertEqual({error, {missing_option, host}}, thrift_runtime_client:start(maps:remove(host, Base))),
+    ?assertEqual({error, {bad_option, {options, no_map, [map]}}}, thrift_runtime_client:start(no_map)),
+    ok.
+
 %%--------------------------------------------------------------------
 %% Helpers
 
--spec point_desc() -> thrift_runtime_binary:type_desc().
+-spec point_desc() -> thrift_runtime_protocol:type_desc().
 point_desc() ->
     {struct, {ref, ?FIXTURE, <<"Point">>}}.
 
@@ -937,6 +933,16 @@ stop_quietly(Server) ->
         _:_ ->
             ok
     end.
+
+%% A port with no listener: whatever answers besides the strict option
+%% error would have to come from a connect attempt.
+
+-spec free_port() -> inet:port_number().
+free_port() ->
+    {ok, Listen} = gen_tcp:listen(0, []),
+    {ok, Port} = inet:port(Listen),
+    gen_tcp:close(Listen),
+    Port.
 
 %% A mute TCP endpoint: accepts one connection and never speaks. The
 %% accepted socket stays with the peer process; `close` tears everything

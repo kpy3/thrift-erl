@@ -84,8 +84,12 @@ for the old → new call tables.
   servers and connections.
 
 See the [repository README](https://github.com/kpy3/thrift-erl) for
-the full guide: options, protocol and transport details, pooling, TLS,
-multiplexing and performance.
+the normal path, and the focused references for everything else:
+[RPC and operations](https://github.com/kpy3/thrift-erl/blob/master/docs/rpc.md)
+(options, transports, pooling, observability, multiplexing, TLS),
+[Advanced codecs](https://github.com/kpy3/thrift-erl/blob/master/docs/advanced-codecs.md)
+(descriptors, representations, custom protocols) and
+[Performance](https://github.com/kpy3/thrift-erl/blob/master/docs/performance.md).
 
 ## License
 

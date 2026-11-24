@@ -350,7 +350,7 @@ facade_options_map_test() ->
 %%--------------------------------------------------------------------
 %% Helpers
 
--spec sdesc() -> thrift_runtime_binary:type_desc().
+-spec sdesc() -> thrift_runtime_protocol:type_desc().
 sdesc() ->
     {struct,
         {struct, [
@@ -358,19 +358,19 @@ sdesc() ->
             {2, default, {base, string}, <<"b">>, undefined}
         ]}}.
 
--spec encb(thrift_runtime_binary:type_desc(), term()) -> binary().
+-spec encb(thrift_runtime_protocol:type_desc(), term()) -> binary().
 encb(Type, Value) ->
     {ok, Io} = thrift_runtime_json:encode(Type, Value),
     iolist_to_binary(Io).
 
--spec dec(thrift_runtime_binary:type_desc(), iodata()) -> thrift_runtime_binary:decode_result(term()).
+-spec dec(thrift_runtime_protocol:type_desc(), iodata()) -> thrift_runtime_protocol:decode_result(term()).
 dec(Type, Bin) ->
     thrift_runtime_json:decode(Type, iolist_to_binary(Bin)).
 
 -spec roundtrip_message(
-    thrift_runtime_binary:message_type(), binary(), non_neg_integer(), binary()
+    thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()
 ) ->
-    {ok, thrift_runtime_binary:message_type(), binary(), non_neg_integer(), binary()}.
+    {ok, thrift_runtime_protocol:message_type(), binary(), non_neg_integer(), binary()}.
 roundtrip_message(Type, Name, SeqId, Payload) ->
     Message = iolist_to_binary(thrift_runtime_json:encode_message(Type, Name, SeqId, Payload)),
     thrift_runtime_json:decode_message(Message).

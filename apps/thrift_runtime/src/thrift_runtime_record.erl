@@ -59,10 +59,6 @@ the codecs answer with.
 """.
 
 -export([
-    args_to_wire/2,
-    args_from_wire/2,
-    result_to_wire/3,
-    call_result_from_wire/3,
     to_wire/2,
     from_wire/2,
     from_wire/3,
@@ -71,20 +67,6 @@ the codecs answer with.
     unknown_fields/2
 ]).
 
--export_type([
-    type_desc/0,
-    field_desc/0,
-    struct_desc/0,
-    call_result/0,
-    exception_field/0
-]).
-
--type type_desc() :: thrift_runtime_binary:type_desc().
--type field_desc() :: thrift_runtime_binary:field_desc().
--type struct_desc() :: thrift_runtime_binary:struct_desc().
--type call_result() :: thrift_runtime_client:call_result().
--type exception_field() :: field_desc().
-
 %% How a struct-ref descriptor target represents its values.
 -type mode() ::
     {record, atom(), [atom()]}
@@ -92,135 +74,6 @@ the codecs answer with.
     | {sum, [atom()]}
     | {native, atom()}
     | wire.
-
-%%--------------------------------------------------------------------
-%% Argument lists (client → wire, wire → server handler)
-%%--------------------------------------------------------------------
-
--doc "Converts call arguments to wire representation, in order.".
--spec args_to_wire({struct, struct_desc()}, [term()]) -> [term()].
-args_to_wire({struct, {_Kind, Fields}}, Args) ->
-    Types = [T || {_, _, T, _, _} <- Fields],
-    [to_wire(T, V) || {T, V} <- lists:zip(Types, Args)].
-
--doc "Converts wire call arguments to the handler representation.".
--spec args_from_wire({struct, struct_desc()}, [term()]) -> [term()].
-args_from_wire({struct, {_Kind, Fields}}, Args) ->
-    Types = [T || {_, _, T, _, _} <- Fields],
-    [from_wire(T, V) || {T, V} <- lists:zip(Types, Args)].
-
-%%--------------------------------------------------------------------
-%% Whole call results
-%%--------------------------------------------------------------------
-
--doc """
-Converts a handler result to wire representation.
-
-`Result` is `ok` — the success answer of a `void` function — or
-`{ok, Value}` — the reply of a non-void function, converted through
-`ReplyType`; declared exceptions answer `{error, {exception, Value}}` —
-the declared exception identified by its representation tag — or
-`{error, {exception, Name, Value}}` with an explicit wire name (the
-form hand-written descriptors and map-representation exceptions need);
-anything else passes through, and the runtime rejects it as an
-unsupported result.
-""".
--spec result_to_wire(type_desc() | undefined, [exception_field()], term()) -> term().
-result_to_wire(undefined, _Exceptions, ok = Result) ->
-    Result;
-result_to_wire(ReplyType, _Exceptions, {ok, Value}) when ReplyType =/= undefined ->
-    {ok, to_wire(ReplyType, Value)};
-result_to_wire(_ReplyType, Exceptions, {error, {exception, Value}} = Result) ->
-    case exception_name(Value, Exceptions) of
-        {ok, Name} -> result_to_wire(undefined, Exceptions, {error, {exception, Name, Value}});
-        error -> Result
-    end;
-result_to_wire(_ReplyType, Exceptions, {error, {exception, Name, Value}}) ->
-    case exception_type(Name, Exceptions) of
-        {ok, Type} -> {error, {exception, Name, to_wire(Type, Value)}};
-        error -> {error, {exception, Name, Value}}
-    end;
-result_to_wire(_ReplyType, _Exceptions, Result) ->
-    Result.
-
--doc """
-Converts a call result to the handler representation.
-
-`CallResult` is what `thrift_runtime_client:call/4` returned. A `void`
-function (`ReplyType => undefined`) answers the bare atom `ok`, and so
-does `{ok, undefined}` for compatibility with callers still matching
-the old shape; any other bare `ok` passes through unchanged. Declared
-exceptions answer `{error, {exception, Value}}`: the value's
-representation — record tag, `__struct__` map or native record —
-identifies the exception.
-""".
--spec call_result_from_wire(type_desc() | undefined, [exception_field()], call_result()) ->
-    term().
-call_result_from_wire(undefined, _Exceptions, {ok, undefined}) ->
-    ok;
-call_result_from_wire(_ReplyType, _Exceptions, {ok, undefined} = Result) ->
-    Result;
-call_result_from_wire(ReplyType, _Exceptions, {ok, Value}) when ReplyType =/= undefined ->
-    {ok, from_wire(ReplyType, Value)};
-call_result_from_wire(_ReplyType, Exceptions, {error, {exception, Name, Value}}) ->
-    case exception_type(Name, Exceptions) of
-        {ok, Type} -> {error, {exception, from_wire(Type, Value)}};
-        error -> {error, {exception, Value}}
-    end;
-call_result_from_wire(_ReplyType, _Exceptions, Result) ->
-    Result.
-
-%% Exceptions are identified by their struct name (the IDL-level
-%% identity); the throw-field name is the fallback for descriptors
-%% without a struct ref.
--spec exception_type(binary(), [exception_field()]) -> {ok, type_desc()} | error.
-exception_type(Name, Exceptions) ->
-    Pred = fun
-        ({_, _, {struct, {ref, _, StructName}}, _, _}) -> StructName =:= Name;
-        ({_, _, _, FieldName, _}) -> FieldName =:= Name
-    end,
-    case lists:search(Pred, Exceptions) of
-        {value, {_, _, Type, _, _}} -> {ok, Type};
-        false -> error
-    end.
-
-%% The name of the declared exception a handler value belongs to: the
-%% value's representation tag (record tag, `__struct__` atom, sum-union
-%% field atom) is matched against every declared exception. Map-mode
-%% exceptions are plain maps and carry no identity — handlers signal
-%% them through the explicit-name form.
-
--spec exception_name(term(), [exception_field()]) -> {ok, binary()} | error.
-exception_name(Value, Exceptions) ->
-    Pred = fun({_, _, Type, _FieldName, _}) -> value_matches_repr(Value, Type) end,
-    case lists:search(Pred, Exceptions) of
-        {value, {_, _, {struct, {ref, _, StructName}}, _, _}} -> {ok, StructName};
-        {value, {_, _, _, FieldName, _}} -> {ok, FieldName};
-        false -> error
-    end.
-
--spec value_matches_repr(term(), type_desc()) -> boolean().
-value_matches_repr(Value, {struct, {ref, Mod, Name}}) ->
-    Tag =
-        case Value of
-            #{'__struct__' := T} when is_atom(T) -> T;
-            _ -> tuple_tag(Value)
-        end,
-    case struct_mode(Mod, Name) of
-        {record, Declared, _} -> Tag =:= Declared;
-        {map, _} -> false;
-        {native, Declared} -> Tag =:= Declared;
-        {sum, FieldAtoms} -> is_atom(Tag) andalso lists:member(Tag, FieldAtoms);
-        _ -> false
-    end;
-value_matches_repr(_, _) ->
-    false.
-
--spec tuple_tag(term()) -> atom() | undefined.
-tuple_tag(Value) when is_tuple(Value), tuple_size(Value) >= 1, is_atom(element(1, Value)) ->
-    element(1, Value);
-tuple_tag(_) ->
-    undefined.
 
 %%--------------------------------------------------------------------
 %% Representation introspection
@@ -233,7 +86,7 @@ for tagged-tuple unions, `{native, Tag}` for native-record structs,
 `wire` when values pass through unchanged (inline descriptors and
 hand-written modules without `record_fields/1`).
 """.
--spec repr_mode(type_desc()) -> record | {map, atom | binary} | {native, atom} | sum | wire.
+-spec repr_mode(thrift_runtime_protocol:type_desc()) -> record | {map, atom | binary} | {native, atom} | sum | wire.
 repr_mode({struct, {ref, Module, Name}}) ->
     case struct_mode(Module, Name) of
         {record, _, _} -> record;
@@ -251,7 +104,7 @@ repr_mode(_) ->
 %% nothing to check — non-maps, inline descriptors and wire-passthrough
 %% targets have no declared field set to compare against.
 
--spec unknown_fields(type_desc(), term()) -> [atom() | binary()] | none.
+-spec unknown_fields(thrift_runtime_protocol:type_desc(), term()) -> [atom() | binary()] | none.
 unknown_fields({struct, {ref, Module, Name}}, Value) when is_map(Value) ->
     case struct_mode(Module, Name) of
         {record, Tag, FieldAtoms} ->
@@ -304,7 +157,7 @@ dropped_keys(Map, Key, Declared) ->
 Converts any representation (record, atom- or binary-keyed map,
 struct-map) to the wire representation.
 """.
--spec to_wire(type_desc(), term()) -> term().
+-spec to_wire(thrift_runtime_protocol:type_desc(), term()) -> term().
 to_wire({struct, {ref, Module, Name}}, Value) ->
     case thrift_runtime_native:is_native(Value) of
         true ->
@@ -373,12 +226,12 @@ to_wire_ref(Module, Name, Value) ->
     end.
 
 -doc "Converts a wire value to the struct's default representation.".
--spec from_wire(type_desc(), term()) -> term().
+-spec from_wire(thrift_runtime_protocol:type_desc(), term()) -> term().
 from_wire(Desc, Value) ->
     from_wire(Desc, Value, record).
 
 -doc "Converts a wire value to the given representation.".
--spec from_wire(type_desc(), term(), thrift_runtime:repr()) -> term().
+-spec from_wire(thrift_runtime_protocol:type_desc(), term(), thrift_runtime:repr()) -> term().
 %% The generated `repr_index' converters own the {ref, _Module, _Name}
 %% map-input path when present; every other target keeps the descriptor
 %% engine below.
@@ -607,7 +460,7 @@ struct_mode(Module, Name) ->
         error:undef -> wire
     end.
 
--spec struct_fields(module(), binary()) -> [field_desc()].
+-spec struct_fields(module(), binary()) -> [thrift_runtime_protocol:field_desc()].
 struct_fields(Module, Name) ->
     {_, Fields} = Module:struct_info(Name),
     Fields.
@@ -629,7 +482,7 @@ record_to_wire(Module, Name, _Tag, FieldAtoms, Value) when is_map(Value) ->
 record_to_wire(_Module, _Name, _Tag, _FieldAtoms, Value) ->
     erlang:error({value_does_not_match_type, Value}).
 
--spec struct_to_wire([field_desc()], tuple()) -> map().
+-spec struct_to_wire([thrift_runtime_protocol:field_desc()], tuple()) -> map().
 struct_to_wire(Fields, Record) ->
     Values = tl(tuple_to_list(Record)),
     #{
@@ -697,7 +550,7 @@ native_map_to_wire(_Module, _Name, Value) ->
 %% Walks the declared fields, accepting either the binary field name or
 %% its generated field atom as the input key.
 
--spec declared_to_wire([{field_desc(), atom()}], map()) -> map().
+-spec declared_to_wire([{thrift_runtime_protocol:field_desc(), atom()}], map()) -> map().
 declared_to_wire(FieldsZip, Map) ->
     maps:from_list([
         {NameBin, to_wire(Type, V)}
@@ -748,13 +601,13 @@ map_mode_to_wire(_Module, _Name, _KeyType, Value) ->
 %% empty or carry two variants. The wire form is the same single-field
 %% struct map every representation shares.
 
--spec sum_to_wire([field_desc()], term()) -> map().
+-spec sum_to_wire([thrift_runtime_protocol:field_desc()], term()) -> map().
 sum_to_wire(Fields, {Tag, Value}) when is_atom(Tag) ->
     sum_field(Fields, Tag, Value);
 sum_to_wire(_Fields, Value) ->
     erlang:error({value_does_not_match_type, Value}).
 
--spec sum_field([field_desc()], atom(), term()) -> map().
+-spec sum_field([thrift_runtime_protocol:field_desc()], atom(), term()) -> map().
 sum_field([], Tag, _Value) ->
     erlang:error({value_does_not_match_type, Tag});
 sum_field([{_, _, Type, NameBin, _} | RestFields], Tag, Value) ->
@@ -768,7 +621,7 @@ sum_field([{_, _, Type, NameBin, _} | RestFields], Tag, Value) ->
 %% representation cannot express it, so it is a hard error (the facade
 %% turns it into `{error, {invalid_union, Map}}').
 
--spec sum_from_wire([field_desc()], map(), thrift_runtime:repr()) -> {atom(), term()}.
+-spec sum_from_wire([thrift_runtime_protocol:field_desc()], map(), thrift_runtime:repr()) -> {atom(), term()}.
 sum_from_wire(Fields, WireMap, Repr) when map_size(WireMap) =:= 1 ->
     [NameBin] = maps:keys(WireMap),
     case lists:keyfind(NameBin, 4, Fields) of
@@ -784,7 +637,7 @@ sum_from_wire(_Fields, WireMap, _Repr) ->
 %% wire -> record | map | struct
 %%--------------------------------------------------------------------
 
--spec struct_from_wire(atom(), [field_desc()], map()) -> tuple().
+-spec struct_from_wire(atom(), [thrift_runtime_protocol:field_desc()], map()) -> tuple().
 struct_from_wire(Tag, Fields, Map) ->
     Values = [
         case Map of
@@ -800,15 +653,15 @@ struct_from_wire(Tag, Fields, Map) ->
 %% `__struct__` tag through nesting, `record` produces records for every
 %% record-mode struct on the path.
 
--spec wire_to_atom_map([field_desc()], map()) -> map().
+-spec wire_to_atom_map([thrift_runtime_protocol:field_desc()], map()) -> map().
 wire_to_atom_map(Fields, Map) ->
     wire_to_fields(Fields, Map, map).
 
--spec wire_to_struct_map(atom(), [field_desc()], map()) -> map().
+-spec wire_to_struct_map(atom(), [thrift_runtime_protocol:field_desc()], map()) -> map().
 wire_to_struct_map(Tag, Fields, Map) ->
     maps:put('__struct__', Tag, wire_to_fields(Fields, Map, struct)).
 
--spec wire_to_fields([field_desc()], map(), thrift_runtime:repr()) -> map().
+-spec wire_to_fields([thrift_runtime_protocol:field_desc()], map(), thrift_runtime:repr()) -> map().
 wire_to_fields(Fields, Map, Repr) ->
     maps:from_list([
         {field_atom(NameBin), from_wire(Type, V, Repr)}
@@ -817,7 +670,7 @@ wire_to_fields(Fields, Map, Repr) ->
         V <- [maps:get(NameBin, Map)]
     ]).
 
--spec map_mode_from_wire([field_desc()], atom() | binary(), map()) -> map().
+-spec map_mode_from_wire([thrift_runtime_protocol:field_desc()], atom() | binary(), map()) -> map().
 map_mode_from_wire(Fields, atom, Map) ->
     wire_to_fields(Fields, Map, record);
 map_mode_from_wire(Fields, binary, Map) ->

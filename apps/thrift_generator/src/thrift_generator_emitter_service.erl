@@ -297,21 +297,43 @@ server_forms(Svc, Mod, TypesMod, ServerMod) ->
             io_lib:format(
                 "Server entry points for the ~ts service. `start_link/1`"
                 " takes the same options map as `thrift_runtime_server`"
-                " (minus `service`).",
+                " (minus `service`; multiplexed starts pass `services`"
+                " instead and the injection is skipped).",
                 [Svc#tg_service.name]
             ),
             service_doc_suffix(Svc)
         ]),
     V = thrift_generator_emitter_syntax:var_fun(),
-    MapUpdate =
+    %% The representation bridge (`record_api`, `types`) applies to every
+    %% start; the single-service `service' injection only to ones without
+    %% a `services' map — the runtime's strict validation reads both as
+    %% mixing service modes, and the multiplex dispatch never consults
+    %% the single-service key.
+    BridgeUpdate =
         erl_syntax:map_expr(
             V("Opts"),
             [
-                %% The plain atom, not ?MODULE: `revert_forms' does not
-                %% expand macros.
-                thrift_generator_emitter_syntax:map_field(service, thrift_generator_emitter_syntax:abstract(ServerMod)),
                 thrift_generator_emitter_syntax:map_field(record_api, thrift_generator_emitter_syntax:abstract(true)),
                 thrift_generator_emitter_syntax:map_field(types, thrift_generator_emitter_syntax:abstract(TypesMod))
+            ]
+        ),
+    ServiceUpdate =
+        erl_syntax:map_expr(
+            V("Injected"),
+            [
+                %% The plain atom, not ?MODULE: `revert_forms' does not
+                %% expand macros.
+                thrift_generator_emitter_syntax:map_field(service, thrift_generator_emitter_syntax:abstract(ServerMod))
+            ]
+        ),
+    ModeCase =
+        erl_syntax:case_expr(
+            thrift_generator_emitter_syntax:application(maps, is_key, [
+                erl_syntax:atom(services), V("Opts")
+            ]),
+            [
+                erl_syntax:clause([erl_syntax:atom(true)], none, [V("Injected")]),
+                erl_syntax:clause([erl_syntax:atom(false)], none, [ServiceUpdate])
             ]
         ),
     thrift_generator_emitter_syntax:header(ServerMod, Mod#tg_module.path) ++
@@ -335,12 +357,24 @@ server_forms(Svc, Mod, TypesMod, ServerMod) ->
             <<
                 "Starts the server supervisor with the given options (the"
                 " same map as `thrift_runtime_server`, minus `service`)."
+                " With a `services' map the single-service injection is"
+                " skipped: multiplexed hosting passes validation as-is."
             >>
         ) ++
         thrift_generator_emitter_syntax:fn_form(start_link, [
             erl_syntax:clause(
                 [V("Opts")], none, [
-                    thrift_generator_emitter_syntax:application(thrift_runtime_server, start_link, [MapUpdate])
+                    thrift_generator_emitter_syntax:application(thrift_runtime_server, start_link, [
+                        erl_syntax:application(erl_syntax:atom(server_opts), [V("Opts")])
+                    ])
+                ]
+            )
+        ]) ++
+        thrift_generator_emitter_syntax:fn_form(server_opts, [
+            erl_syntax:clause(
+                [V("Opts")], none, [
+                    erl_syntax:match_expr(V("Injected"), BridgeUpdate),
+                    ModeCase
                 ]
             )
         ]) ++
@@ -388,7 +422,7 @@ client_forms(Svc, Mod, ServerMod, ClientMod, Ctx) ->
 
 %% One wrapper pair per function: `Name/N` applies the default timeout,
 %% `Name/(N+1)` the call itself. Non-oneway replies come back through
-%% `thrift_runtime_record:call_result_from_wire`, so records surface here.
+%% `thrift_runtime_rpc:call_result_from_wire`, so records surface here.
 
 -spec client_fn(#tg_function{}, #ectx{}) ->
     {[erl_syntax:forms()], [erl_syntax:forms()]}.
@@ -406,7 +440,7 @@ client_fn(F, Ctx) ->
     %% client a foreign descriptor.
     WireArgs =
         erl_syntax:application(
-            erl_syntax:atom(thrift_runtime_record),
+            erl_syntax:atom(thrift_runtime_rpc),
             erl_syntax:atom(args_to_wire),
             [
                 thrift_generator_emitter_syntax:abstract(thrift_generator_ir:params_desc(F, Ctx)),
@@ -422,7 +456,7 @@ client_fn(F, Ctx) ->
                 RawCall = client_bridge_call(call, WireName, WireArgs),
                 [
                     erl_syntax:application(
-                        erl_syntax:atom(thrift_runtime_record),
+                        erl_syntax:atom(thrift_runtime_rpc),
                         erl_syntax:atom(call_result_from_wire),
                         [
                             thrift_generator_emitter_syntax:abstract(thrift_generator_ir:reply_desc(F, Ctx)),

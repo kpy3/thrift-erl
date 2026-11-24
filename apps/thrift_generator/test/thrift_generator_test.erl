@@ -43,13 +43,14 @@
     const_ref_test/0,
     oneway_test/0,
     implicit_field_ids_left_undefined_test/0,
+    public_facade_exports_test/0,
     reserved_keyword_error_test/0,
     syntax_error_test/0,
     keyword_field_names_test/0
 ]).
 
 namespace_annotations_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"namespace erl test (erl.note = \"hello\")">>
     ),
     #thrift_generator_document{headers = [Namespace]} = Doc#thrift_generator_node.payload,
@@ -59,7 +60,7 @@ namespace_annotations_test() ->
     ok.
 
 star_namespace_annotations_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"namespace * test (erl.note = \"hello\")">>
     ),
     #thrift_generator_document{headers = [Namespace]} = Doc#thrift_generator_node.payload,
@@ -69,7 +70,7 @@ star_namespace_annotations_test() ->
     ok.
 
 typedef_node_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"typedef i64 UserId (erl.type = \"nominal\")">>
     ),
     #thrift_generator_document{definitions = [Typedef]} = Doc#thrift_generator_node.payload,
@@ -79,21 +80,21 @@ typedef_node_test() ->
     ok.
 
 uuid_type_test() ->
-    {ok, Doc} = thrift_generator:parse_string(<<"struct S { 1: uuid id }">>),
+    {ok, Doc} = thrift_generator_idl:parse_string(<<"struct S { 1: uuid id }">>),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
     #thrift_generator_struct{fields = [Field]} = Struct#thrift_generator_node.payload,
     #thrift_generator_field{type = {base, uuid, #{}}} = Field#thrift_generator_node.payload,
     ok.
 
 byte_alias_test() ->
-    {ok, Doc} = thrift_generator:parse_string(<<"struct S { 1: byte b }">>),
+    {ok, Doc} = thrift_generator_idl:parse_string(<<"struct S { 1: byte b }">>),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
     #thrift_generator_struct{fields = [Field]} = Struct#thrift_generator_node.payload,
     #thrift_generator_field{type = {base, i8, #{}}} = Field#thrift_generator_node.payload,
     ok.
 
 container_type_annotations_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"struct S { 1: list<i32 (foo = \"bar\")> xs }">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
@@ -108,7 +109,7 @@ field_type_annotations_test() ->
     %% to the type; annotations after the name are the field's own.
     %% `erl.set` is the canonical case: only the type position reaches
     %% the generated descriptor.
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"struct S { 1: set<string> (erl.set = \"ordset\") ids }">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
@@ -119,7 +120,7 @@ field_type_annotations_test() ->
     ok.
 
 field_own_annotations_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"struct S { 1: set<string> ids (erl.note = \"x\") }">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
@@ -130,7 +131,7 @@ field_own_annotations_test() ->
     ok.
 
 doc_comment_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"/** A struct.\n * Second line. */\nstruct S {}">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
@@ -138,7 +139,7 @@ doc_comment_test() ->
     ok.
 
 line_doc_comment_test() ->
-    {ok, Doc} = thrift_generator:parse_string(<<"/// An enum.\nenum E { A }">>),
+    {ok, Doc} = thrift_generator_idl:parse_string(<<"/// An enum.\nenum E { A }">>),
     #thrift_generator_document{definitions = [Enum]} = Doc#thrift_generator_node.payload,
     ?assertEqual(<<"An enum.">>, Enum#thrift_generator_node.doc),
     #thrift_generator_enum{values = [{<<"A">>, undefined, #{}, undefined}]} =
@@ -149,7 +150,7 @@ line_doc_comment_test() ->
 %% `/* */') — a line comment, never opened inside a string literal.
 
 hash_comment_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"# leading\nstruct S {\n  1: string name # trailing\n  2: string tag = \"a#b\"\n}">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
@@ -165,7 +166,7 @@ hash_comment_test() ->
 %% definition still attaches and consecutive docs merge into one.
 
 header_doc_comment_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<
             "/** File-level prose. */\n"
             "include \"other.thrift\"\n"
@@ -185,7 +186,7 @@ header_doc_comment_test() ->
     ok.
 
 merged_doc_comment_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"/** First block. */\n/// Second line.\nstruct S {}">>
     ),
     [Struct] = Doc#thrift_generator_node.payload#thrift_generator_document.definitions,
@@ -193,7 +194,7 @@ merged_doc_comment_test() ->
     ok.
 
 trailing_body_doc_comment_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<
             "namespace erl traildoc\n"
             "union U {\n"
@@ -253,7 +254,7 @@ snake_case_names_test() ->
     ok.
 
 enum_values_test() ->
-    {ok, Doc} = thrift_generator:parse_string(<<"enum E { A, B = 5, C }">>),
+    {ok, Doc} = thrift_generator_idl:parse_string(<<"enum E { A, B = 5, C }">>),
     #thrift_generator_document{definitions = [Enum]} = Doc#thrift_generator_node.payload,
     #thrift_generator_enum{values = Values} = Enum#thrift_generator_node.payload,
     ?assertEqual(
@@ -267,13 +268,13 @@ enum_values_test() ->
     ok.
 
 empty_enum_test() ->
-    {ok, Doc} = thrift_generator:parse_string(<<"enum E {}">>),
+    {ok, Doc} = thrift_generator_idl:parse_string(<<"enum E {}">>),
     #thrift_generator_document{definitions = [Enum]} = Doc#thrift_generator_node.payload,
     #thrift_generator_enum{values = []} = Enum#thrift_generator_node.payload,
     ok.
 
 const_literal_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"const map<i32, string> M = { 1 : \"a\", 2 : \"b\" }">>
     ),
     #thrift_generator_document{definitions = [Constant]} = Doc#thrift_generator_node.payload,
@@ -285,7 +286,7 @@ const_literal_test() ->
     ok.
 
 const_ref_test() ->
-    {ok, Doc} = thrift_generator:parse_string(<<"const Numberz myNumberz = Numberz.ONE;">>),
+    {ok, Doc} = thrift_generator_idl:parse_string(<<"const Numberz myNumberz = Numberz.ONE;">>),
     #thrift_generator_document{definitions = [Constant]} = Doc#thrift_generator_node.payload,
     #thrift_generator_constant{
         name = <<"myNumberz">>,
@@ -295,7 +296,7 @@ const_ref_test() ->
     ok.
 
 oneway_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"service S { oneway void ping(), string echo(1: string msg) throws (1: E e) }">>
     ),
     #thrift_generator_document{definitions = [Service]} = Doc#thrift_generator_node.payload,
@@ -307,7 +308,7 @@ oneway_test() ->
     ok.
 
 implicit_field_ids_left_undefined_test() ->
-    {ok, Doc} = thrift_generator:parse_string(<<"struct Legacy { string a, i32 b }">>),
+    {ok, Doc} = thrift_generator_idl:parse_string(<<"struct Legacy { string a, i32 b }">>),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,
     #thrift_generator_struct{fields = Fields} = Struct#thrift_generator_node.payload,
     ?assertMatch(
@@ -319,19 +320,34 @@ implicit_field_ids_left_undefined_test() ->
     ),
     ok.
 
+public_facade_exports_test() ->
+    %% The public facade keeps only the generation/check/clean entries;
+    %% the parser-level helpers live in the internal thrift_generator_idl.
+    {module, thrift_generator} = code:ensure_loaded(thrift_generator),
+    ?assert(erlang:function_exported(thrift_generator, generate, 1)),
+    ?assert(erlang:function_exported(thrift_generator, generate, 2)),
+    ?assert(erlang:function_exported(thrift_generator, check, 1)),
+    ?assert(erlang:function_exported(thrift_generator, check, 2)),
+    ?assert(erlang:function_exported(thrift_generator, clean, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, tokens, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, ast, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, parse_file, 1)),
+    ?assertNot(erlang:function_exported(thrift_generator, parse_string, 1)),
+    ok.
+
 reserved_keyword_error_test() ->
-    ?assertMatch({error, _}, thrift_generator:parse_string(<<"struct catch {}">>)),
+    ?assertMatch({error, _}, thrift_generator_idl:parse_string(<<"struct catch {}">>)),
     ok.
 
 syntax_error_test() ->
-    ?assertMatch({error, _}, thrift_generator:parse_string(<<"struct">>)),
+    ?assertMatch({error, _}, thrift_generator_idl:parse_string(<<"struct">>)),
     ok.
 
 %% Apache Thrift 0.18+ (THRIFT-5626) accepts IDL keywords as field
 %% names; the field keeps the keyword's literal text.
 
 keyword_field_names_test() ->
-    {ok, Doc} = thrift_generator:parse_string(
+    {ok, Doc} = thrift_generator_idl:parse_string(
         <<"struct S { 1: required i32 oneway, 2: optional string type, 3: list<bool> map, 4: binary i8 }">>
     ),
     #thrift_generator_document{definitions = [Struct]} = Doc#thrift_generator_node.payload,

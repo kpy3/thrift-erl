@@ -90,7 +90,7 @@ both:
     port := inet:port_number(),
     service := module(),
     transport => thrift_runtime_socket:transport(),
-    protocol => binary | compact | module(),
+    protocol => thrift_runtime:protocol(),
     timeout => pos_integer(),
     max_frame_size => pos_integer(),
     http_path => binary(),
@@ -110,11 +110,11 @@ both:
     %% answer is the bare atom
     ok
     %% wire level: the exception carries its name; after
-    %% `thrift_runtime_record:call_result_from_wire/3' the value alone
+    %% `thrift_runtime_rpc:call_result_from_wire/3' the value alone
     %% remains — its representation identifies the exception.
     | {ok, term()}
-    | {error, {exception, binary(), thrift_runtime_binary:struct_value()}}
-    | {error, {exception, thrift_runtime_binary:struct_value()}}
+    | {error, {exception, binary(), thrift_runtime_protocol:struct_value()}}
+    | {error, {exception, thrift_runtime_protocol:struct_value()}}
     | {error, {application_exception, binary(), non_neg_integer(), binary()}}
     | {error, term()}.
 
@@ -182,15 +182,31 @@ both:
 -doc """
 Connects to the server and links the client to the caller; fails if
 the connection cannot be made.
+
+The options are validated and normalized before anything starts: an
+invalid map answers `{error, Reason}` — the strict option vocabulary of
+`thrift_runtime_options:client_options/1`, e.g. `{unknown_option, Key}`
+or the protocol axis' own `{bad_protocol, Value}` — without starting a
+process or opening a connection.
 """.
 -spec start_link(options()) -> gen_server:start_ret().
 start_link(Opts) ->
-    %% A failed connect answers {error, Reason} from init and then the
-    %% child exits with the same reason; trapping around the start
-    %% shields the (non-trapping) caller from that exit race, so it
-    %% sees the {error, Reason} answer only.
+    case thrift_runtime_options:client_options(Opts) of
+        {ok, Normalized} ->
+            start_link_normalized(Normalized);
+        {error, _} = Error ->
+            Error
+    end.
+
+%% A failed connect answers {error, Reason} from init and then the
+%% child exits with the same reason; trapping around the start
+%% shields the (non-trapping) caller from that exit race, so it
+%% sees the {error, Reason} answer only.
+
+-spec start_link_normalized(map()) -> gen_server:start_ret().
+start_link_normalized(Normalized) ->
     process_flag(trap_exit, true),
-    Result = gen_server:start_link(?MODULE, Opts, []),
+    Result = gen_server:start_link(?MODULE, Normalized, []),
     process_flag(trap_exit, false),
     case Result of
         {ok, Pid} ->
@@ -214,7 +230,12 @@ instead, such as pool workers started by a pool library.
 """.
 -spec start(options()) -> gen_server:start_ret().
 start(Opts) ->
-    gen_server:start(?MODULE, Opts, []).
+    case thrift_runtime_options:client_options(Opts) of
+        {ok, Normalized} ->
+            gen_server:start(?MODULE, Normalized, []);
+        {error, _} = Error ->
+            Error
+    end.
 
 -doc "Closes the connection; outstanding calls fail with `{error, closed}`.".
 -spec stop(pid()) -> ok.
@@ -257,43 +278,38 @@ get_and_reset_stats(Pid) ->
 
 %% gen_server callbacks
 
+%% The init argument is the normalized map `start/1' produced:
+%% required keys present, defaults applied, the protocol resolved to
+%% its module — nothing here re-reads or re-defaults caller options.
+
 -doc false.
 -spec init(options()) -> {ok, #state{}} | {stop, term()}.
 init(Opts) ->
-    case thrift_runtime_options:on_event(Opts) of
-        {ok, Handler} -> init(Opts, Handler);
-        {error, Reason} -> {stop, Reason}
-    end.
-
--spec init(options(), thrift_runtime_events:handler()) -> {ok, #state{}} | {stop, term()}.
-init(Opts, Handler) ->
-    Timeout = thrift_runtime_options:connect_timeout(Opts),
+    Timeout = maps:get(connect_timeout, Opts),
     Connect =
         thrift_runtime_socket:connect(
-            maps:get(host, Opts), maps:get(port, Opts), maps:get(ssl_opts, Opts, undefined), Timeout
+            maps:get(host, Opts), maps:get(port, Opts), maps:get(ssl_opts, Opts), Timeout
         ),
-    case {Connect, thrift_runtime_options:protocol_module(Opts)} of
-        {{ok, Socket}, {ok, Protocol}} ->
-            ActiveN = thrift_runtime_options:active_n(Opts),
+    case Connect of
+        {ok, Socket} ->
+            ActiveN = maps:get(active_n, Opts),
             ok = thrift_runtime_socket:set_active(Socket, ActiveN),
             Service = maps:get(service, Opts),
             {ok, #state{
                 socket = Socket,
                 service_info = Service:service_info(),
-                protocol = Protocol,
-                transport = thrift_runtime_options:transport(Opts),
-                multiplex = maps:get(multiplex, Opts, undefined),
-                max_frame_size = thrift_runtime_options:max_frame_size(Opts),
-                http_path = thrift_runtime_options:http_path(Opts),
+                protocol = maps:get(protocol, Opts),
+                transport = maps:get(transport, Opts),
+                multiplex = maps:get(multiplex, Opts),
+                max_frame_size = maps:get(max_frame_size, Opts),
+                http_path = maps:get(http_path, Opts),
                 host_value = host_value(maps:get(host, Opts), maps:get(port, Opts)),
                 active_n = ActiveN,
-                max_queue_depth = maps:get(max_queue_depth, Opts, infinity),
-                handler = Handler
+                max_queue_depth = maps:get(max_queue_depth, Opts),
+                handler = maps:get(on_event, Opts)
             }};
-        {{error, Reason}, _} ->
-            {stop, Reason};
-        {_, {error, Reason}} ->
-            {stop, {protocol, Reason}}
+        {error, Reason} ->
+            {stop, Reason}
     end.
 
 -doc false.
@@ -702,7 +718,7 @@ result_value(Info, Values) ->
 %% carries one for the active protocol; the descriptor engine otherwise,
 %% and also when a stale hook disappeared in a reload.
 
--spec encode_params(map(), module(), thrift_runtime_binary:type_desc(), map()) ->
+-spec encode_params(map(), module(), thrift_runtime_protocol:type_desc(), map()) ->
     {ok, iodata()} | {error, term()}.
 encode_params(Info, Protocol, ParamsDesc, Values) ->
     case rpc_hook(Info, Protocol, params) of
@@ -756,18 +772,18 @@ rpc_hook(Info, Protocol, Kind) ->
 %% (the generic struct representation). Fallback-only: the hook path
 %% never builds it.
 
--spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_binary:type_desc().
+-spec result_desc(thrift_runtime_service:function_info()) -> thrift_runtime_protocol:type_desc().
 result_desc(#{reply := ReplyType} = Info) when ReplyType =/= undefined ->
     {struct, {struct, [{0, default, ReplyType, <<"success">>, undefined} | exception_fields(Info)]}};
 result_desc(#{} = Info) ->
     {struct, {struct, exception_fields(Info)}}.
 
--spec exception_fields(thrift_runtime_service:function_info()) -> [thrift_runtime_binary:field_desc()].
+-spec exception_fields(thrift_runtime_service:function_info()) -> [thrift_runtime_protocol:field_desc()].
 exception_fields(Info) ->
     maps:get(exceptions, Info, []).
 
--spec exception_field(map(), [thrift_runtime_binary:field_desc()]) ->
-    {ok, binary(), thrift_runtime_binary:struct_value()} | none.
+-spec exception_field(map(), [thrift_runtime_protocol:field_desc()]) ->
+    {ok, binary(), thrift_runtime_protocol:struct_value()} | none.
 exception_field(Values, Exceptions) ->
     Found = [
         {exception_name(FieldDesc), Value}
@@ -780,7 +796,7 @@ exception_field(Values, Exceptions) ->
         [] -> none
     end.
 
--spec exception_name(thrift_runtime_binary:field_desc()) -> binary().
+-spec exception_name(thrift_runtime_protocol:field_desc()) -> binary().
 exception_name({_, _, {struct, {ref, _, StructName}}, _, _}) -> StructName;
 exception_name({_, _, _, FieldName, _}) -> FieldName.
 

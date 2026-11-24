@@ -13,25 +13,11 @@ against its official compact, JSON, HTTP and multiplexed clients.
   - [What you gain](#what-you-gain)
   - [Where the in-process contract differs](#where-the-in-process-contract-differs)
 - [Layout](#layout)
-- [Build and tests](#build-and-tests)
-- [CLI](#cli)
-- [rebar3 plugin](#rebar3-plugin)
-- [Example](#example)
+- [Build requirements](#build-requirements)
+- [Getting started](#getting-started)
+- [Encode, decode and convert](#encode-decode-and-convert)
 - [Representations and protocols](#representations-and-protocols)
-  - [One struct, four representations](#one-struct-four-representations)
-  - [The compact protocol](#the-compact-protocol)
-  - [The JSON protocol](#the-json-protocol)
-  - [Advanced: explicit descriptors, streaming codecs, custom protocols](#advanced-explicit-descriptors-streaming-codecs-custom-protocols)
-- [Public API migration](docs/public-api-migration.md)
-- [The HTTP transport](#the-http-transport)
-- [Pooling](#pooling)
-- [Reconnecting client](#reconnecting-client)
-- [Observability](#observability)
-- [Multiplexed services](#multiplexed-services)
-- [TLS](#tls)
-- [Namespaces](#namespaces)
-- [Codegen annotations](#codegen-annotations)
-- [Performance](#performance)
+- [References](#references)
 - [License](#license)
 
 ## Compared to Apache Thrift
@@ -50,10 +36,10 @@ the in-process contract differs, it is deliberate.
   per-struct wire codec into every generated module, and named struct
   references dispatch straight into it — no descriptor interpretation
   at runtime (the generic engine remains for introspection, inline
-  descriptors and as the equivalence reference). Measured 4.6–8.3× on
-  the binary protocol, 2.6–5.9× on compact and 10.1–16.8× on JSON encode
-  against the official 0.25.0 Erlang runtime; JSON decode runs ahead
-  (1.1–1.5×) (see Performance; reproducible with `./scripts/bench`).
+  descriptors and as the equivalence reference). Measured several-fold
+  faster than the official 0.25.0 Erlang runtime on encode across all
+  three protocols, with decode ahead on every row (see
+  [Performance](docs/performance.md); reproducible with `./scripts/bench`).
 - **Errors are values.** Decoding answers `{error, trailing}` /
   `{error, truncated}` instead of throwing; a declared server
   exception comes back to the client typed, as
@@ -74,18 +60,20 @@ the in-process contract differs, it is deliberate.
 - **Operational surface.** Graceful drain on server stop, a
   reconnecting client with backoff, per-worker statistics for pool
   health checks, crash-isolated `on_event` observability callbacks —
-  on top of TLS, multiplexed services and an HTTP/1.1 transport.
+  on top of TLS, multiplexed services and an HTTP/1.1 transport. See
+  [RPC and operations](docs/rpc.md).
 - **Codegen tooling.** A rebar3 plugin with a `--check` freshness gate
   for CI, unchanged-file skipping so regeneration does not churn
   mtimes, and introspection exports (`struct_info/1`, `enum_info/1`,
-  `function_info/2`, ...).
+  `function_info/2`, ...). See the
+  [Generator reference](docs/generator.md).
 
 ### Where the in-process contract differs
 
 - Sets decode to plain wire lists by default; `erl.set = "sets"`
   reproduces the official `sets:set()` representation per type or
-  file-wide (see [Codegen annotations](#codegen-annotations)) — parity
-  is on the wire, not in the in-process term.
+  file-wide (see [Codegen annotations](docs/generator.md#codegen-annotations))
+  — parity is on the wire, not in the in-process term.
 - Field defaults live in the generated record literals, not in decode:
   a missing optional field decodes as `undefined`; the default value is
   what a hand-constructed record carries.
@@ -95,7 +83,8 @@ the in-process contract differs, it is deliberate.
 - The HTTP transport speaks an HTTP/1.1 subset with Content-Length
   framing only — no chunked encoding — and a oneway call is still a
   request/response exchange: the server answers 200 before running the
-  handler, so the client and server never desynchronize.
+  handler, so the client and server never desynchronize. See
+  [RPC and operations](docs/rpc.md#the-http-transport).
 
 ## Layout
 
@@ -110,164 +99,35 @@ vendor/apache-thrift-erl official Apache Thrift Erlang runtime (0.25.0),
 Generated code depends only on `thrift_runtime` (kernel + stdlib).
 The generator is never a runtime dependency.
 
-## Build and tests
+## Build requirements
 
 Requires Erlang/OTP 28+.
 
 ```
 rebar3 compile
-rebar3 eunit        # unit tests + 10 PropEr codec properties
+rebar3 eunit        # unit tests + PropEr codec properties
 rebar3 ct           # loopback scenarios + golden interop
 rebar3 dialyzer
 rebar3 xref
 rebar3 fmt
 scripts/lint-elp    # ELP static analysis gate (needs the elp binary)
-./scripts/bench             # manual codec benchmark (not part of the suites)
-./scripts/bench-regression  # paired historical regression benchmark
 ```
 
-## CLI
+The benchmark scripts (`scripts/bench`, `scripts/bench-regression`,
+`scripts/bench-rpc`) are manual tools, not part of the suites; see
+[Performance](docs/performance.md).
 
-```
-rebar3 as prod escriptize
-_build/prod/bin/thrift_generator generate my_api.thrift -o src
-```
+## Getting started
 
-This generates `<mod>_types.erl` plus a `<mod>_types.hrl` include (one
-pair per IDL file) and three modules per service —
-`<prefix>_<svc>_client.erl`, `<prefix>_<svc>_server.erl`,
-`<prefix>_<svc>_handler.erl`, where `<prefix>` is the file's
-namespace-derived identifier prefix and `<svc>` is the snake-cased
-service name (`Ping` in `namespace erl ping.api` generates
-`ping_api_ping_client.erl` and friends). Files whose on-disk content
-already matches are left untouched, so regenerating an unchanged IDL
-does not churn mtimes.
-
-The commands are explicit — a bare file operand and the legacy
-`--check` flag are rejected with the usage, not remapped:
-
-- `thrift_generator generate <file.thrift> [flags]` — run the full
-  pipeline and write the generated sources;
-- `thrift_generator check <file.thrift> [flags]` — verify freshness
-  instead of writing (see below);
-- `thrift_generator clean [-o <out_dir>]` — delete the generated
-  files from the out dir.
-
-The full flag set for `generate` and `check`:
-
-- `-h` / `--help` — print the usage and exit;
-- `-o` / `--out-dir <dir>` — directory for the generated sources
-  (default: `src`);
-- `--repr record|map|native` — the value representation
-  (`erl.struct_type`) for definitions without an explicit annotation
-  of their own (default: record);
-- `--union-type record|sum` — the union representation
-  (`erl.union_type`) for unions without an explicit annotation
-  (default: record);
-- `--set list|sets|ordset` — the in-process set implementation
-  (`erl.set`) for sets without an explicit annotation (default: list);
-- `--typedef-type alias|nominal` — the typedef flavor (`erl.type`)
-  for typedefs without an explicit annotation (default: alias);
-- `--enum-case preserve|lower` — the casing surfaced enum member atoms
-  use (`erl.enum_case`) for enums without an explicit annotation
-  (default: preserve);
-- `--compact-errors` — one-line error entries (see below).
-
-Each of the five option axes picks the generated flavor only where the
-IDL carries no explicit annotation of its own: an explicit annotation
-wins, and a file-wide namespace default (`erl.set` / `erl.union_type` /
-`erl.enum_case` on the `namespace erl` header) overrides the flag for
-its file.
-
-Errors render as rebar3/elp-style source excerpts — the offending
-line under a gutter, a `╰──` marker naming the problem. Positions
-carry columns (the scanner threads `{Line, Column}` pairs through
-lexer, parser and semantic pass), so the marker sits on the exact
-column:
-
-```
-  ┌─ my_api.thrift:9:23:
-  │
-9 │ PingReply ping(1: PingRequest request) throws(1: NoSuchMessage err),
-  │                      ╰── duplicate field id 1 (already used by message)
-```
-
-`--compact-errors` switches to one-line `path:line[:column]: message`
-entries (the form the rebar3 plugin falls back to when the source file
-cannot be read back).
-
-`check` verifies instead of writing: it fails (exit 1, listing the
-drifted files) unless every generated artifact already exists in the
-out dir with the exact content the IDL would produce — a CI freshness
-gate:
-
-```
-_build/prod/bin/thrift_generator check my_api.thrift -o src
-```
-
-## rebar3 plugin
-
-In the consumer project's `rebar.config`:
+Add the packages (Hex: `thrift_runtime`, `rebar3_thrift`; or the
+checkout equivalents) and declare the IDL in `rebar.config`:
 
 ```erlang
 {plugins, [rebar3_thrift]},
-
-{thrift, [
-    {files, ["src/my_api.thrift"]},
-    {out_dir, "src"},
-    {repr, record},        %% record | map | native
-    {union_type, record},  %% record | sum
-    {set, list},           %% list | sets | ordset
-    {typedef_type, alias}, %% alias | nominal
-    {enum_case, preserve}  %% preserve | lower
-]},
-
-%% regenerate before every compilation:
+{deps, [thrift_runtime]},
+{thrift, [{files, ["src/ping.thrift"]}]},
 {provider_hooks, [{pre, [{compile, {default, thrift}}]}]}
 ```
-
-Every entry is validated by the generator's own options contract: a
-config typo fails the provider with the rendered `{unknown_option,
-Key}` error, an invalid value with the rendered `{bad_option, {Key,
-Value, Allowed}}` error — the same terms the library returns and the
-CLI prints — instead of a raw crash. The five option axes mirror the
-standalone generator's flags and apply only to definitions without an
-explicit annotation of their own — a file-wide namespace default
-overrides the option for its file. The freshness checks (`rebar3
-thrift --check` and the CLI `check` command) count artifacts as stale
-unless they were generated with the same option values.
-
-`rebar3 thrift` regenerates the sources (unchanged files are not
-rewritten). `rebar3 thrift --check` verifies freshness instead of
-writing and fails the build when any generated artifact is missing or
-stale relative to the IDL:
-
-```
-rebar3 thrift --check
-```
-
-`rebar3 thrift clean` deletes the generated files from the out dir:
-every `.erl`/`.hrl` carrying the generator's `Autogenerated by Thrift
-Generator` banner. The banner — not the current IDL — decides, so
-files orphaned by a removed service or a deleted IDL are cleaned up
-too, and anything not carrying the banner is left alone. The
-configured out dir is validated through the same shared options
-contract before anything is deleted. To delete on project cleanup,
-hook the namespaced clean provider into `rebar3 clean`:
-
-```erlang
-{provider_hooks, [{post, [{clean, {thrift, clean}}]}]}
-```
-
-For local development the plugin is attached via `_checkouts/`:
-
-```
-mkdir -p _checkouts
-ln -s /path/to/thrift-erl/apps/rebar3_thrift _checkouts/rebar3_thrift
-ln -s /path/to/thrift-erl/apps/thrift_generator _checkouts/thrift_generator
-```
-
-## Example
 
 IDL (`src/ping.thrift`):
 
@@ -292,6 +152,13 @@ service Ping {
   oneway void poke()
 }
 ```
+
+`rebar3 compile` generates `ping_api_types.erl`/`ping_api_types.hrl`
+plus `ping_api_ping_client/server/handler` (the namespace prefix
+`ping.api` becomes `ping_api`; see
+[Namespaces](docs/generator.md#namespaces)). Generation can also run
+from the library or the standalone CLI — see the
+[Generator reference](docs/generator.md).
 
 Handler (include the generated header; when a thrift file includes
 others, bring their `<mod>_types.hrl` files in first — the generated
@@ -329,77 +196,19 @@ ok = ping_api_ping_server:stop(Server).
 
 Calls answer `ok` for a void or oneway result, `{ok, Value}` for a
 non-void reply and `{error, {exception, ...}}` for a declared
-exception — generated, dynamic (`thrift_runtime_client`) and
-reconnecting callers alike. The handler side mirrors the shapes: a
-void or oneway callback answers the bare atom `ok`, a non-void one
-`{ok, Value}` or the exception tuple; the old void shape `{ok,
-undefined}` is an unsupported result. An unsupported handler result
-answers the call with `TApplicationException` `INTERNAL_ERROR` and
-emits one `handler_error` event (oneway emits the event only), and
-never changes the wire payload — a void function has no success field,
-so `ok` is the existing empty result struct.
+exception — generated, dynamic and reconnecting callers alike. Every
+`start_link` option (transports, protocols, timeouts, TLS, pooling,
+multiplexing, observability, graceful drain) and its exact validation
+errors are documented in
+[RPC and operations](docs/rpc.md).
 
-`start_link` options (a map at creation time, not app env):
-
-- `service` — the module implementing the `thrift_runtime_service`
-  behaviour (for generated services, `<prefix>_<svc>_server`);
-  required by the client and by a single-service server (a multiplexed
-  server passes `services` instead) — the generated server supplies
-  its own;
-- `transport` — `framed` (the default), `buffered`, or `http`;
-- `protocol` — `binary` (the default), `compact`, `json`, or any
-  module implementing the `thrift_runtime_protocol` behaviour;
-- server: `port`, `handler`, `name` (the locally registered name of
-  the supervisor, default `thrift_runtime_server`), `max_frame_size`,
-  `max_connections`, `timeout` (the umbrella: TLS handshake and
-  inter-message silence), `handshake_timeout` / `idle_timeout` (naming
-  each meaning specifically), `active_n`, `backlog`;
-- client: `host`, `port`, `timeout` (connect and TLS handshake;
-  per-call timeouts ride the call itself; `connect_timeout` overrides
-  the umbrella), `max_frame_size`, `active_n`, `max_queue_depth` (how
-  many calls may wait while another is on the wire; overflow answers
-  `{error, queue_full}`; the default `infinity` keeps the classic
-  unbounded queue);
-- both: `on_event` — the observability callback (see
-  [Observability](#observability)).
-
-A plain `stop/1` takes the server down at once. `stop/2` with
-`#{drain => Timeout}` shuts down gracefully first: the listen socket
-closes, idle connections are dropped, and connections with an
-in-flight request answer it before exiting. The call returns when the
-last connection is gone — or at the deadline (`infinity` allowed; the
-deadline never fails the call, whatever it leaves over is then
-swept by the normal supervised stop, which lets a still-running
-exchange finish and fails the calls only of connections that cannot
-finish):
-
-```erlang
-ok = ping_api_ping_server:stop(Server, #{drain => 10_000}).
-```
-
-## Representations and protocols
-
-Structs live in two independent axes. The **protocol** axis picks the
-wire format (`binary`, `compact` and `json` are built in; any
-`thrift_runtime_protocol` module plugs in). The **representation** axis
-(`thrift_runtime:repr()`) picks the in-process shape:
-
-- `record` — the generated record (the default for plain structs);
-- `map` — plain atom-key maps matching the IDL field names;
-- `struct` — `#{__struct__ => Tag, Field => Value, ...}`, the tagged
-  map that survives round-trips without record definitions in scope;
-- `native` — EEP-79 native records (OTP 29+): a real datatype minted
-  from the struct descriptor, no compiled definitions needed to read
-  it (`records:get/2`, `records:get_name/1`, ...). Older releases
-  answer `{error, {unsupported_repr, native}}`.
-
-### One struct, four representations
+## Encode, decode and convert
 
 The generated types module is the normal entry point: `Type` selects
-the schema (the snake-cased IDL name, no namespace prefix), the options
-map carries the axes. Decoding the same `PingRequest` bytes in the four
-representations — only the record needs its hrl include, the maps and
-the native record need nothing:
+the schema (the snake-cased IDL name, no namespace prefix), the
+options map carries the axes. Decoding the same `PingRequest` bytes in
+the four representations — only the record needs its hrl include, the
+maps and the native record need nothing:
 
 ```erlang
 {ok, Req}    = ping_api_types:decode(ping_request, Bin),                    %% record (the default)
@@ -413,15 +222,11 @@ The value each binding carries:
 ```erlang
 Req = #ping_api_ping_request{message = <<"hi">>},
 Map = #{message => <<"hi">>},
-Struct = #{__struct__ => ping_api_ping_request, message => <<"hi">>},
+Struct = #{__struct__ => ping_api_ping_request, message = <<"hi">>},
 %% Native is a native record: pattern-matching it takes a compiled
 %% -record declaration, reading it takes nothing:
 <<"hi">> = records:get(message, Native).
 ```
-
-Details worth knowing: a field absent on the wire is absent from the
-maps (the record carries `undefined` in its slot instead), and the
-`__struct__` tag is the same record tag the record repr uses.
 
 Encoding accepts any representation and auto-detects it — every form
 encodes back to the same bytes:
@@ -432,33 +237,6 @@ encodes back to the same bytes:
 {ok, Bin} = ping_api_types:encode(ping_request, Struct),
 {ok, Bin} = ping_api_types:encode(ping_request, Native).
 ```
-
-The options map is validated, not silently ignored. `encode/3` accepts
-exactly `protocol` (default `binary`) and `strict` (default `false`);
-`decode/3` accepts exactly `protocol` and `repr` (absent `repr` falls
-back to the struct's schema-selected default). Unknown keys answer
-`{error, {unknown_option, Key}}`; a non-map options argument answers
-`{error, {bad_option, {options, Value, [map]}}}` — there are no
-positional protocol or repr forms. `strict => true` fails a
-map/struct-map input carrying keys that match no declared field
-(`{error, {unknown_fields, Keys}}`) instead of dropping them silently:
-
-```erlang
-{error, {unknown_fields, [extra]}} =
-    ping_api_types:encode(ping_request, #{message => <<"hi">>, extra => 1}, #{strict => true}).
-```
-
-Other protocols ride the same options vocabulary:
-
-```erlang
-{ok, Compact} = ping_api_types:encode(ping_request, Req, #{protocol => compact}),
-{ok, Json} = ping_api_types:encode(ping_request, Req, #{protocol => json}).
-```
-
-Decoding is strict: trailing bytes answer `{error, trailing}`,
-truncation `{error, truncated}`. A value that matches no
-representation answers `{error, {value_does_not_match_type, Value}}`
-from every entry point.
 
 `convert/3` reshapes typed values without touching bytes — the type is
 explicit, so the value's own tag is never consulted:
@@ -471,567 +249,64 @@ explicit, so the value's own tag is never consulted:
 %% convert/3 and decode alike.
 ```
 
-Both descriptors the advanced runtime facade accepts are one call
-away: `struct_info/1` answers the struct's inline descriptor (accepting
-the canonical type atom or the wire name), while `descriptor/1` hands
-out the named-ref descriptor:
-`{ok, Desc} = ping_api_types:descriptor(ping_request)`.
+Every protocol rides the same options vocabulary — `binary` (the
+default), `compact`, `json`, or any module implementing the
+`thrift_runtime_protocol` behaviour:
+
+```erlang
+{ok, Compact} = ping_api_types:encode(ping_request, Req, #{protocol => compact}),
+{ok, Req} = ping_api_types:decode(ping_request, Compact, #{protocol => compact}),
+{ok, Json} = ping_api_types:encode(ping_request, Req, #{protocol => json}),
+{ok, Req} = ping_api_types:decode(ping_request, Json, #{protocol => json}).
+```
+
+The options map is validated, not silently ignored — unknown keys,
+bad values and non-map arguments answer strict `{error, _}` terms —
+and decoding is strict: trailing bytes answer `{error, trailing}`,
+truncation `{error, truncated}`. Hand-written descriptors, the
+advanced runtime facade, streaming codecs and custom protocols are
+documented in [Advanced codecs](docs/advanced-codecs.md).
+
+## Representations and protocols
+
+Structs live in two independent axes. The **protocol** axis picks the
+wire format (`binary`, `compact` and `json` are built in; any
+`thrift_runtime_protocol` module plugs in). The **representation**
+axis (`thrift_runtime:repr()`) picks the in-process shape:
+
+- `record` — the generated record (the default for plain structs);
+- `map` — plain atom-key maps matching the IDL field names;
+- `struct` — `#{__struct__ => Tag, Field => Value, ...}`, the tagged
+  map that survives round-trips without record definitions in scope;
+- `native` — EEP-79 native records (OTP 29+): a real datatype minted
+  from the struct descriptor, no compiled definitions needed to read
+  it (`records:get/2`, `records:get_name/1`, ...). Older releases
+  answer `{error, {unsupported_repr, native}}`.
 
 The representation of a struct can also be pinned in the IDL with
 `erl.struct_type = "map"` — values become maps at the wire boundary in
-clients, servers and codecs (keys are atoms by default;
-`erl.struct_type.map.key_type = "binary"` keeps wire keys).
-
-Native records keep the representation uniform all the way down: a
-nested struct decodes into a native record of its own, and a native
-record encodes back to the same bytes as the tuple record would. The
-runtime mints values dynamically (no `-record #` declarations are
-emitted), so pattern matching one requires declaring `-record #name{}`
-in the consumer — reading through the `records` module needs nothing:
-
-```erlang
-{ok, Req} = ping_api_types:decode(ping_request, Bin, #{repr => native}),
-<<"hi">> = records:get(message, Req),
-{ok, Bin} = ping_api_types:encode(ping_request, Req).   %% auto-detected
-```
-
-Enums get `color_to_int/1` / `color_from_int/1` helpers, constants get
-zero-argument functions plus `-define` macros for scalars, and the
-header file declares typed records, record/enum aliases and those
-macros.
-
-### Advanced: explicit descriptors, streaming codecs, custom protocols
-
-The generated facade covers the common case; the runtime exposes the
-same contract for hand-written schemas and dynamic work, with an
-explicit descriptor instead of the type atom. The descriptor shape is
-the one `struct_info/1` returns; `descriptor/1` on the generated module
-hands out named-ref descriptors directly.
-
-```erlang
-{ok, Desc} = ping_api_types:descriptor(ping_request),
-{ok, Bin} = thrift_runtime:encode(Desc, Req),
-{ok, Map} = thrift_runtime:decode(Desc, Bin, #{repr => map}),
-{ok, Struct} = thrift_runtime:convert(Desc, Map, struct).
-```
-
-Differences from the generated facade: the advanced `decode/3` requires
-the `repr` option (there is no schema module to infer a default from),
-and the advanced `convert/3` takes the descriptor instead of the type
-atom. Everything else — option keys, error terms, strict decoding,
-the one-pass fast path — is identical.
-
-Streaming and framing stay on the protocol modules, below the facade:
-`thrift_runtime_binary:decode/2` answers `{ok, WireMap, Rest} | more |
-{error, _}` so transports can feed partial buffers, and the
-socket/framing layer (`thrift_runtime_socket:extract_message/4`) builds
-frames and buffered messages on top. Generated modules also carry
-internal per-struct wire codecs (`binary_codec/1`, `compact_codec/1`,
-`json_codec/1` hand out the pairs) that the runtime dispatches to —
-they are exported but classified internal (`-doc false`); call the
-facade instead of these.
-
-Any module implementing the `thrift_runtime_protocol` behaviour plugs
-into every `protocol` slot — the facade's `protocol` option, client and
-server options — resolved through `thrift_runtime:protocol_module/1`,
-which verifies the callback set.
-
-### The compact protocol
-
-`thrift_runtime_compact` implements the Apache compact wire format: zigzag
-varint integers, delta-encoded field ids, nibble-packed type tags and
-collections whose header carries the element type. Every `protocol`
-slot accepts the atom `compact` — clients, servers, the facade and the
-generated codecs all resolve it through `thrift_runtime:protocol_module/1`
-the same way as `binary`:
-
-```erlang
-{ok, Server} = ping_api_ping_server:start_link(#{
-    port => 9090, handler => ping_handler, protocol => compact
-}),
-{ok, Client} = ping_api_ping_client:start_link(#{
-    host => "127.0.0.1", port => 9090, protocol => compact, transport => buffered
-}),
-{ok, Bin} = ping_api_types:encode(ping_request, Req, #{protocol => compact}),
-{ok, Req, <<>>} = thrift_runtime_compact:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
-```
-
-The same values take up to ~2.5× fewer wire bytes than binary on
-container-heavy structs (see Performance). Booleans ride in the field header nibble;
-`uuid` is the one Thrift type the compact format cannot carry and is
-rejected at encode/decode time. Interop with the stock Apache runtime
-is covered in both directions: the golden suite runs the official
-compact client (`thrift_client_util:new(..., [{protocol, compact}])`)
-against our compact server on both transports, and the benchmark
-proves the official reader accepts our compact bytes struct by struct.
-
-### The JSON protocol
-
-`thrift_runtime_json` implements the Apache JSON wire format: a message is
-the array `[1,"name",type,seqid,payload]`, a struct is an object keyed
-by field id where every value is a one-key object naming the type
-(`{"1":{"i32":5}}`), a list or set is `["i32",2,1,2]`, and a map is an
-object with stringified keys (`["i32","i32",2,{"1":10}]`). Every
-`protocol` slot accepts the atom `json` exactly like the other built
-ins:
-
-```erlang
-{ok, Server} = ping_api_ping_server:start_link(#{
-    port => 9090, handler => ping_handler, protocol => json
-}),
-{ok, Client} = ping_api_ping_client:start_link(#{
-    host => "127.0.0.1", port => 9090, protocol => json, transport => buffered
-}),
-{ok, Bin} = ping_api_types:encode(ping_request, Req, #{protocol => json}),
-{ok, Req, <<>>} = thrift_runtime_json:decode(ping_api_types:struct_info(<<"PingRequest">>), Bin).
-```
-
-Two bends are documented on the module: the envelope's closing bracket
-is folded into the top-level struct decode (which keeps the buffered
-transport's completeness probe byte-exact), and map keys are limited to
-what a JSON object key can carry — booleans, numbers, strings, enums —
-while a struct-keyed map and `uuid` are refused by encode and decode
-alike. Interop with the stock Apache runtime is covered in both
-directions: the golden suite runs the official JSON client
-(`thrift_client_util:new(..., [{protocol, json}])`) against our JSON
-server on both transports, and the benchmark proves the official reader
-accepts our JSON messages struct by struct.
-
-## The HTTP transport
-
-`transport => http` turns every Thrift exchange into one HTTP/1.1
-request-response pair: the client POSTs the encoded message to
-`http_path` (default `"/"`), the server answers with the reply in the
-response body, and the connection stays open for the next call
-(keep-alive). The protocol axis is untouched — binary, compact and
-json all ride in the body:
-
-```erlang
-{ok, Server} = ping_api_ping_server:start_link(#{
-    port => 9090, handler => ping_handler, transport => http
-}),
-{ok, Client} = ping_api_ping_client:start_link(#{
-    host => "127.0.0.1", port => 9090, transport => http, http_path => <<"/thrift">>
-}),
-```
-
-HTTP is request/response even where Thrift is not: a oneway gets an
-(empty) response, and the client consumes it before the next call.
-`max_frame_size` bounds the body on both ends; an unparseable request
-is answered 400 (405 for a non-POST method) before the connection
-closes, and a well-formed request carrying a bad Thrift payload gets
-400 while the connection continues. Interop is covered in the golden
-suite: the official HTTP client (`thrift_http_transport` over `httpc`)
-runs the full ThriftTest battery against our HTTP server.
-
-## Pooling
-
-`thrift_runtime_client` is deliberately connection-per-process with no
-automatic reconnection: any failure fails the outstanding calls and
-stops the process, so a pool sees the death immediately and replaces
-the worker. The unlinked `thrift_runtime_client:start/1` (plus
-`service => ping_api_ping_server`) is the pool-worker entry; generated
-clients export the same unlinked `start/1` beside `start_link/1` with
-`service` already inserted:
-
-```erlang
-ClientOpts = #{host => "127.0.0.1", port => 9090, service => ping_api_ping_server},
-
-%% poolboy
-{ok, Pool} = poolboy:start_link(#{
-    worker_module => {thrift_runtime_client, start, [ClientOpts]},
-    size => 10, max_overflow => 5
-}),
-Reply = poolboy:transaction(Pool, fun(C) -> thrift_runtime_client:call(C, <<"poke">>, [], 5000) end).
-
-%% pooler
-%% in config: {[{pools, [[{name, ping}, {max_count, 10}, {init_count, 2},
-%%                        {start_mfa, {thrift_runtime_client, start, [ClientOpts]}}]]}]}
-Client = pooler:take_member(ping),
-try thrift_runtime_client:call(Client, <<"poke">>, [], 5000)
-after pooler:return_member(ping, Client, ok) end.
-```
-
-`stop/1` answers outstanding calls with `{error, closed}` instead of
-leaving them hanging. Sockets run in `{active, N}` delivery mode, so a
-dead peer is noticed even on an idle connection. Calls are serialized
-per connection; concurrent callers queue in order. Each worker also
-carries counters for pool health checks:
-`thrift_runtime_client:get_stats/1` answers `#{calls_ok, calls_failed}`
-(every `{error, _}` answer counts failed, a declared exception
-included) and `get_and_reset_stats/1` zeroes them.
-
-## Reconnecting client
-
-When the caller is not a pool but a long-lived consumer,
-`thrift_runtime_reconnecting_client` wraps the simple client with
-automatic reconnection and statistics. The wrapped client keeps its
-no-reconnect contract; the wrapper observes its death, retries with
-exponential backoff (`reconnect_min` → doubled → `reconnect_max`,
-defaults 500 ms / 30 s) and fails calls that arrive in between with
-`{error, disconnected}`. A server that is down does not fail the
-start — the wrapper keeps trying, like the reference Apache
-`thrift_reconnecting_client`:
-
-```erlang
-{ok, Client} = thrift_runtime_reconnecting_client:start_link(
-    #{host => "localhost", port => 9090, service => ping_api_ping_server,
-      reconnect_min => 500, reconnect_max => 30000}
-),
-ok = thrift_runtime_reconnecting_client:call(Client, <<"poke">>, [], 5000),
-
-%% the pool health-check surface
-#{connected := true, calls_ok := 3, calls_failed := 0,
-  connects := 1, connect_failures := 0} =
-    thrift_runtime_reconnecting_client:get_stats(Client),
-thrift_runtime_reconnecting_client:get_and_reset_stats(Client).
-```
-
-Server-reported exceptions are protocol replies: they come back
-unchanged and never reconnect. Every failed retry is logged at
-warning level (`domain => [thrift]`).
-
-## Observability
-
-Clients, reconnecting wrappers and servers accept `on_event`: an
-observability callback — `undefined` (the default), a fun of arity 1,
-or `{Module, Function, Args}` (the event is appended to `Args`, so the
-handler can carry its own context — a pool id, an ETS table). Dispatch
-is synchronous in the emitting process and crash-isolated: a handler
-exception is discarded and never reaches the caller, the client or the
-server. Handlers must still be fast — they run on the call path.
-
-```erlang
-%% a client: one event per caller-facing answer, a plain fun
-{ok, Client} = thrift_runtime_client:start_link(#{
-    host => "localhost", port => 9090, service => ping_api_ping_server,
-    on_event => fun(#{type := Type, function := Fun, duration_us := Us}) ->
-                        logger:info("thrift ~ts ~ts: ~p us", [Type, Fun, Us])
-                end}),
-
-%% a server: {M, F, Args} carries context, the event rides last
-%% (the call becomes my_metrics:record(<<"Ping">>, Event))
-{ok, Server} = thrift_runtime_server:start_link(#{
-    port => 9090, handler => ping_handler, service => ping_api_ping_server,
-    on_event => {my_metrics, record, [<<"Ping">>]}}).
-```
-
-The catalogue — one map per event, `type` first (the full contract
-lives in the `thrift_runtime_events` moduledoc):
-
-- **client** — exactly one event per caller-facing answer, so counting
-  them reproduces `get_stats/1`: `#{type => call_ok, function => Fun,
-  duration_us => N, oneway => boolean()}` (the span covers the queue
-  wait plus the wire round-trip — the same one the per-call timeout
-  arms over) and `#{type => call_error, function => Fun, reason => R,
-  duration_us => N, oneway => boolean()}`, where `reason` is exactly
-  what the caller receives (`closed`, a timeout, a protocol error, a
-  declared exception tuple, ...);
-- **reconnecting wrapper** — the connection axis only (call events
-  come from the wrapped client, which gets the same handler):
-  `#{type => connected}`, `#{type => connect_failed, reason => R,
-  retry_in_ms => N}`, `#{type => disconnected, reason => R,
-  retry_in_ms => N}`;
-- **server connection** — `#{type => connection_open, peer => Peer |
-  undefined}`, `#{type => connection_closed, reason => R}` and
-  `#{type => handler_error, function => Fun, reason => R}` — a handler
-  crash or an unsupported handler result; declared exceptions and
-  protocol errors are answers, not handler errors.
-
-The generated client and server take `on_event` unchanged — their
-`start_link/1` accepts the same options map as the runtime modules
-(the generated client also has the unlinked `start/1`).
-
-## Multiplexed services
-
-Several services can share one port. The server hosts them by name;
-clients opt in with `multiplex`, which prefixes every outgoing message
-name with `<<"Service:function">>` (the Apache multiplexed protocol
-convention — replies keep the plain function name, so nothing else
-changes):
-
-```erlang
-%% server: host two services on one port
-{ok, Server} = thrift_runtime_server:start_link(#{
-    port => 9090,
-    services => #{
-        <<"Widgets">> => #{handler => WidgetsHandler, service => shop_widgets_server},
-        <<"Users">>   => #{handler => UsersHandler,   service => shop_users_server}
-    }
-}),
-
-%% clients pick their service; function names stay plain
-{ok, Widgets} = thrift_runtime_client:start_link(
-    #{host => "localhost", port => 9090, service => shop_widgets_server, multiplex => <<"Widgets">>}),
-{ok, Users} = thrift_runtime_client:start_link(
-    #{host => "localhost", port => 9090, service => shop_users_server, multiplex => <<"Users">>}),
-```
-
-A generated server/client pair takes the same options — pass
-`services` to the generated server module or `multiplex` to the
-generated client, everything else is unchanged. The dispatch is strict
-in multiplexed mode: a name whose prefix is not a hosted service (or a
-plain name) is refused with the `UNKNOWN_METHOD` application
-exception, and the connection stays usable. A single-service server
-stays liberal: it answers plain names and keeps answering names that
-carry any `Service:` prefix, so a multiplexed client pointed at a
-non-multiplexed service still finds its functions. The golden suite
-covers the wire compatibility both ways: the official Apache
-multiplexed client (`thrift_client_util:new_multiplexed`) runs against
-our multiplexed server.
-
-## TLS
-
-Add `ssl_opts` to the server or the client and the connection becomes
-TLS; without it everything stays plain TCP. The same `ssl_opts` list
-is passed straight to `ssl:listen`/`ssl:connect`, so every standard
-option (`certs_keys`, `verify`, `cacerts`, ...) applies:
-
-```erlang
-%% server: present a certificate
-{ok, Server} = thrift_runtime_server:start_link(#{
-    port => 9090, handler => ping_handler, service => ping_api_ping_server,
-    ssl_opts => [{certs_keys, [#{certfile => "cert.pem", keyfile => "key.pem"}]}]
-}),
-
-%% client: verify the server
-{ok, Client} = thrift_runtime_client:start_link(#{
-    host => "localhost", port => 9090, service => ping_api_ping_server,
-    ssl_opts => [{verify, verify_peer}, {cacerts, CaDer},
-                 {server_name_indication, "localhost"}]
-})
-```
-
-The TLS handshake runs where the connection is established: on the
-server between the transport accept and the handover to the connection
-process (capped by the `timeout` option, so a silent peer cannot pin
-the acceptor), on the client inside `start_link` (its connect
-timeout). A failed handshake closes the connection: the client's
-`start_link` answers `{error, Reason}`, the server logs and keeps
-accepting. After the handshake nothing changes — framing, protocols,
-representations and the `{active, N}` I/O are transport-agnostic.
-Serve mutual TLS by adding client-certificate verification to the
-server's `ssl_opts` (`{verify, verify_peer}, {fail_if_no_peer_cert,
-true}`); the client presents `certs_keys` the same way.
-
-## Namespaces
-
-A `namespace erl` (or the `namespace *` fallback) does two things:
-
-- names the generated modules, as before (`namespace erl demo.widgets`
-  → `demo_widgets_types.erl`, `demo_widgets_types.hrl`). If two files in
-  one include graph claim the same namespace-derived module key, the
-  collision group uses atom-safe normalized file basenames instead
-  (`domain_config` → `domain_config_types` beside `domain_types`);
-  identifier prefixes still share the namespace. If normalized basenames
-  cannot make every key unique, loading fails with `duplicate_module`
-  rather than choosing an arbitrary file;
-- prefixes every generated identifier of the file — record tags, type
-  aliases, derived helper names (`demo_widgets_color_to_int`),
-  constant macros — so same-named structs of different files coexist
-  once both hrl files land in one compilation. The value is normalized:
-  lowercased, non-identifier runs collapsed to `_`, a leading digit
-  guarded (`_2fast`); a value that normalizes to nothing is a load
-  error. Wire names stay untouched: `struct_info(<<"Point">>)`,
-  `enum_info(<<"Color">>)` and enum member atoms are exactly as
-  declared, so the binary protocol contract does not move. Without an
-  `erl`/`*` namespace nothing is prefixed (other scopes such as
-  `namespace java` are not our naming concern).
-
-## Codegen annotations
-
-- `erl.struct_type = "map"` — emit the struct as a map (keys are
-  atoms by default; `erl.struct_type.map.key_type = "binary"` keeps
-  the wire's binary keys); the default is records;
-- `erl.struct_type = "native"` — EEP-79 native records on OTP 29+
-  (what the values look like is covered under
-  [Representations and protocols](#representations-and-protocols));
-- `erl.union_type = "sum"` — a union as a sum type of tuples
-  `{FieldAtom, Value}`: no record (the hrl carries only the type
-  alias), the wire shape stays the usual one field, and record- and
-  sum-union representations interoperate; a file-wide default rides
-  the `namespace erl` (or `namespace *`) header, an explicit
-  annotation on the union wins;
-- `erl.set = "sets" | "ordset"` — the in-process set implementation a
-  decoded set is built into: `sets` (the v2 `sets` module) or
-  `ordsets`; the default keeps the plain wire list — deliberately
-  unlike the official Erlang runtime, which decodes every set into
-  `sets:set()`: parity with Apache is on the wire, not in the
-  in-process term. The passthrough costs nothing and keeps hand-written
-  2-tuple descriptors intact, while `erl.set = "sets"` reproduces the
-  official representation where wanted. The annotation sits
-  after the whole `set<...>` type (on the field or the typedef —
-  inside the angle brackets it would annotate the element). The same
-  annotation on the `namespace erl` (or `namespace *`) header —
-  `namespace erl my.service (erl.set = "sets")` — sets the file-wide
-  default for every set in the document (the migration path from the
-  official runtime's `sets:set()` representation); an explicit
-  per-type annotation wins. Set-typed record defaults are wrapped in
-  the constructor call (`sets:from_list([...])`) in the generated
-  hrl and inline records. The wire
-  encoding is identical for all three; records in the generated hrl get
-  `sets:set(E)` / `ordsets:ordset(E)` types;
-- `erl.record_name = "Name"` on a struct or exception — the verbatim
-  record tag: the hrl record and `record_fields/1` key the struct by
-  `Name` as written instead of the snake-cased struct name. This is the
-  drop-in knob for codebases whose existing records
-  carry the IDL casing verbatim (the official Erlang generator spells
-  record tags exactly as the IDL does) — adopting this runtime over a
-  fork or over the official codegen then needs no value-transcoding
-  layer at the term level. Rejected on a sum union (a sum type has no
-  record to name) and on a native struct (native records mint their
-  own tag);
-- `erl.enum_case = "preserve" | "lower"` — the casing surfaced enum
-  member atoms use: the `enum_info/1` pairs, the enum's type alias, the
-  values constants and field defaults resolve to, and the generated
-  `<mod>_<enum>_to_int/from_int` helpers. `lower` lowercases the
-  declared member names (the official Erlang generator emits lowercase
-  enum atoms); `preserve` keeps them verbatim. Per-enum annotation, or
-  on the `namespace erl` (or `namespace *`) header as the file-wide
-  default; the `--enum-case` flag is the invocation default. Enum
-  members travel as `i32` on the wire regardless, so the casing never
-  moves a byte — only the atoms the code sees. Members of one enum that
-  collide under the chosen casing (`X` and `x` under `lower`) fail
-  generation with an explicit error: `to_int` could not tell them
-  apart; members of different enums may share an atom freely.
-- `erl.type = "nominal"` on a typedef — `-nominal` instead of an alias;
-- `erl.*` annotations are filtered out at parse time, all others are
-  preserved.
-
-Introspection in the spirit of the official generator: `struct_info/1`,
-`enum_info/1`, `function_info/2`, `service_info/0` and `record_fields/1`
-in `<mod>_types.erl` (`record_fields/1` is exported for the runtime's
-representation dispatch and classified internal; the schema facade
-`encode/decode/convert/descriptor` is the documented entry point).
-
-Record-mode structs also generate a companion `<mod>_types_repr.erl`
-with direct representation converters `repr_to_wire_<name>/1` /
-`repr_from_wire_<name>/2` (literal field atoms, no descriptor walk)
-registered in its `repr_index/1`; `thrift_runtime_record` dispatches
-through it for tuple-record `to_wire` and `from_wire`. Map-shaped
-`to_wire` keeps the descriptor's faster `maps:from_list` path. The
-converters live outside the types module on purpose — generated-code
-layout is a measured performance variable. Sum unions, map-mode and
-native-mode structs get no converters and keep the descriptor engine.
-
-## Performance
-
-The codec hot path is benchmarked against the vendored official Apache
-Thrift 0.25.0 Erlang runtime with `scripts/bench` (erlperf, continuous
-mode, average of three 500 ms samples ± sample stddev, single process;
-knobs via `BENCH_WARMUP`, `BENCH_SAMPLES`, `BENCH_SAMPLE_MS`). The
-benchmark is a hand-run script, not a test suite. Reference numbers
-include a fresh membuffer transport and protocol per operation, which
-its API requires; both sides run on the same ThriftTest payloads.
-
-`scripts/bench-regression` compares the current checkout with a real git ref
-(`v0.8.0` by default, override with `BENCH_REGRESSION_REF`). It generates both
-versions, checks byte equality and round-trips, then alternates paired
-measurements in one VM. Both sides use the same function atoms in distinct
-modules. Same-module and cross-module direct rows isolate emitted code and form
-the regression gate. Public rows expose dispatch costs for diagnosis and remain
-`gate=false` because their top-level module/cache keys differ. Direct targets
-are external funs created before timing, not dynamic module lookups per
-iteration.
-Each row reports the median current/baseline throughput ratio and a bootstrap
-95% interval. A gated row passes only when both its median and the interval's
-lower bound meet 0.99; confirmed regressions and inconclusive rows both make
-the script fail. Use `THRIFT_BENCH_ROUNDS`, `THRIFT_BENCH_SAMPLE_MS`, `THRIFT_BENCH_THRESHOLD`,
-`THRIFT_BENCH_PROTOCOL`, and `THRIFT_BENCH_ENTRY` to control the run. The
-defaults are 31 rounds and 250 ms per side; shorter runs are for smoke checks,
-not a 1% gate. An interval that crosses the configured threshold is
-inconclusive: increase the sample count or duration before claiming parity at
-that precision.
-
-`scripts/bench-rpc` measures the RPC path end to end: a generated
-`ThriftTest` server and client on a 127.0.0.1 loopback (framed transport,
-binary protocol), historical ref against the current checkout, paired
-rounds with the same 0.99 gate. `THRIFT_BENCH_FUNCTION` selects one
-function. It is the acceptance check for RPC-path optimizations, which
-codec-level numbers alone cannot prove.
-
-Binary-protocol calls through the `thrift_runtime` facade take a
-one-pass path when the target module was generated with repr-native
-codecs (the default): `encode/2,3` reads a tuple-with-tag record, an
-atom- or binary-keyed map (or a native record, OTP 29+) straight to
-wire bytes, and `decode/3` builds the requested representation
-directly, with no intermediate wire map. Any value the fast path cannot
-represent — mixed nesting, malformed shapes — retries the two-pass
-path and answers identically, byte for byte and error for error; a
-PropEr property pins that parity on well-formed, corrupted and
-mixed inputs across all four representations.
-
-Our codec compiles type descriptors once — referenced structs in a shared
-`persistent_term` cache, inline descriptors in a per-process memo — so
-nested schemas are never re-resolved per wire occurrence. The emitter
-also writes specialized per-struct wire codecs into `<mod>_types.erl`
-for all three protocols — `encode_<X>_wire`/`decode_<X>_wire`,
-`encode_<X>_compact`/`decode_<X>_compact` and
-`encode_<X>_json`/`decode_<X>_json`, each behind its `binary_codec/1`,
-`compact_codec/1` or `json_codec/1` index — and named struct references
-dispatch straight into them, with no descriptor interpretation on the
-hot path. RPC parameters and results get the same treatment: every
-generated function carries per-protocol `codecs` hooks in its
-`function_info`, so calls skip the descriptor engine even though params
-and results are synthetic inline structs. The generic engine remains for
-hand-written descriptors, custom protocol modules and as the equivalence
-reference the PropEr suite pins the specialized codecs to.
-
-| case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
-|------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (42 B)     | encode | 2.48 M/s | 466 K/s | 5.3x |
-| Xtruct            | decode | 1.35 M/s | 227 K/s | 5.9x |
-| Xtruct2 (51 B)    | encode | 1.53 M/s | 332 K/s | 4.6x |
-| Xtruct2           | decode | 815 K/s  | 122 K/s | 6.7x |
-| Insanity (3.2 KB) | encode | 38.6 K/s | 4.6 K/s | 8.3x |
-| Insanity          | decode | 16.2 K/s | 2.6 K/s | 6.2x |
-
-The **compact protocol** runs the same payload set on both sides —
-`thrift_runtime_compact` against the vendored `thrift_compact_protocol`
-(28 B / 24 B / 1.2 KB on the wire, roughly half the binary encoding):
-
-| case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
-|------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (28 B)      | encode | 1.54 M/s | 263 K/s | 5.9x |
-| Xtruct             | decode | 1.11 M/s | 218 K/s | 5.1x |
-| Xtruct2 (24 B)     | encode | 1.01 M/s | 209 K/s | 4.8x |
-| Xtruct2            | decode | 664 K/s  | 132 K/s | 5.0x |
-| Insanity (1.2 KB)  | encode | 12.6 K/s | 4.9 K/s | 2.6x |
-| Insanity           | decode | 13.2 K/s | 2.4 K/s | 5.4x |
-
-The **JSON protocol** runs the same payload set on both sides —
-`thrift_runtime_json` against the vendored `thrift_json_protocol`
-(87 B / 110 B / 6.7 KB on the wire; decode is measured at message
-level, since the official JSON reader primes on a whole message):
-
-| case | operation | thrift_runtime | Apache Thrift 0.25.0 | speedup |
-|------|-----------|-----------:|---------------------:|--------:|
-| Xtruct (87 B)      | encode | 1.14 M/s | 113 K/s | 10.1x |
-| Xtruct             | decode | 103 K/s  | 67 K/s  | 1.5x |
-| Xtruct2 (110 B)    | encode | 1.01 M/s | 60 K/s  | 16.8x |
-| Xtruct2            | decode | 51 K/s   | 46 K/s  | 1.1x |
-| Insanity (6.7 KB)  | encode | 15.3 K/s | 1.2 K/s | 12.9x |
-| Insanity           | decode | 1.2 K/s  | 1.1 K/s | 1.1x |
-
-JSON encode is several times faster because the official side formats
-every token through `io_lib`; on decode both sides scan the same text,
-so the numbers sit ahead of parity (1.1–1.5× on these payloads).
-
-The numbers above were measured on OTP 29; an OTP 28 run confirms the
-same ratios. The same benchmark also reports a `facade (record repr) vs
-reference` block for the binary protocol — the application-facing
-`thrift_runtime:encode/2`/`decode/3` path over the record
-representation, which engages the repr-native one-pass codecs — where
-the decode rows run 7.9–11.5× the official runtime and the encode rows
-3.1–7.0×. The specialized codecs also hold their own against the
-generic interpreter inside this
-runtime — the same benchmark reports specialized vs generic ratios of
-0.9–1.5× across the protocol/struct matrix (same-module and
-cross-module references call generated codecs directly; public ref
-entries read the dispatch cache without a module hop).
-
-Only the speedup ratios on the same machine are meaningful; run
-`./scripts/bench` to get numbers for your hardware.
+clients, servers and codecs. Unions can be sum types (`erl.union_type
+= "sum"`), sets can decode into `sets`/`ordsets` (`erl.set`), typedefs
+can be `-nominal` (`erl.type`) and enum member atoms can be lowercased
+(`erl.enum_case`); the full annotation set, precedence rules and
+namespaces live in the
+[Generator reference](docs/generator.md#codegen-annotations).
+
+## References
+
+- [Generator reference](docs/generator.md) — library/CLI/plugin
+  commands, generation axes and precedence, namespaces, annotations,
+  naming, check/clean.
+- [Advanced codecs](docs/advanced-codecs.md) — descriptors, the
+  advanced runtime facade, representations in depth, streaming,
+  custom protocols, introspection, internal codec boundaries.
+- [RPC and operations](docs/rpc.md) — client/server/reconnecting
+  options and errors, lifecycle and drain, transports and HTTP,
+  pooling, observability, multiplexing, TLS.
+- [Performance](docs/performance.md) — benchmark method, existing
+  measurements, regression commands.
+- [Public API migration](docs/public-api-migration.md) — every old
+  call shape mapped to its replacement.
 
 ## License
 

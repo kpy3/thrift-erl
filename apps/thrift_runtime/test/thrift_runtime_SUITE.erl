@@ -48,6 +48,8 @@
     drain_waits_for_inflight_call/1,
     drain_deadline_expires/1,
     drain_closes_listener_and_idle_connections/1,
+    invalid_server_options_do_not_listen/1,
+    invalid_stop_options_leave_server_running/1,
     handshake_timeout_reaches_acceptor/1,
     client_stats/1,
     client_stats_queue_full/1,
@@ -81,6 +83,8 @@ all() ->
         drain_waits_for_inflight_call,
         drain_deadline_expires,
         drain_closes_listener_and_idle_connections,
+        invalid_server_options_do_not_listen,
+        invalid_stop_options_leave_server_running,
         handshake_timeout_reaches_acceptor,
         client_stats,
         client_stats_queue_full,
@@ -609,6 +613,58 @@ drain_closes_listener_and_idle_connections(_Config) ->
         end
     end.
 
+%% An invalid option must fail the start before anything binds: against a
+%% released free port, the strict error answers and the port stays free
+%% to bind — a leftover listener would refuse the probe. A malformed
+%% nested `services' entry gets the same no-listen proof.
+
+invalid_server_options_do_not_listen(_Config) ->
+    Port = free_port(),
+    ?assertEqual(
+        {error, {bad_option, {active_n, 0, [pos_integer]}}},
+        thrift_runtime_server:start_link(#{
+            port => Port,
+            handler => ?HANDLER,
+            service => ?SERVICE,
+            active_n => 0,
+            name => invalid_server_options_server
+        })
+    ),
+    assert_no_listener_on(Port),
+    ServicesPort = free_port(),
+    BadServices = #{<<"alpha">> => #{handler => ?HANDLER}},
+    ?assertEqual(
+        {error, {bad_option, {services, BadServices, [service_map]}}},
+        thrift_runtime_server:start_link(#{port => ServicesPort, services => BadServices})
+    ),
+    assert_no_listener_on(ServicesPort),
+    ok.
+
+%% Invalid `stop/2' options answer the strict error and change nothing:
+%% the server stays up and the same connection still answers a call.
+%% Only a valid stop brings it down.
+
+invalid_stop_options_leave_server_running(_Config) ->
+    {ok, Server} = thrift_runtime_server:start_link(#{port => 0, handler => ?HANDLER, service => ?SERVICE}),
+    try
+        {ok, Port} = thrift_runtime_server:port(Server),
+        {ok, Client} = thrift_runtime_client:start_link(#{host => "127.0.0.1", port => Port, service => ?SERVICE}),
+        try
+            ?assertEqual({error, {unknown_option, drian}}, thrift_runtime_server:stop(Server, #{drian => 1000})),
+            ?assertEqual(
+                {error, {bad_option, {drain, -1, [non_neg_integer, infinity]}}},
+                thrift_runtime_server:stop(Server, #{drain => -1})
+            ),
+            ?assertEqual({error, {bad_option, {options, nope, [map]}}}, thrift_runtime_server:stop(Server, nope)),
+            ?assert(is_process_alive(Server)),
+            ?assertEqual({ok, 5}, call(Client, <<"add">>, [2, 3]))
+        after
+            thrift_runtime_client:stop(Client)
+        end
+    after
+        ok = thrift_runtime_server:stop(Server)
+    end.
+
 %% The acceptor stores only whitelisted connection options, and the
 %% accept loop resolves `handshake_timeout' from that stored map: a key
 %% missing from the whitelist would silently fall back to the 5000 ms
@@ -624,11 +680,22 @@ handshake_timeout_reaches_acceptor(_Config) ->
             lists:keyfind(acceptor, 1, supervisor:which_children(Server)),
         %% element 3 of the module-private acceptor state: connection_opts
         ConnectionOpts = element(3, sys:get_state(Acceptor)),
-        ?assertEqual(250, maps:get(handshake_timeout, ConnectionOpts)),
-        %% what handle_info(accept) resolves the handshake slice from
-        ?assertEqual(250, thrift_runtime_options:handshake_timeout(ConnectionOpts))
+        %% the stored map carries the caller's value — a key missing from
+        %% the connection whitelist would silently drop it to the default
+        ?assertEqual(250, maps:get(handshake_timeout, ConnectionOpts))
     after
         thrift_runtime_server:stop(Server)
+    end,
+    %% the umbrella reaches the same place: no specific key, the
+    %% `timeout' value is applied at normalization
+    {ok, Umbrella} =
+        thrift_runtime_server:start_link(#{port => 0, handler => ?HANDLER, service => ?SERVICE, timeout => 700}),
+    try
+        {_, UmbrellaAcceptor, worker, [thrift_runtime_acceptor]} =
+            lists:keyfind(acceptor, 1, supervisor:which_children(Umbrella)),
+        ?assertEqual(700, maps:get(handshake_timeout, element(3, sys:get_state(UmbrellaAcceptor))))
+    after
+        thrift_runtime_server:stop(Umbrella)
     end.
 
 %% Per-connection counters: every caller-facing answer is counted by
@@ -786,6 +853,25 @@ protocol_calls(Overrides) ->
 call(Client, Function, Args) ->
     thrift_runtime_client:call(Client, Function, Args, 5000).
 
+%% Allocates and releases an ephemeral port: the failed-start probes
+%% below bind a concrete port that nothing else holds.
+
+-spec free_port() -> inet:port_number().
+free_port() ->
+    {ok, Listen} = gen_tcp:listen(0, []),
+    {ok, Port} = inet:port(Listen),
+    ok = gen_tcp:close(Listen),
+    Port.
+
+%% Proves the failed start kept no listener: a leftover LISTEN socket on
+%% `Port' would refuse the probe listen.
+
+-spec assert_no_listener_on(inet:port_number()) -> ok.
+assert_no_listener_on(Port) ->
+    {ok, Probe} = gen_tcp:listen(Port, []),
+    ok = gen_tcp:close(Probe),
+    ok.
+
 -spec with_server(map(), fun((pid()) -> term())) -> term().
 with_server(Overrides, Test) ->
     Base = #{
@@ -797,7 +883,9 @@ with_server(Overrides, Test) ->
     {ok, Server} = thrift_runtime_server:start_link(ServerOpts),
     try
         {ok, Port} = thrift_runtime_server:port(Server),
-        ClientOpts = maps:merge(Base#{host => "127.0.0.1", port => Port}, Overrides),
+        %% the client map is strict now: the server's `handler' key stays
+        %% server-side
+        ClientOpts = maps:remove(handler, maps:merge(Base#{host => "127.0.0.1", port => Port}, Overrides)),
         {ok, Client} = thrift_runtime_client:start_link(ClientOpts),
         try
             Test(Client)

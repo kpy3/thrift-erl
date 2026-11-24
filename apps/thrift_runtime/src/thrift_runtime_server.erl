@@ -54,17 +54,27 @@ Multiplexed (several services on one port, clients opt in with the
 -doc """
 Starts the server supervision tree.
 
-A failed init answers `{error, Reason}` only: the trapping around the
-start shields the caller from the failed supervisor's exit race, the
-same dance `thrift_runtime_client` does.
+The options are validated and normalized before anything starts: an
+invalid map answers `{error, Reason}' — the strict option vocabulary of
+`thrift_runtime_options:server_options/1', e.g. `{unknown_option, Key}'
+or the protocol axis' own `{bad_protocol, Value}' — without registering
+the supervisor or binding a port. A failed init answers `{error,
+Reason}' only: the trapping around the start shields the caller from
+the failed supervisor's exit race, the same dance
+`thrift_runtime_client` does.
 """.
 -spec start_link(options()) -> {ok, pid()} | ignore | {error, term()}.
 start_link(Opts) ->
-    Name = maps:get(name, Opts, ?MODULE),
-    process_flag(trap_exit, true),
-    Result = supervisor:start_link({local, Name}, ?MODULE, Opts),
-    process_flag(trap_exit, false),
-    Result.
+    case thrift_runtime_options:server_options(Opts) of
+        {ok, Normalized} ->
+            Name = maps:get(name, Normalized),
+            process_flag(trap_exit, true),
+            Result = supervisor:start_link({local, Name}, ?MODULE, maps:remove(name, Normalized)),
+            process_flag(trap_exit, false),
+            Result;
+        {error, _} = Error ->
+            Error
+    end.
 
 %% gen_server:stop, not supervisor:stop/1: the supervisor IS a
 %% gen_server, this is literally what supervisor:stop/1 does — but that
@@ -80,6 +90,12 @@ stop(Server) ->
 -doc """
 Stops the server, optionally draining first.
 
+The options normalize through `thrift_runtime_options:stop_options/1`:
+an invalid map answers `{error, Reason}' — an unknown key
+`{unknown_option, Key}', a bad drain value `{bad_option, {drain, Value,
+[non_neg_integer, infinity]}}', a non-map argument `{bad_option,
+{options, Value, [map]}}' — and the server keeps running untouched.
+
 With `#{drain := Timeout}` the acceptor closes the listen socket, lets
 in-flight calls finish (up to `Timeout`; `infinity` allowed) and lets
 pending accepts unwind, then the supervision tree is stopped as by
@@ -87,13 +103,18 @@ pending accepts unwind, then the supervision tree is stopped as by
 supervised way, so a connection stuck past the deadline fails its
 calls. Without the key this is plain `stop/1`.
 """.
--spec stop(pid() | atom(), #{drain => timeout()}) -> ok.
-stop(Server, #{drain := Timeout}) ->
-    Acceptor = whereis_acceptor(Server),
-    ok = thrift_runtime_acceptor:drain(Acceptor, Timeout),
-    stop(Server);
-stop(Server, _Opts) ->
-    stop(Server).
+-spec stop(pid() | atom(), map()) -> ok | {error, term()}.
+stop(Server, Opts) ->
+    case thrift_runtime_options:stop_options(Opts) of
+        {ok, #{drain := Timeout}} ->
+            Acceptor = whereis_acceptor(Server),
+            ok = thrift_runtime_acceptor:drain(Acceptor, Timeout),
+            stop(Server);
+        {ok, #{}} ->
+            stop(Server);
+        {error, _} = Error ->
+            Error
+    end.
 
 -doc "Returns the bound port (useful with `port = 0`).".
 -spec port(pid() | atom()) -> {ok, inet:port_number()}.
@@ -104,10 +125,13 @@ port(Server) ->
 -doc false.
 -spec init(options()) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init(Opts) ->
+    %% The argument is the normalized map `start_link/1' produced, with
+    %% `name' removed: the acceptor re-validates idempotently and the
+    %% child spec needs no server-only keys.
     Children = [
         #{
             id => acceptor,
-            start => {thrift_runtime_acceptor, start_link, [maps:remove(name, Opts)]},
+            start => {thrift_runtime_acceptor, start_link, [Opts]},
             restart => permanent,
             shutdown => 5000,
             type => worker

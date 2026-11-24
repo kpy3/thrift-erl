@@ -93,19 +93,21 @@ explode() ->
 %% Option validation
 
 on_event_option_validation_test() ->
-    ?assertEqual({ok, undefined}, thrift_runtime_options:on_event(#{})),
-    ?assertEqual({ok, undefined}, thrift_runtime_options:on_event(#{on_event => undefined})),
+    Base = #{port => 0, handler => some_handler, service => some_service},
+    ?assertMatch({ok, _}, thrift_runtime_options:server_options(Base)),
+    ?assertMatch({ok, _}, thrift_runtime_options:server_options(Base#{on_event => undefined})),
     Fun = fun(_) -> ok end,
-    ?assertEqual({ok, Fun}, thrift_runtime_options:on_event(#{on_event => Fun})),
-    ?assertEqual(
-        {ok, {?MODULE, collect, [self()]}},
-        thrift_runtime_options:on_event(#{on_event => {?MODULE, collect, [self()]}})
+    ?assertMatch({ok, _}, thrift_runtime_options:server_options(Base#{on_event => Fun})),
+    ?assertMatch(
+        {ok, _},
+        thrift_runtime_options:server_options(Base#{on_event => {?MODULE, collect, [self()]}})
     ),
     Bad = [1, <<"x">>, fun erlang:phash2/2, {?MODULE, collect}, {?MODULE, collect, self()}],
     lists:foreach(
         fun(Value) ->
             ?assertEqual(
-                {error, {on_event, Value}}, thrift_runtime_options:on_event(#{on_event => Value})
+                {error, {bad_option, {on_event, Value, [undefined, 'fun', mfa]}}},
+                thrift_runtime_options:server_options(Base#{on_event => Value})
             )
         end,
         Bad
@@ -115,19 +117,28 @@ bad_option_fails_the_start_test() ->
     %% the intentionally failed starts below crash-report otherwise
     quiet(),
     Port = free_port(),
+    %% the starts validate the options map before anything starts: a
+    %% malformed handler answers the strict normalizer error, not the
+    %% wire
     ?assertEqual(
-        {error, {on_event, 42}},
+        {error, {bad_option, {on_event, 42, [undefined, 'fun', mfa]}}},
         thrift_runtime_client:start_link(opts(Port, #{on_event => 42}))
     ),
     ?assertEqual(
-        {error, {on_event, 42}},
+        {error, {bad_option, {on_event, 42, [undefined, 'fun', mfa]}}},
         thrift_runtime_reconnecting_client:start_link(opts(Port, #{on_event => 42}))
     ),
-    %% the acceptor validates before it starts accepting; the ephemeral
-    %% listen socket it opened for the attempt is closed again
+    %% the server validates before it registers or binds; nothing is
+    %% started and no listen socket is opened for the attempt
     ?assertEqual(
-        {error, {shutdown, {failed_to_start_child, acceptor, {on_event, 42}}}},
-        thrift_runtime_server:start_link(#{name => thrift_runtime_events_bad_server, port => 0, on_event => 42})
+        {error, {bad_option, {on_event, 42, [undefined, 'fun', mfa]}}},
+        thrift_runtime_server:start_link(#{
+            name => thrift_runtime_events_bad_server,
+            port => 0,
+            handler => some_handler,
+            service => some_service,
+            on_event => 42
+        })
     ).
 
 %%--------------------------------------------------------------------
@@ -191,20 +202,42 @@ client_call_events_test() ->
 client_queue_full_event_test() ->
     quiet(),
     Port = free_port(),
+    gate_on(),
     Server = server_on(Port, undefined),
     Events = collector(self()),
-    %% A zero-depth queue rejects every call before it is queued.
+    %% A depth-1 queue holds one waiter behind the gated `slow' head
+    %% call; the call after that answers queue_full before it queues.
     {ok, Client} =
-        thrift_runtime_client:start_link(opts(Port, #{on_event => Events, max_queue_depth => 0})),
+        thrift_runtime_client:start_link(opts(Port, #{on_event => Events, max_queue_depth => 1})),
     try
-        ?assertEqual({error, queue_full}, thrift_runtime_client:call(Client, <<"add">>, [2, 3], 5000)),
+        Self = self(),
+        spawn(fun() -> Self ! {head, thrift_runtime_client:call(Client, <<"slow">>, [], 5000)} end),
+        wait_gate_entered(),
+        spawn(fun() -> Self ! {queued, thrift_runtime_client:call(Client, <<"add">>, [2, 3], 5000)} end),
+        timer:sleep(200),
+        ?assertEqual({error, queue_full}, thrift_runtime_client:call(Client, <<"add">>, [4, 5], 5000)),
         ?assertMatch(
             [#{type := call_error, function := <<"add">>, reason := queue_full}], take_events(1)
         ),
-        ?assertMatch(#{calls_failed := 1}, thrift_runtime_client:get_stats(Client))
+        ?assertMatch(#{calls_failed := 1}, thrift_runtime_client:get_stats(Client)),
+        %% open the gate: the head and the queued call complete on the
+        %% same connection, and their events drain before the test ends
+        ets:insert(thrift_runtime_drain_gate, {go, true}),
+        ?assertEqual({ok, <<"done">>}, recv(head)),
+        ?assertEqual({ok, 5}, recv(queued)),
+        ?assertMatch(
+            [
+                #{type := call_ok, function := <<"slow">>},
+                #{type := call_ok, function := <<"add">>}
+            ],
+            take_events(2)
+        ),
+        ?assertMatch(#{calls_ok := 2, calls_failed := 1}, thrift_runtime_client:get_stats(Client))
     after
+        ets:insert(thrift_runtime_drain_gate, {go, true}),
         thrift_runtime_client:stop(Client),
-        ok = thrift_runtime_server:stop(Server)
+        ok = thrift_runtime_server:stop(Server),
+        gate_off()
     end.
 
 %% The connection drops under an in-flight call: the pending call and
@@ -469,6 +502,48 @@ free_port() ->
     {ok, Port} = inet:port(Listen),
     gen_tcp:close(Listen),
     Port.
+
+%% The ETS gate the `slow' handler polls (see `thrift_runtime_SUITE'):
+%% `{go, false}' until the case opens it, plus an `entered' counter the
+%% case waits on to know the handler is inside the call.
+
+-spec gate_on() -> ok.
+gate_on() ->
+    _ = ets:new(thrift_runtime_drain_gate, [named_table, public, set]),
+    ets:insert(thrift_runtime_drain_gate, {go, false}),
+    ok.
+
+-spec gate_off() -> ok.
+gate_off() ->
+    ets:delete(thrift_runtime_drain_gate),
+    ok.
+
+-spec wait_gate_entered() -> ok.
+wait_gate_entered() ->
+    wait_gate_entered(500).
+
+-spec wait_gate_entered(non_neg_integer()) -> ok.
+wait_gate_entered(0) ->
+    erlang:error(handler_did_not_enter);
+wait_gate_entered(Tries) ->
+    case ets:lookup(thrift_runtime_drain_gate, entered) of
+        [{entered, N}] when N >= 1 ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            wait_gate_entered(Tries - 1)
+    end.
+
+%% Waits for a tagged answer from a spawned caller.
+
+-spec recv(atom()) -> term().
+recv(Tag) ->
+    receive
+        {Tag, Result} ->
+            Result
+    after 5000 ->
+        erlang:error({no_result, Tag})
+    end.
 
 -spec wait_stats(pid(), fun((thrift_runtime_reconnecting_client:stats()) -> boolean())) -> ok.
 wait_stats(Wrapper, Pred) ->

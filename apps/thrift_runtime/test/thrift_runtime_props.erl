@@ -328,7 +328,7 @@ encode(thrift_runtime_binary, T, V) -> thrift_runtime_binary:encode(T, V);
 encode(thrift_runtime_compact, T, V) -> thrift_runtime_compact:encode(T, V);
 encode(thrift_runtime_json, T, V) -> thrift_runtime_json:encode(T, V).
 
--spec decode(proto(), term(), binary()) -> thrift_runtime_binary:decode_result(term()).
+-spec decode(proto(), term(), binary()) -> thrift_runtime_protocol:decode_result(term()).
 decode(thrift_runtime_binary, T, Bin) -> thrift_runtime_binary:decode(T, Bin);
 decode(thrift_runtime_compact, T, Bin) -> thrift_runtime_compact:decode(T, Bin);
 decode(thrift_runtime_json, T, Bin) -> thrift_runtime_json:decode(T, Bin).
@@ -412,7 +412,7 @@ check(Prop) ->
             ?assertEqual(true, Failed)
     end.
 
--spec message_type_atom(1 | 2 | 3 | 4) -> thrift_runtime_binary:message_type().
+-spec message_type_atom(1 | 2 | 3 | 4) -> thrift_runtime_protocol:message_type().
 message_type_atom(1) -> call;
 message_type_atom(2) -> reply;
 message_type_atom(3) -> exception;
@@ -423,7 +423,7 @@ message_type_atom(4) -> oneway.
 %%--------------------------------------------------------------------
 
 -doc false.
--spec struct_info(binary()) -> {struct, [thrift_runtime_binary:field_desc()]} | error.
+-spec struct_info(binary()) -> {struct, [thrift_runtime_protocol:field_desc()]} | error.
 struct_info(<<"pt">>) ->
     {struct, [
         {1, required, {base, i32}, <<"x">>, undefined},
